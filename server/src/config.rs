@@ -1,0 +1,71 @@
+//! Command-line / environment configuration.
+
+use clap::Parser;
+use std::net::IpAddr;
+
+/// Runtime configuration for the SDR C2 server.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "sdr-c2-server", version, about = "SDR command & control + streaming server")]
+pub struct Config {
+    /// Address for the REST/HTTP (C2) listener to bind.
+    #[arg(long, env = "SDRC2_BIND", default_value = "0.0.0.0")]
+    pub bind: IpAddr,
+
+    /// C2 (REST) port. 0 picks a random free port.
+    #[arg(long, env = "SDRC2_C2_PORT", default_value_t = 0)]
+    pub c2_port: u16,
+
+    /// Audio-out (WebRTC media) port. 0 picks a random free port.
+    #[arg(long, env = "SDRC2_AUDIO_OUT_PORT", default_value_t = 0)]
+    pub audio_out_port: u16,
+
+    /// Audio-in (reserved, phase 2) port. 0 picks a random free port.
+    #[arg(long, env = "SDRC2_AUDIO_IN_PORT", default_value_t = 0)]
+    pub audio_in_port: u16,
+
+    /// UDP port for the discovery beacon.
+    #[arg(long, env = "SDRC2_BEACON_PORT", default_value_t = 50055)]
+    pub beacon_port: u16,
+
+    /// Disable the discovery beacon entirely.
+    #[arg(long, env = "SDRC2_NO_BEACON", default_value_t = false)]
+    pub no_beacon: bool,
+
+    /// Beacon interval in milliseconds.
+    #[arg(long, env = "SDRC2_BEACON_INTERVAL_MS", default_value_t = 1000)]
+    pub beacon_interval_ms: u64,
+
+    /// Host/IP to advertise to clients. Defaults to the autodetected primary
+    /// LAN IPv4 address.
+    #[arg(long, env = "SDRC2_ADVERTISE_HOST")]
+    pub advertise_host: Option<IpAddr>,
+
+    /// SoapySDR device filter to select at startup, e.g. `driver=hackrf`.
+    /// When unset the first enumerated device is selected.
+    #[arg(long, env = "SDRC2_DEVICE")]
+    pub device: Option<String>,
+
+    /// Start in debug-tone mode (440 Hz A4, no SDR required).
+    #[arg(long, env = "SDRC2_DEBUG_TONE", default_value_t = false)]
+    pub debug_tone: bool,
+
+    /// Maximum number of concurrent sessions.
+    #[arg(long, env = "SDRC2_MAX_SESSIONS", default_value_t = 8)]
+    pub max_sessions: usize,
+
+    /// Session heartbeat interval in seconds. The session TTL is 3x this.
+    #[arg(long, env = "SDRC2_HEARTBEAT_S", default_value_t = 15)]
+    pub heartbeat_s: u64,
+
+    /// Comma-separated CORS allow-list for non-GET methods. `*` allows any
+    /// origin (fine on a trusted LAN, the default for now).
+    #[arg(long, env = "SDRC2_CORS_ORIGINS", default_value = "*")]
+    pub cors_origins: String,
+}
+
+impl Config {
+    /// Session time-to-live derived from the heartbeat interval.
+    pub fn session_ttl_s(&self) -> u64 {
+        self.heartbeat_s.saturating_mul(3)
+    }
+}

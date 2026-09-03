@@ -27,8 +27,20 @@ fi
 # pkg-config: let soapysdr-sys discover SoapySDR 0.8.
 export PKG_CONFIG_PATH="$RADIOCONDA_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-# Runtime: resolve libSoapySDR.so.0.8 and its device modules.
-export LD_LIBRARY_PATH="$RADIOCONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+# Bake an rpath to radioconda's libs into the binary instead of exporting
+# LD_LIBRARY_PATH -- exporting it globally makes unrelated tools (curl, ...)
+# pick up radioconda's libcurl/libssl and break. This does force a rebuild the
+# first time it changes.
+_RPATH_FLAG="-C link-arg=-Wl,-rpath,$RADIOCONDA_PREFIX/lib"
+case "${RUSTFLAGS:-}" in
+    *"$_RPATH_FLAG"*) : ;;
+    "") export RUSTFLAGS="$_RPATH_FLAG" ;;
+    *) export RUSTFLAGS="$RUSTFLAGS $_RPATH_FLAG" ;;
+esac
+unset _RPATH_FLAG
+
+# Runtime: where SoapySDR looks for its device modules (hackrf, plutosdr, ...).
+# Harmless to the rest of the shell; safe to also set this permanently.
 export SOAPY_SDR_PLUGIN_PATH="$RADIOCONDA_PREFIX/lib/SoapySDR/modules0.8"
 
 # bindgen (soapysdr-sys) needs a libclang. Prefer an explicit override, then a

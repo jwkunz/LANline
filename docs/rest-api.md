@@ -283,7 +283,7 @@ Named radio configurations. Phase 1 ships read-only built-ins.
     "config": {
       "mode": "nbfm",
       "frequency_hz": 162550000,
-      "tuner": { "sample_rate_hz": 2400000, "gain_elements_db": { "AMP": 0, "LNA": 32, "VGA": 30 } },
+      "tuner": { "sample_rate_hz": 2000000, "gain_elements_db": { "AMP": 0, "LNA": 32, "VGA": 30 } },
       "mode_params": { "deviation_hz": 5000, "channel_bw_hz": 16000, "deemphasis_us": 75, "audio_lpf_hz": 3400, "squelch_db": -80 }
     }
   }
@@ -315,7 +315,7 @@ mode + mode params + audio encoder.
     "device_id": "hackrf/0000000000000000457863c8...",
     "channel": 0,
     "antenna": "TX/RX",
-    "sample_rate_hz": 2400000,
+    "sample_rate_hz": 2000000,
     "bandwidth_hz": null,
     "lo_offset_hz": 0,
     "gain_mode": "manual",

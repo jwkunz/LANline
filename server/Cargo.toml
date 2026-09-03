@@ -1,0 +1,36 @@
+[package]
+name = "sdr-c2-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+default-run = "sdr-c2-server"
+
+[[bin]]
+name = "sdr-c2-server"
+path = "src/main.rs"
+
+[features]
+default = ["soapy"]
+# `soapy` links libSoapySDR (via radioconda). Build with
+# `--no-default-features` on a box without it: device enumeration is stubbed
+# and only `debug_tone` works.
+soapy = ["dep:soapysdr"]
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+if-addrs.workspace = true
+rand.workspace = true
+time.workspace = true
+soapysdr = { workspace = true, optional = true }

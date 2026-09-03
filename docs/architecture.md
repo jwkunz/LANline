@@ -110,7 +110,7 @@ minimum). The DSP chain:
 3. a **rational resampler** (`L/M`) to hit exactly `audio.sample_rate_hz`
    (48 000) for the Opus encoder.
 
-Examples: HackRF 2 400 000 → ÷50 → 48 000 (resampler is 1/1); a NESDR at
+Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR at
 1 024 000 → ÷16 → 64 000 → ×3/4 → 48 000.
 
 ## Phase status
