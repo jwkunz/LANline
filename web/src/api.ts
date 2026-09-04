@@ -45,11 +45,25 @@ export class Client {
   private async request<T>(
     method: string,
     path: string,
-    opts: { body?: unknown; auth?: boolean } = {},
+    opts: { body?: unknown; auth?: boolean; signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<T> {
     const headers: Record<string, string> = {};
     if (opts.body !== undefined) headers["content-type"] = "application/json";
     if (opts.auth && this.token) headers["authorization"] = `Bearer ${this.token}`;
+
+    // A WebView request can wedge indefinitely (e.g. the network stack gets
+    // suspended mid-request during an app-launch activity transition); a bare
+    // fetch() with no signal then hangs forever with nothing to catch it. Race
+    // it against a timeout, and let the caller cancel too (see main.ts).
+    const controller = new AbortController();
+    const timeoutMs = opts.timeoutMs ?? 10_000;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    opts.signal?.addEventListener("abort", onExternalAbort);
 
     let res: Response;
     try {
@@ -57,13 +71,23 @@ export class Client {
         method,
         headers,
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+        signal: controller.signal,
       });
     } catch (e) {
+      if (timedOut) {
+        throw new ApiError(0, "timeout", `${this.base}${path} timed out after ${timeoutMs}ms`);
+      }
+      if (opts.signal?.aborted) {
+        throw new ApiError(0, "cancelled", `${this.base}${path} cancelled`);
+      }
       throw new ApiError(
         0,
         "network",
         `cannot reach ${this.base} (${(e as Error).message})`,
       );
+    } finally {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onExternalAbort);
     }
 
     const text = await res.text();
@@ -81,22 +105,25 @@ export class Client {
     return data as T;
   }
 
-  health = () => this.request<HealthResponse>("GET", "/health");
-  server = () => this.request<ServerInfo>("GET", "/api/v1/server");
-  device = () => this.request<DeviceInfo>("GET", "/api/v1/device");
-  modes = () => this.request<ModeInfo[]>("GET", "/api/v1/modes");
-  radio = () => this.request<RadioConfig>("GET", "/api/v1/radio");
-  radioStatus = () => this.request<RadioStatus>("GET", "/api/v1/radio/status");
+  health = (signal?: AbortSignal) => this.request<HealthResponse>("GET", "/health", { signal });
+  server = (signal?: AbortSignal) =>
+    this.request<ServerInfo>("GET", "/api/v1/server", { signal });
+  device = (signal?: AbortSignal) =>
+    this.request<DeviceInfo>("GET", "/api/v1/device", { signal });
+  modes = (signal?: AbortSignal) => this.request<ModeInfo[]>("GET", "/api/v1/modes", { signal });
+  radio = (signal?: AbortSignal) => this.request<RadioConfig>("GET", "/api/v1/radio", { signal });
+  radioStatus = (signal?: AbortSignal) =>
+    this.request<RadioStatus>("GET", "/api/v1/radio/status", { signal });
   adsbAircraft = () => this.request<import("./adsb").AdsbSnapshot>("GET", "/api/v1/adsb/aircraft");
   aisVessels = () => this.request<import("./ais").AisSnapshot>("GET", "/api/v1/ais/vessels");
 
-  createSession = (client: {
-    name: string;
-    user_agent: string;
-    capabilities: string[];
-  }) =>
+  createSession = (
+    client: { name: string; user_agent: string; capabilities: string[] },
+    signal?: AbortSignal,
+  ) =>
     this.request<CreateSessionResponse>("POST", "/api/v1/sessions", {
       body: { client },
+      signal,
     });
 
   heartbeat = (id: string) =>

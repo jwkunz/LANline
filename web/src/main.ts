@@ -289,6 +289,15 @@ function onAction(): void {
   }
 }
 
+// A WebView fetch can wedge (e.g. the network stack gets suspended mid-request
+// during an app-launch activity transition) with nothing to catch it — so
+// every connect attempt gets a generation number and an AbortController: a
+// newer attempt or an explicit cancel (the Connect/Disconnect button stays
+// live while "Connecting…") invalidates the old one instead of leaving it to
+// hang forever with no way out but restarting the app.
+let connectSeq = 0;
+let connectAbort: AbortController | null = null;
+
 async function connect(hostRaw: string): Promise<void> {
   if (!hostRaw.trim()) {
     setState({ phase: "error", error: "enter a server host first" });
@@ -296,26 +305,37 @@ async function connect(hostRaw: string): Promise<void> {
   }
   const base = normalizeBase(hostRaw);
   localStorage.setItem(HOST_KEY, hostRaw.trim());
+
+  const mySeq = ++connectSeq;
+  connectAbort?.abort();
+  const abort = new AbortController();
+  connectAbort = abort;
+  const stale = () => mySeq !== connectSeq;
+
   setState({ phase: "connecting", base, error: null });
 
   console.info(`lanline: connecting ${base}`);
   const client = new Client(base);
   try {
-    await client.health();
-    const server = await client.server();
-    const modes = await client.modes().catch(() => [] as ModeInfo[]);
-    const device = await client.device().catch(() => null);
+    await client.health(abort.signal);
+    if (stale()) return;
+    const server = await client.server(abort.signal);
+    if (stale()) return;
+    const modes = await client.modes(abort.signal).catch(() => [] as ModeInfo[]);
+    const device = await client.device(abort.signal).catch(() => null);
+    if (stale()) return;
     console.info(`lanline: rest ok (${server.hostname}, ${modes.length} modes, device=${!!device})`);
-    const session = await client.createSession({
-      name: NATIVE ? "android" : "web",
-      user_agent: navigator.userAgent,
-      capabilities: ["webrtc-recv"],
-    });
+    const session = await client.createSession(
+      { name: NATIVE ? "android" : "web", user_agent: navigator.userAgent, capabilities: ["webrtc-recv"] },
+      abort.signal,
+    );
+    if (stale()) return;
     client.setToken(session.token);
     const [radio, status] = await Promise.all([
-      client.radio(),
-      client.radioStatus(),
+      client.radio(abort.signal),
+      client.radioStatus(abort.signal),
     ]);
+    if (stale()) return;
 
     state.client = client;
     state.session = session;
@@ -345,12 +365,15 @@ async function connect(hostRaw: string): Promise<void> {
     if (state.loc) void refreshStations();
     if (NATIVE) void autoListen();
   } catch (e) {
+    if (stale()) return; // superseded by a newer attempt or a manual cancel
     const err = e as ApiError;
     console.warn(`lanline: connect failed — ${err.code}: ${err.message}`);
     state.client = null;
     state.session = null;
     setState({ phase: "error", error: `${err.code}: ${err.message}` });
     logLine(`connect failed — ${err.message}`);
+  } finally {
+    if (connectAbort === abort) connectAbort = null;
   }
 }
 
@@ -374,6 +397,9 @@ async function autoListen(): Promise<void> {
 }
 
 async function disconnect(): Promise<void> {
+  connectSeq++; // invalidate any in-flight connect() attempt
+  connectAbort?.abort();
+  connectAbort = null;
   stopTimers();
   await teardownAudio();
   const client = state.client;
@@ -748,10 +774,13 @@ function render(): void {
   actionBtn.textContent = connected
     ? "Disconnect"
     : connecting
-      ? "Connecting…"
+      ? "Cancel connecting…"
       : "Connect";
-  actionBtn.disabled = connecting;
-  actionBtn.classList.toggle("secondary", connected);
+  // Stay clickable while connecting — a wedged request (fetch has no bound on
+  // how long it can hang in a backgrounded WebView) would otherwise leave no
+  // way out short of restarting the app.
+  actionBtn.disabled = false;
+  actionBtn.classList.toggle("secondary", connected || connecting);
   hostInput.disabled = connected || connecting;
   connStatus.innerHTML = connStatusHtml();
 
