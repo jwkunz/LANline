@@ -29,6 +29,7 @@ same port also serves the bundled web client and is advertised over mDNS as
 - [Modes](#modes)
 - [ADS-B track export](#adsb-track-export)
 - [AIS vessel-track export](#ais-vessel-track-export)
+- [NOAA APT image export](#noaa-apt-image-export)
 - [Presets](#presets)
 - [Radio configuration & control](#radio-configuration--control)
 - [Sessions](#sessions)
@@ -306,6 +307,16 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "apt",
+    "name": "NOAA APT (137 MHz weather satellite)",
+    "tx_capable": false,
+    "params": {
+      "deviation_hz":  { "type": "number", "default": 17000, "min": 10000, "max": 25000, "unit": "Hz" },
+      "channel_bw_hz": { "type": "number", "default": 40000, "min": 20000, "max": 60000, "unit": "Hz" },
+      "max_lines":     { "type": "number", "default": 1200,  "min": 100,   "max": 4000,  "unit": "lines" }
+    }
+  },
+  {
     "id": "adsb",
     "name": "ADS-B (1090 MHz aircraft)",
     "tx_capable": false,
@@ -357,6 +368,20 @@ can actually pull in AM depends on its LF/MF front end — see the note in
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end
 check for the WebRTC path.
+
+`apt` is likewise **non-audio**: it FM-demodulates a 137 MHz NOAA POES
+satellite downlink, synchronously detects its 2400 Hz AM subcarrier, resamples
+to the standard 4160 words/sec APT word rate, and correlates the Sync-A
+pattern to lock onto each 0.5 s scan line, accumulating a two-channel
+grayscale image. Read it from [NOAA APT image
+export](#noaa-apt-image-export). A satellite pass typically lasts 10–15
+minutes several times a day (times/frequencies are predictable from a NORAD
+TLE and your location, e.g. via `gpredict`) — outside of one, this mode
+correctly reports a low `sync_quality` and an unchanging or noisy image, not
+an error. `mode_params`: `deviation_hz` (peak carrier deviation, default
+17000), `channel_bw_hz` (channel filter width, default 40000), `max_lines`
+(how many recent scan lines the server keeps before dropping the oldest,
+default 1200 ≈ 10 minutes).
 
 `adsb` is a **non-audio** mode: it tunes 1090 MHz at 2 Msps, demodulates Mode S
 Extended Squitter, and folds decoded frames into an aircraft track table. It
@@ -500,6 +525,43 @@ Ring buffer of recent re-armored `!AIVDM` sentences (checksummed, newest last):
 
 A line stream of the same `!AIVDM` sentences (CRLF-terminated). Point OpenCPN,
 AIS-catcher, or `aisdispatcher` at it. Disable with `--ais-nmea-port 0`.
+
+---
+
+## NOAA APT image export
+
+Populated only while the `apt` mode pipeline runs; a `Stop radio` + `Start
+radio` cycle starts a fresh image. Unauthenticated, read-only.
+
+Unlike AM/FM/ADS-B/AIS, NOAA APT is a real-time downlink from one specific
+137 MHz weather satellite passing overhead — there is no ambient signal to
+receive between passes, so both endpoints below will legitimately report a
+low `sync_quality` (or an empty image) most of the time. That is the decoder
+correctly declining to claim a lock on noise, not a bug.
+
+### `GET /api/v1/apt/status`
+
+```json
+{ "width": 1818, "height": 214, "lines": 214, "sync_quality": 8.4 }
+```
+
+`sync_quality` is a matched-filter SNR on the Sync-A line-start correlation
+(peak coherent correlation over the local noise floor): real signal locks
+around 6–10+, noise stays under ~3–4. `width`/`height` describe the current
+raster (`width` is fixed at 1818 = two 909-pixel channel images side by
+side; `height` grows one row per decoded scan line, up to `max_lines`).
+
+### `GET /api/v1/apt/image`
+
+Binary, not JSON (`content-type: application/octet-stream`):
+
+```text
+[u32 width LE][u32 height LE][row-major grayscale bytes, width*height]
+```
+
+Channel A (visible/IR depending on the satellite and time of day) occupies
+columns `0..909`, channel B `909..1818`. No PNG/image crate involved on
+either end — the web client reads this straight into a canvas `ImageData`.
 
 ---
 

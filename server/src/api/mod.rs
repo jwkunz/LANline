@@ -2,6 +2,7 @@
 
 mod adsb;
 mod ais;
+mod apt;
 mod audio;
 mod devices;
 mod meta;
@@ -38,6 +39,8 @@ pub fn router(state: AppState) -> Router {
         .route("/adsb/messages", get(adsb::messages))
         .route("/ais/vessels", get(ais::vessels))
         .route("/ais/messages", get(ais::sentences))
+        .route("/apt/image", get(apt::image))
+        .route("/apt/status", get(apt::status))
         .route("/radio/tx", get(reserved::stub).patch(reserved::stub))
         .route("/radio/tx/ptt", post(reserved::stub))
         .route("/sessions", get(sessions::list).post(sessions::create))
@@ -359,6 +362,30 @@ mod tests {
 
         let (_, modes) = send(&app, get("/api/v1/modes")).await;
         assert!(modes.as_array().unwrap().iter().any(|m| m["id"] == "ais"));
+    }
+
+    #[tokio::test]
+    async fn apt_endpoints_report_empty_when_idle() {
+        let app = app().await;
+
+        let res = app.clone().oneshot(get("/api/v1/apt/image")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+        assert!(ct.contains("application/octet-stream"), "got {ct}");
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(body.len(), 8, "header only, no rows yet");
+        let width = u32::from_le_bytes(body[0..4].try_into().unwrap());
+        let height = u32::from_le_bytes(body[4..8].try_into().unwrap());
+        assert_eq!(width, 1818); // 909 * 2 channels
+        assert_eq!(height, 0);
+
+        let (s, b) = send(&app, get("/api/v1/apt/status")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["lines"], 0);
+        assert_eq!(b["width"], 1818);
+
+        let (_, modes) = send(&app, get("/api/v1/modes")).await;
+        assert!(modes.as_array().unwrap().iter().any(|m| m["id"] == "apt"));
     }
 
     #[tokio::test]

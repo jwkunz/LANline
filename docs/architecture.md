@@ -173,6 +173,19 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   enum). Station-picker wizard (`web/src/am.ts`, `scripts/fetch-am.mjs`) mirrors
   `wbfm`'s. See [below](#am-and-hackrf-mflf-sensitivity) for what to expect
   from a HackRF at mediumwave.
+- **2f** — `apt` mode: `apt/demod.rs` is a fully self-contained physical-layer
+  decoder (own NCO/FIR/biquad/resampler, unit-tested with a synthesized
+  Sync-A/image-ramp scan line, no radio needed) — FM discriminate → synchronous
+  AM detection of the 2400 Hz subcarrier → resample to the 4160 words/sec APT
+  word rate → Sync-A cross-correlation locks each 2080-word scan line →
+  auto-leveled 909-pixel-per-channel image, accumulated in `apt::Image` and
+  exported as a small binary raster (`GET /api/v1/apt/{status,image}`, see
+  [rest-api.md](rest-api.md#noaa-apt-image-export)). Web client
+  (`web/src/apt.ts`) is a satellite-quick-pick + manual-frequency wizard with a
+  canvas that `putImageData`s the raster directly — no image crate on the
+  server, no `<img>` decode on the client. See
+  [below](#apt-line-sync-confidence-metric) for how "am I locked onto a real
+  pass" is decided.
 
 ### AM and HackRF MF/LF sensitivity
 
@@ -186,3 +199,30 @@ tracked actual transmitter power/distance rather than sitting at a constant
 floor (which would point to a self-generated spur instead of a real signal).
 Expect it to favor nearby, higher-power stations; a random-wire antenna
 tuned for AM will do much better than the stock 1090 MHz-ish whip.
+
+### APT line-sync confidence metric
+
+`apt::demod::find_sync` reports a `sync_quality` alongside every decoded scan
+line — a matched-filter SNR: the peak Sync-A correlation over the search
+window, normalized by `sqrt(SYNC_LEN) * stddev(words)` (the noise floor a
+matched filter of that length would produce against uncorrelated content). A
+real Sync-A pulse correlates *coherently* (score grows with `SYNC_LEN`);
+noise or image content correlates only by chance (score grows with
+`sqrt(SYNC_LEN)`), so the ratio is large and level-independent for a true
+lock and stays near a small constant for everything else. Synthetic tests put
+real signal around 6–10 and noise's steady-state ceiling around 3–4; live
+HackRF capture at 137.1 MHz with no satellite overhead stayed in the same
+1.2–2.7 noise range, correctly never claiming a lock. 5.0 is used as the
+"locked" threshold (`radio::run_apt`'s `squelch_open`, and the two
+`apt::demod` unit tests).
+
+An earlier version normalized by the *mean of the correlation curve itself*
+across the search window instead of the raw words' stddev. That failed:
+offsets a few words from a true sync still overlap most of its
+low-pass-filtered pulse and so also score moderately high, inflating the
+mean and collapsing peak/mean to ~2.3 for *both* real signal and noise —
+discovered when a live 137.1 MHz capture with no pass overhead (visually
+confirmed as pure static once rendered) still reported `sync_quality: 1.68`
+and read as "locked" against the then-current (much lower) threshold.
+Computing the noise floor from the words directly, rather than from the
+correlation curve, avoids that self-contamination.

@@ -7,6 +7,7 @@
 mod adsb;
 mod ais;
 mod api;
+mod apt;
 mod audio;
 mod catalog;
 mod config;

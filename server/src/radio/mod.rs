@@ -12,6 +12,7 @@ pub mod dsp;
 
 use crate::adsb::AdsbShared;
 use crate::ais::AisShared;
+use crate::apt::AptShared;
 use crate::audio::{rms_dbfs, AudioFrame};
 use crate::model::RadioConfig;
 use crate::registry::DeviceRegistry;
@@ -57,6 +58,7 @@ pub struct RadioManager {
     telemetry: Arc<Mutex<Telemetry>>,
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
+    apt: Arc<AptShared>,
 }
 
 #[derive(Default)]
@@ -158,6 +160,7 @@ impl RadioManager {
             telemetry: Arc::new(Mutex::new(Telemetry::default())),
             adsb: Arc::new(AdsbShared::new()),
             ais: Arc::new(AisShared::new()),
+            apt: Arc::new(AptShared::new()),
         })
     }
 
@@ -175,6 +178,12 @@ impl RadioManager {
     /// `ais` mode pipeline is running).
     pub fn ais(&self) -> Arc<AisShared> {
         self.ais.clone()
+    }
+
+    /// Shared APT image buffer (populated only while the `apt` mode pipeline
+    /// is running).
+    pub fn apt(&self) -> Arc<AptShared> {
+        self.apt.clone()
     }
 
     pub fn is_running(&self) -> bool {
@@ -204,6 +213,7 @@ impl RadioManager {
         let dump = self.dump_wav.clone();
         let adsb = self.adsb.clone();
         let ais = self.ais.clone();
+        let apt = self.apt.clone();
 
         #[cfg(feature = "soapy")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<PipelineCmd>();
@@ -212,7 +222,7 @@ impl RadioManager {
 
         let handle = std::thread::Builder::new()
             .name("rx-pipeline".into())
-            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais))
+            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt))
             .expect("spawn rx-pipeline thread");
 
         run.stop = Some(stop);
@@ -373,6 +383,8 @@ enum SourceKind {
     Adsb(Box<AdsbSdrParams>),
     #[cfg(feature = "soapy")]
     Ais(Box<AisSdrParams>),
+    #[cfg(feature = "soapy")]
+    Apt(Box<AptSdrParams>),
 }
 
 #[cfg(feature = "soapy")]
@@ -407,6 +419,21 @@ struct AisSdrParams {
     max_range_nm: f64,
     trail_secs: f64,
     forget_secs: f64,
+}
+
+#[cfg(feature = "soapy")]
+struct AptSdrParams {
+    soapy_args: String,
+    device_rate: f64,
+    freq_hz: f64,
+    channel: usize,
+    antenna: Option<String>,
+    agc: bool,
+    gain_overall_db: Option<f64>,
+    gain_elements_db: Vec<(String, f64)>,
+    settings: Vec<(String, String)>,
+    apt: crate::apt::demod::AptParams,
+    max_lines: usize,
 }
 
 #[cfg(feature = "soapy")]
@@ -563,6 +590,45 @@ impl PipelineParams {
                     None => SourceKind::Silence,
                 }
             }
+            "apt" => {
+                #[cfg(not(feature = "soapy"))]
+                {
+                    let _ = device;
+                    SourceKind::Silence
+                }
+                #[cfg(feature = "soapy")]
+                match device {
+                    Some(dev) => SourceKind::Apt(Box::new(AptSdrParams {
+                        soapy_args: dev.soapy_args.clone(),
+                        device_rate: cfg.tuner.sample_rate_hz,
+                        freq_hz: cfg.frequency_hz as f64,
+                        channel: cfg.tuner.channel,
+                        antenna: cfg.tuner.antenna.clone(),
+                        agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
+                        gain_overall_db: cfg.tuner.gain_db,
+                        gain_elements_db: cfg
+                            .tuner
+                            .gain_elements_db
+                            .iter()
+                            .map(|(k, v)| (k.clone(), *v))
+                            .collect(),
+                        settings: cfg
+                            .tuner
+                            .device_settings
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                        apt: crate::apt::demod::AptParams {
+                            deviation_hz: param("deviation_hz", 17_000.0),
+                            channel_bw_hz: param("channel_bw_hz", 40_000.0),
+                            subcarrier_hz: 2_400.0,
+                            lo_offset_hz: cfg.tuner.lo_offset_hz.abs().max(1.0),
+                        },
+                        max_lines: param("max_lines", 1200.0).max(1.0) as usize,
+                    })),
+                    None => SourceKind::Silence,
+                }
+            }
             _ => SourceKind::Silence,
         };
 
@@ -600,8 +666,9 @@ fn run_pipeline(
     cmd_rx: CmdRx,
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
+    apt: Arc<AptShared>,
 ) {
-    let _ = (&adsb, &ais);
+    let _ = (&adsb, &ais, &apt);
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
         Ok(w) => {
@@ -630,6 +697,8 @@ fn run_pipeline(
         SourceKind::Adsb(p) => run_adsb(*p, adsb, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
         SourceKind::Ais(p) => run_ais(*p, ais, &telemetry, &stop, cmd_rx),
+        #[cfg(feature = "soapy")]
+        SourceKind::Apt(p) => run_apt(*p, apt, &telemetry, &stop, cmd_rx),
     }
 }
 
@@ -1155,6 +1224,159 @@ fn run_ais(
             t.frames_sent = frames;
             t.rssi_dbfs = Some(rssi_ema);
             t.squelch_open = frames > 0;
+            t.overruns = overruns;
+        }
+    }
+
+    let _ = stream.deactivate(None);
+}
+
+/// NOAA APT pipeline: tunes 137 MHz, feeds the [`crate::apt`] demod, and
+/// accumulates decoded scan lines into a growing image read over REST. No
+/// audio output.
+#[cfg(feature = "soapy")]
+fn run_apt(
+    p: AptSdrParams,
+    shared: Arc<AptShared>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+    cmd_rx: mpsc::Receiver<PipelineCmd>,
+) {
+    use crate::apt::demod::AptDemod;
+    use num_complex::Complex32;
+    use soapysdr::{Device, Direction, ErrorCode};
+
+    let dir = Direction::Rx;
+    let ch = p.channel;
+
+    shared.reset(p.max_lines);
+
+    let dev = match Device::new(p.soapy_args.as_str()) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("apt: cannot open device: {e}");
+            return;
+        }
+    };
+    let log_set = |what: &str, r: Result<(), soapysdr::Error>| {
+        if let Err(e) = r {
+            tracing::warn!("apt: set {what}: {e}");
+        }
+    };
+    log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
+    let lo = p.freq_hz - p.apt.lo_offset_hz;
+    log_set("frequency", dev.set_frequency(dir, ch, lo, ""));
+    if let Some(ant) = &p.antenna {
+        log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
+    }
+    if p.agc {
+        log_set("agc", dev.set_gain_mode(dir, ch, true));
+    } else {
+        log_set("gain_mode", dev.set_gain_mode(dir, ch, false));
+        if let Some(g) = p.gain_overall_db {
+            log_set("gain", dev.set_gain(dir, ch, g));
+        }
+        for (name, v) in &p.gain_elements_db {
+            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+        }
+    }
+    for (k, v) in &p.settings {
+        log_set("setting", dev.write_setting(k.as_str(), v.as_str()));
+    }
+
+    let mut stream = match dev.rx_stream::<Complex32>(&[ch]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("apt: rx_stream: {e}");
+            return;
+        }
+    };
+    if let Err(e) = stream.activate(None) {
+        tracing::error!("apt: stream activate: {e}");
+        return;
+    }
+
+    let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
+    let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
+    let mut demod = AptDemod::new(p.device_rate, p.apt);
+
+    telemetry.lock().unwrap().source = "apt";
+    tracing::info!(
+        "apt: {} @ {:.4} MHz (LO {:.3} MHz), {:.3} Msps, channel rate {:.0} Hz",
+        p.soapy_args,
+        p.freq_hz / 1e6,
+        lo / 1e6,
+        p.device_rate / 1e6,
+        demod.channel_rate(),
+    );
+
+    let mut lines: u64 = 0;
+    let mut overruns: u64 = 0;
+    let mut rssi_ema = -60.0f32;
+    let mut last_sync = 0.0f32;
+    let mut last_status = Instant::now();
+
+    while !stop.load(Ordering::SeqCst) {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                PipelineCmd::Retune(hz) => {
+                    let new_lo = hz - p.apt.lo_offset_hz;
+                    log_set("frequency", dev.set_frequency(dir, ch, new_lo, ""));
+                    tracing::info!("apt: retuned to {:.4} MHz (live)", hz / 1e6);
+                }
+                PipelineCmd::Gain { agc, overall, elements } => {
+                    log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
+                    if !agc {
+                        if let Some(g) = overall {
+                            log_set("gain", dev.set_gain(dir, ch, g));
+                        }
+                        for (name, v) in &elements {
+                            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+                        }
+                    }
+                }
+                PipelineCmd::Demod(_) => {}
+            }
+        }
+
+        let n = match stream.read(&mut [iq.as_mut_slice()], 200_000) {
+            Ok(n) => n,
+            Err(e) => {
+                match e.code {
+                    ErrorCode::Timeout => {}
+                    ErrorCode::Overflow => overruns += 1,
+                    _ => {
+                        tracing::warn!("apt: stream read: {e}");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                continue;
+            }
+        };
+        if n == 0 {
+            continue;
+        }
+
+        let power: f32 = iq[..n].iter().map(|c| c.norm_sqr()).sum::<f32>() / n as f32;
+        let rssi_dbfs = (10.0 * (power + 1e-12).log10()).clamp(-90.0, 0.0);
+        rssi_ema = rssi_ema * 0.95 + rssi_dbfs * 0.05;
+
+        let shared_ref = &shared;
+        demod.process(&iq[..n], |line| {
+            lines += 1;
+            last_sync = line.sync_quality;
+            shared_ref.image.lock().unwrap().push_line(&line);
+        });
+
+        if last_status.elapsed() >= Duration::from_millis(500) {
+            last_status = Instant::now();
+            let mut t = telemetry.lock().unwrap();
+            t.frames_sent = lines;
+            t.rssi_dbfs = Some(rssi_ema);
+            // Matched-filter SNR confidence from `AptDemod`; calibrated
+            // against synthetic real-signal (~8) vs. noise (~3.2 ceiling)
+            // steady-state values — see `apt::demod` module docs/tests.
+            t.squelch_open = last_sync > 5.0;
             t.overruns = overruns;
         }
     }
