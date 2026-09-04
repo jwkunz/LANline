@@ -88,6 +88,7 @@ export class Client {
   radio = () => this.request<RadioConfig>("GET", "/api/v1/radio");
   radioStatus = () => this.request<RadioStatus>("GET", "/api/v1/radio/status");
   adsbAircraft = () => this.request<import("./adsb").AdsbSnapshot>("GET", "/api/v1/adsb/aircraft");
+  aisVessels = () => this.request<import("./ais").AisSnapshot>("GET", "/api/v1/ais/vessels");
 
   createSession = (client: {
     name: string;
