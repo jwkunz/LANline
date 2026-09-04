@@ -2,8 +2,11 @@
 
 The server announces itself on the LAN with a small UDP broadcast so native
 clients (Android, CLI) can find it without configuration. The **web client does
-not use the beacon** — browsers cannot receive UDP broadcast — it takes a host
-entered by the user and saved in `localStorage`.
+not use the beacon** — browsers cannot receive UDP broadcast. A browser instead
+reaches the server either by being served from it directly (same origin, nothing
+to type) or by name via **mDNS** — the server also publishes an `_lanline._tcp`
+service and an A record for `<mdns-name>.local` (default `lanline.local`) on the
+C2 port. As a last resort the host can be typed and is saved in `localStorage`.
 
 ## Transport
 
@@ -32,8 +35,8 @@ packet):
   "version": "0.1.0",
   "hostname": "bench-linux",
   "advertised_host": "192.168.1.42",
-  "ports": { "c2": 51847, "audio_out": 49213, "audio_in": 60731 },
-  "c2_base_url": "http://192.168.1.42:51847",
+  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731 },
+  "c2_base_url": "http://192.168.1.42:8730",
   "device": {
     "driver": "hackrf",
     "label": "HackRF One",

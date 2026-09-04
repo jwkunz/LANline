@@ -1,8 +1,8 @@
 # LANline — Android client
 
-A thin native wrapper around the web client (`client/web`): a full-screen
-`WebView` plus a Kotlin UDP **beacon listener** that feeds discovered servers to
-the web app through `window.LanlineNative`.
+A thin native wrapper around the web client (`web/`): a full-screen `WebView`
+plus a Kotlin UDP **beacon listener** that feeds discovered servers to the web
+app through `window.LanlineNative`.
 
 ## Build
 
@@ -10,14 +10,14 @@ Needs a JDK 17+ (Android Studio's bundled JBR works) and the Android SDK
 (platform 35, build-tools 35).
 
 ```sh
-cd client/web && npm install && npm run build   # produces client/web/dist
-cd ../android
-cp local.properties.sample local.properties      # set sdk.dir
-./gradlew assembleDebug                           # -> app/build/outputs/apk/debug/
-./gradlew installDebug                            # to a connected device
+cd web && npm install && npm run build            # produces web/dist
+cd ../client/android
+cp local.properties.sample local.properties       # set sdk.dir
+./gradlew assembleDebug                            # -> app/build/outputs/apk/debug/
+./gradlew installDebug                             # to a connected device
 ```
 
-`assembleDebug` runs `syncWebAssets`, which copies `client/web/dist` into
+`assembleDebug` runs `syncWebAssets`, which copies `web/dist` into
 `app/src/main/assets/web` — rebuild the web client whenever it changes.
 
 Or just open `client/android/` in Android Studio and Run.

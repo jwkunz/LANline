@@ -10,6 +10,7 @@ mod catalog;
 mod config;
 mod discovery;
 mod error;
+mod mdns;
 mod media;
 mod model;
 mod net;
@@ -122,6 +123,15 @@ async fn main() -> Result<()> {
         tokio::spawn(beacon.run());
     }
 
+    // mDNS: a browser can't hear the UDP beacon, so also advertise a
+    // `<name>.local` address on the C2 port. Held until shutdown.
+    let _mdns = match (config.no_mdns, advertised_host) {
+        (false, IpAddr::V4(ip)) if !ip.is_loopback() => {
+            mdns::spawn(&config.mdns_name, ip, ports.c2, state.server_id)
+        }
+        _ => None,
+    };
+
     // --- serve -------------------------------------------------------
     let listener = tokio::net::TcpListener::from_std(tcp)?;
     tracing::info!(
@@ -132,7 +142,22 @@ async fn main() -> Result<()> {
         ai = ports.audio_in,
         bp = config.beacon_port,
     );
-    tracing::info!("web client: enter server host `{advertised_host}` (port {})", ports.c2);
+    let name_url = match (config.no_mdns, advertised_host) {
+        (false, IpAddr::V4(ip)) if !ip.is_loopback() => {
+            format!("  or  http://{}.local:{}/", config.mdns_name, ports.c2)
+        }
+        _ => String::new(),
+    };
+    tracing::info!(
+        "web client: open http://{}:{}/{name_url}  — connects with nothing to type",
+        advertised_host,
+        ports.c2,
+    );
+    if !api::webui::bundled() {
+        tracing::warn!(
+            "web client: no bundle embedded — run `npm --prefix web run build` and rebuild"
+        );
+    }
 
     let app = api::router(state.clone());
     let shutdown = {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Regenerate client/web/public/fm-stations.json from the FCC FM Query — every
+// Regenerate web/public/fm-stations.json from the FCC FM Query — every
 // licensed full-service FM broadcast station in the US, with call sign,
 // frequency, class, community of license and transmitter lat/lon.
 //
@@ -13,7 +13,7 @@ import { dirname, resolve } from "node:path";
 
 const OUT = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../client/web/public/fm-stations.json",
+  "../web/public/fm-stations.json",
 );
 
 const STATES = (

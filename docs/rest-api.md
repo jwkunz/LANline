@@ -6,14 +6,21 @@ The command-and-control port advertised by the [discovery beacon](beacon-protoco
 serves this API. All paths below are relative to
 `http://<host>:<c2_port>`.
 
+The C2 port is **fixed at `8730` by default** (override with `--c2-port`, or `0`
+for a random free port) so a bookmarked web-client URL survives a restart. The
+same port also serves the bundled web client and is advertised over mDNS as
+`http://<mdns-name>.local:<c2_port>/` (default `lanline.local`).
+
 - Request and response bodies are `application/json; charset=utf-8`.
-- Every path is under `/api/v1` except `GET /health`.
+- Every path is under `/api/v1` except `GET /health` and the
+  [web client](#web-client).
 - Timestamps are RFC 3339 / ISO 8601 UTC strings (e.g. `2026-09-03T17:04:11Z`).
 - Frequencies are integer **Hz**, gains are **dB** (float), durations are
   seconds unless a field name says `_ms`.
 
 ## Contents
 
+- [Web client](#web-client)
 - [Authentication](#authentication)
 - [CORS](#cors)
 - [Error model](#error-model)
@@ -28,6 +35,21 @@ serves this API. All paths below are relative to
 - [Data types](#data-types)
 
 ---
+
+## Web client
+
+The server embeds the built web client and serves it from the C2 port, so a
+browser pointed at the server's own address connects with nothing to type
+(same-origin — no host field, no CORS pre-flight).
+
+| Path | Response |
+|------|----------|
+| `GET /` , `GET /index.html` | `text/html` — the single-file web app |
+| `GET /nwr-stations.json` | `application/json` — bundled NOAA Weather Radio transmitter directory |
+| `GET /fm-stations.json` | `application/json` — bundled FCC FM broadcast station directory |
+
+These are unauthenticated and cached (`Cache-Control: public, max-age=86400`).
+The same bundle is what the Android APK embeds as local assets.
 
 ## Authentication
 
@@ -47,11 +69,14 @@ person. The server is expected to run on a trusted LAN.
 
 ## CORS
 
-The web client is served from a different origin (the Vite dev server, or a
-static host) than the API. The server sends permissive CORS headers for
-`GET`/`HEAD` and echoes an allow-list of origins (configurable, default `*` in
-dev) for the other methods, plus `Authorization` and `Content-Type` in
-`Access-Control-Allow-Headers`. Pre-flight `OPTIONS` is handled for every route.
+When the web client is served from the C2 port itself (the default), requests
+are same-origin and CORS does not apply. It still matters for the Vite dev
+server, a separate static host, or the Android `file://` wrapper: the server
+sends permissive CORS headers for `GET`/`HEAD` and echoes an allow-list of
+origins (configurable, default `*` in dev) for the other methods, plus
+`Authorization` and `Content-Type` in `Access-Control-Allow-Headers`, with
+`Access-Control-Max-Age: 3600` so a burst of `PATCH`es pre-flights once.
+Pre-flight `OPTIONS` is handled for every route.
 
 ## Error model
 
@@ -105,7 +130,7 @@ Server identity and current capability summary.
   "version": "0.1.0",
   "hostname": "bench-linux",
   "time": "2026-09-03T17:04:11Z",
-  "ports": { "c2": 51847, "audio_out": 49213, "audio_in": 60731 },
+  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731 },
   "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "debug_tone"],
   "selected_device": {
     "id": "hackrf/0000000000000000457863c8...",

@@ -26,29 +26,40 @@
                                           └───────────────────────────────────────────┘
 ```
 
-Three advertised ports (all random, chosen at startup):
+Three advertised ports:
 
 | Port | Transport | Role |
 |------|-----------|------|
-| `c2` | TCP / HTTP | REST API + WebRTC signaling |
+| `c2` | TCP / HTTP | REST API + WebRTC signaling + the embedded web client at `/` |
 | `audio_out` | UDP | WebRTC media (ICE host candidate) for the receive stream |
 | `audio_in` | UDP | Reserved — inbound Opus to modulate (phase 2) |
 
-Discovery beacon: separate **fixed** UDP port, see
-[beacon-protocol.md](beacon-protocol.md).
+`c2` is **fixed** (default `8730`) so a bookmarked browser URL survives a
+restart; `audio_out`/`audio_in` are random, chosen at startup. Pass `--c2-port 0`
+for a random C2 port too.
+
+Reaching the server:
+
+- **Browser** — open `http://<host>:<c2>/` (served by the server, same origin,
+  nothing to type) or `http://<mdns-name>.local:<c2>/` via the mDNS responder
+  (`mdns.rs`, default name `lanline`, also publishes `_lanline._tcp`).
+- **Android / CLI** — the UDP discovery beacon on a separate **fixed** port, see
+  [beacon-protocol.md](beacon-protocol.md).
 
 ## Server module map
 
 ```
 server/src/
-  main.rs              wiring: parse config, probe device, start beacon + HTTP
+  main.rs              wiring: parse config, probe device, start beacon + mDNS + HTTP
   config.rs            CLI (clap) + resolved runtime settings
+  mdns.rs              multicast-DNS responder: <name>.local + _lanline._tcp on the C2 port
   model.rs             all REST DTOs (serde), shared with handlers
   state.rs             AppState: Arc<...> handles to RadioManager, SessionStore, beacon info
   error.rs             ApiError -> (StatusCode, Json<error model>)
 
   api/
     mod.rs             axum Router, /api/v1 nesting, CORS, tracing layer
+    webui.rs           GET / + /*.json — the embedded single-file web client (staged by build.rs)
     meta.rs            GET /health, GET /api/v1/server
     devices.rs         GET /devices, GET/PUT /device, GET /device/health
     modes.rs           GET /modes

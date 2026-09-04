@@ -1,5 +1,7 @@
-// LAN discovery. Browsers cannot receive the UDP beacon, so this only does
-// anything inside the Android wrapper, which injects `window.LanlineNative`.
+// LAN discovery via the native bridge. Browsers cannot receive the UDP beacon,
+// so this only does anything inside the Android wrapper, which injects
+// `window.LanlineNative`. Plain browsers instead reach the server by being
+// served from it (same origin) or by its mDNS `lanline.local` name.
 
 export interface DiscoveredServer {
   server_id: string;

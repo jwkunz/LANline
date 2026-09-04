@@ -4,9 +4,9 @@
 
 # Node / web client
 node_modules/
-client/web/dist/
-client/web/.vite/
-client/web/*.local
+web/dist/
+web/.vite/
+web/*.local
 
 # Android client
 client/android/.gradle/

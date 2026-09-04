@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Regenerate client/web/src/nwr-stations.json from the NWS county-coverage
+// Regenerate web/public/nwr-stations.json from the NWS county-coverage
 // dataset (CCL.js), which carries call sign, frequency, transmitter lat/lon,
 // power and status for every NOAA Weather Radio transmitter.
 //
@@ -14,7 +14,7 @@ import { dirname, resolve } from "node:path";
 const SOURCE = "https://www.weather.gov/source/nwr/JS/CCL.js";
 const OUT = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../client/web/src/nwr-stations.json",
+  "../web/public/nwr-stations.json",
 );
 
 const ARRAYS = [

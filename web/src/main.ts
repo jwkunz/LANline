@@ -139,7 +139,7 @@ app.innerHTML = `
     <div id="discovered" class="discovered" hidden></div>
     <div class="connect-row">
       <input id="host" type="text" spellcheck="false" autocapitalize="off"
-             placeholder="server host, e.g. 192.168.1.50:41785" />
+             placeholder="server host, e.g. lanline.local:8730" />
       <button id="action">Connect</button>
     </div>
     <p id="conn-status" class="note" style="margin:12px 0 0"></p>
@@ -168,14 +168,44 @@ const idle = (): boolean =>
   state.phase === "disconnected" || state.phase === "error";
 
 let savedHostTried = false;
-if (hostInput.value.trim()) {
-  window.setTimeout(() => {
-    if (!savedHostTried && idle()) {
-      savedHostTried = true;
-      onAction();
-    }
-  }, 150);
+function trySavedHost(): void {
+  if (savedHostTried || !idle() || !hostInput.value.trim()) return;
+  savedHostTried = true;
+  onAction();
 }
+
+/** If this page was served *by* a LANline server, its API is the same origin —
+ *  connect there with nothing to type. Returns the base URL or null. */
+async function probeOrigin(): Promise<string | null> {
+  if (location.protocol !== "http:" && location.protocol !== "https:") return null;
+  const base = `${location.protocol}//${location.host}`;
+  try {
+    const ctl = new AbortController();
+    const timer = window.setTimeout(() => ctl.abort(), 2500);
+    const res = await fetch(base + "/health", {
+      signal: ctl.signal,
+      headers: { accept: "application/json" },
+    });
+    window.clearTimeout(timer);
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => null)) as { status?: string } | null;
+    return body?.status === "ok" ? base : null;
+  } catch {
+    return null; // not served by a LANline server (dev server, static host, file://)
+  }
+}
+
+void (async () => {
+  const origin = await probeOrigin();
+  if (origin && idle()) {
+    savedHostTried = true; // don't also race the saved host
+    hostInput.value = origin;
+    console.info(`lanline: served by ${origin} — auto-connecting`);
+    void connect(origin);
+    return;
+  }
+  window.setTimeout(trySavedHost, 150);
+})();
 
 if (pollDiscovered) {
   let discoveryAutoTried = false;
@@ -751,8 +781,10 @@ function idlePanelsHtml(): string {
   return `
     <section class="card">
       <h2>Not connected</h2>
-      <p class="note">Enter the server host shown in its startup log (or from the
-      discovery beacon) and connect.</p>
+      <p class="note">Opening this page from the server's own address
+      (<code>http://lanline.local:8730/</code>) connects automatically. Otherwise
+      enter the host shown in the server's startup log. The Android app discovers
+      servers over the LAN on its own.</p>
     </section>
     <section class="card"><h2>Event log</h2><div id="log">${state.log.map(esc).join("\n") || "—"}</div></section>
   `;

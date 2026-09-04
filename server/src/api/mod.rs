@@ -8,6 +8,7 @@ mod presets;
 mod radio;
 mod reserved;
 mod sessions;
+pub mod webui;
 
 use crate::state::AppState;
 use axum::http::{header, HeaderValue, Method};
@@ -47,6 +48,12 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(meta::health))
+        // The embedded web client — open the server's own address in a browser
+        // and it connects to that same origin with nothing to type.
+        .route("/", get(webui::index))
+        .route("/index.html", get(webui::index))
+        .route("/nwr-stations.json", get(webui::nwr_stations))
+        .route("/fm-stations.json", get(webui::fm_stations))
         .nest("/api/v1", v1)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
@@ -251,6 +258,28 @@ mod tests {
         })
         .await;
         assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn serves_embedded_web_client() {
+        let app = app().await;
+
+        let res = app.clone().oneshot(get("/")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+        assert!(ct.starts_with("text/html"), "got {ct}");
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("LANline"));
+
+        let res = app.clone().oneshot(get("/nwr-stations.json")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json"));
     }
 
     #[tokio::test]

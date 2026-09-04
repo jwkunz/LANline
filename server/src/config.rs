@@ -12,8 +12,9 @@ pub struct Config {
     #[arg(long, env = "LANLINE_BIND", default_value = "0.0.0.0")]
     pub bind: IpAddr,
 
-    /// C2 (REST) port. 0 picks a random free port.
-    #[arg(long, env = "LANLINE_C2_PORT", default_value_t = 0)]
+    /// C2 (REST + web client) port. Fixed by default so a bookmarked browser
+    /// URL keeps working across restarts; pass `0` for a random free port.
+    #[arg(long, env = "LANLINE_C2_PORT", default_value_t = 8730)]
     pub c2_port: u16,
 
     /// Audio-out (WebRTC media) port. 0 picks a random free port.
@@ -35,6 +36,14 @@ pub struct Config {
     /// Beacon interval in milliseconds.
     #[arg(long, env = "LANLINE_BEACON_INTERVAL_MS", default_value_t = 1000)]
     pub beacon_interval_ms: u64,
+
+    /// Disable the multicast-DNS responder (`<name>.local` + `_lanline._tcp`).
+    #[arg(long, env = "LANLINE_NO_MDNS", default_value_t = false)]
+    pub no_mdns: bool,
+
+    /// mDNS instance/host label: the server is reachable at `http://<name>.local:<c2-port>/`.
+    #[arg(long, env = "LANLINE_MDNS_NAME", default_value = "lanline")]
+    pub mdns_name: String,
 
     /// Host/IP to advertise to clients. Defaults to the autodetected primary
     /// LAN IPv4 address.
