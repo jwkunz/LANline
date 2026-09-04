@@ -15,6 +15,15 @@ import {
   stepFm,
   type FmStation,
 } from "./fm";
+import {
+  AM_MAX_HZ,
+  AM_MIN_HZ,
+  loadAmStations,
+  nearestAm,
+  snapAm,
+  stepAm,
+  type AmStation,
+} from "./am";
 import type {
   AudioStateResponse,
   CreateSessionResponse,
@@ -57,6 +66,14 @@ const MODE_META: Record<string, ModeMeta> = {
     loOffsetHz: 250_000,
     wantSampleRateHz: 4_000_000,
   },
+  am: {
+    label: "AM Radio",
+    icon: "🗼",
+    band: "520–1710 kHz",
+    defaultFreqHz: 1_000_000,
+    loOffsetHz: 25_000,
+    wantSampleRateHz: 1_000_000,
+  },
   adsb: {
     label: "ADS-B",
     icon: "✈️",
@@ -85,6 +102,7 @@ const MODE_META: Record<string, ModeMeta> = {
 
 type NearNwr = NwrStation & { distance_mi: number };
 type NearFm = FmStation & { distance_mi: number };
+type NearAm = AmStation & { distance_mi: number };
 
 interface State {
   phase: Phase;
@@ -106,7 +124,8 @@ interface State {
   locNote: string | null;
   nwrNearby: NearNwr[];
   fmNearby: NearFm[];
-  fmTab: "nearby" | "manual";
+  amNearby: NearAm[];
+  bandTab: "nearby" | "manual";
   seeking: boolean;
   adsb: AdsbSnapshot | null;
   ais: AisSnapshot | null;
@@ -135,7 +154,8 @@ const state: State = {
   locNote: null,
   nwrNearby: [],
   fmNearby: [],
-  fmTab: "nearby",
+  amNearby: [],
+  bandTab: "nearby",
   seeking: false,
   adsb: null,
   ais: null,
@@ -541,6 +561,12 @@ async function switchMode(id: string): Promise<void> {
   }
 }
 
+/** MHz (4 digits, 1 for wbfm) or kHz (am) label for a frequency in a mode. */
+function freqLabel(mode: string, hz: number): string {
+  if (mode === "am") return `${(hz / 1e3).toFixed(0)} kHz`;
+  return `${(hz / 1e6).toFixed(mode === "wbfm" ? 1 : 4)} MHz`;
+}
+
 async function tuneFrequency(hz: number, label?: string): Promise<void> {
   if (!state.client || !state.radio) return;
   const freq = Math.round(hz);
@@ -550,8 +576,7 @@ async function tuneFrequency(hz: number, label?: string): Promise<void> {
     if (!radio.running) radio = await state.client.startRadio();
     setState({ radio });
     if (state.audio && state.audioState === "idle") void state.audio.start();
-    const digits = radio.mode === "wbfm" ? 1 : 4;
-    logLine(`tuned ${label ?? `${(freq / 1e6).toFixed(digits)} MHz`}`);
+    logLine(`tuned ${label ?? freqLabel(radio.mode, freq)}`);
   } catch (e) {
     logLine(`tune failed — ${(e as ApiError).message}`);
   }
@@ -562,14 +587,14 @@ async function tuneFrequency(hz: number, label?: string): Promise<void> {
 async function seek(dir: 1 | -1): Promise<void> {
   if (!state.client || !state.radio || state.seeking) return;
   const mode = state.radio.mode;
-  if (mode !== "wbfm" && mode !== "nbfm") return;
+  if (mode !== "wbfm" && mode !== "nbfm" && mode !== "am") return;
 
-  // Scan the actual FM broadcast band (not the wider manual-tune range).
-  const step = mode === "wbfm" ? 200_000 : 25_000;
-  const lo = mode === "wbfm" ? 87_700_000 : 162_400_000;
-  const hi = mode === "wbfm" ? 108_100_000 : 162_550_000;
-  const rssiGate = mode === "wbfm" ? -48 : -75;
-  const settleMs = mode === "wbfm" ? 220 : 200;
+  // Scan the actual broadcast band (not the wider manual-tune range).
+  const step = mode === "wbfm" ? 200_000 : mode === "am" ? 10_000 : 25_000;
+  const lo = mode === "wbfm" ? 87_700_000 : mode === "am" ? 530_000 : 162_400_000;
+  const hi = mode === "wbfm" ? 108_100_000 : mode === "am" ? 1_700_000 : 162_550_000;
+  const rssiGate = mode === "wbfm" ? -48 : mode === "am" ? -55 : -75;
+  const settleMs = mode === "wbfm" ? 220 : mode === "am" ? 220 : 200;
   const steps = Math.round((hi - lo) / step) + 1;
 
   setState({ seeking: true });
@@ -592,7 +617,7 @@ async function seek(dir: 1 | -1): Promise<void> {
     localStorage.setItem(freqKey(mode), String(f));
     const radio = await state.client.radio();
     setState({ radio });
-    logLine(`seek → ${(radio.frequency_hz / 1e6).toFixed(mode === "wbfm" ? 1 : 4)} MHz`);
+    logLine(`seek → ${freqLabel(mode, radio.frequency_hz)}`);
     void refreshStations();
   } catch (e) {
     logLine(`seek failed — ${(e as ApiError).message}`);
@@ -646,6 +671,9 @@ async function refreshStations(): Promise<void> {
     } else if (mode === "wbfm") {
       const list = await loadFmStations();
       setState({ fmNearby: nearestFm(loc.lat, loc.lon, list, 24) });
+    } else if (mode === "am") {
+      const list = await loadAmStations();
+      setState({ amNearby: nearestAm(loc.lat, loc.lon, list, 24) });
     }
   } catch (e) {
     setState({ locNote: `station list failed to load (${(e as Error).message})` });
@@ -662,6 +690,10 @@ function tunedStationLabel(): string | null {
   }
   if (r.mode === "wbfm") {
     const s = state.fmNearby.find((x) => x.freq_hz === r.frequency_hz);
+    return s ? `${s.call} · ${s.city}, ${s.state}` : null;
+  }
+  if (r.mode === "am") {
+    const s = state.amNearby.find((x) => x.freq_hz === r.frequency_hz);
     return s ? `${s.call} · ${s.city}, ${s.state}` : null;
   }
   return null;
@@ -753,12 +785,13 @@ function structKey(): string {
   return [
     state.phase,
     state.radio?.mode ?? "",
-    state.fmTab,
+    state.bandTab,
     state.switching,
     state.seeking,
     state.modes.length,
     state.nwrNearby.length,
     state.fmNearby.length,
+    state.amNearby.length,
     state.loc ? 1 : 0,
     state.locNote ?? "",
     state.audioStats ? 1 : 0,
@@ -850,9 +883,12 @@ function installDelegates(): void {
     if (hit("#fm-down")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, -1));
     if (hit("#fm-up")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, 1));
     if (hit("#fm-go")) return fmManualGo();
+    if (hit("#am-down")) return void tuneFrequency(stepAm(state.radio!.frequency_hz, -1));
+    if (hit("#am-up")) return void tuneFrequency(stepAm(state.radio!.frequency_hz, 1));
+    if (hit("#am-go")) return amManualGo();
 
-    const tab = t.closest<HTMLButtonElement>("[data-fmtab]");
-    if (tab) return setState({ fmTab: tab.dataset.fmtab as "nearby" | "manual" });
+    const tab = t.closest<HTMLButtonElement>("[data-bandtab]");
+    if (tab) return setState({ bandTab: tab.dataset.bandtab as "nearby" | "manual" });
 
     const station = t.closest<HTMLButtonElement>(".station");
     if (station) {
@@ -875,6 +911,7 @@ function installDelegates(): void {
     const id = (e.target as HTMLElement).id;
     if (id === "loc") findFromInput();
     else if (id === "fm-freq") fmManualGo();
+    else if (id === "am-freq") amManualGo();
   });
 }
 
@@ -882,6 +919,12 @@ function fmManualGo(): void {
   const raw = panels.querySelector<HTMLInputElement>("#fm-freq")?.value ?? "";
   const mhz = parseFloat(raw);
   if (Number.isFinite(mhz)) void tuneFrequency(snapFm(mhz * 1e6));
+}
+
+function amManualGo(): void {
+  const raw = panels.querySelector<HTMLInputElement>("#am-freq")?.value ?? "";
+  const khz = parseFloat(raw);
+  if (Number.isFinite(khz)) void tuneFrequency(snapAm(khz * 1e3));
 }
 
 // --- panel HTML ----------------------------------------------------
@@ -960,6 +1003,8 @@ function wizardHtml(): string {
       return nwrWizardHtml();
     case "wbfm":
       return fmWizardHtml();
+    case "am":
+      return amWizardHtml();
     case "adsb":
     case "ais":
       return scopeWizardHtml();
@@ -1019,13 +1064,13 @@ function fmWizardHtml(): string {
       ),
     )
     .join("");
-  const tab = state.fmTab;
+  const tab = state.bandTab;
   return `
     <section class="card">
       <h2>FM Broadcast — tune a station</h2>
       <div class="tabs">
-        <button class="tab${tab === "nearby" ? " on" : ""}" data-fmtab="nearby">Nearby</button>
-        <button class="tab${tab === "manual" ? " on" : ""}" data-fmtab="manual">Manual</button>
+        <button class="tab${tab === "nearby" ? " on" : ""}" data-bandtab="nearby">Nearby</button>
+        <button class="tab${tab === "manual" ? " on" : ""}" data-bandtab="manual">Manual</button>
       </div>
       ${
         tab === "nearby"
@@ -1039,6 +1084,45 @@ function fmWizardHtml(): string {
                <button id="fm-go">Tune</button>
              </div>
              <p class="note" style="margin:8px 0 0">${FM_MIN_HZ / 1e6}–${FM_MAX_HZ / 1e6} MHz · 0.2 MHz steps · use Seek in “Now playing”.</p>`
+      }
+    </section>`;
+}
+
+function amWizardHtml(): string {
+  const r = state.radio!;
+  const khz = (r.frequency_hz / 1e3).toFixed(0);
+  const rows = state.amNearby
+    .map((s) =>
+      stationRow(
+        s.freq_hz,
+        (s.freq_hz / 1e3).toFixed(0),
+        `${s.call} — ${s.city}, ${s.state}`,
+        `class ${s.class}${s.power_kw ? ` · ${s.power_kw} kW day` : ""} · ${s.distance_mi.toFixed(0)} mi`,
+        s.freq_hz === r.frequency_hz,
+        `${s.call} · ${s.city}, ${s.state}`,
+      ),
+    )
+    .join("");
+  const tab = state.bandTab;
+  return `
+    <section class="card">
+      <h2>AM Radio — tune a station</h2>
+      <div class="tabs">
+        <button class="tab${tab === "nearby" ? " on" : ""}" data-bandtab="nearby">Nearby</button>
+        <button class="tab${tab === "manual" ? " on" : ""}" data-bandtab="manual">Manual</button>
+      </div>
+      ${
+        tab === "nearby"
+          ? `${locRowHtml()}
+             ${rows ? `<div class="stations">${rows}</div>` : `<p class="note" style="margin:10px 0 0">Set your location to list nearby AM stations.</p>`}`
+          : `<div class="dial">
+               <button id="am-down" class="secondary">−</button>
+               <input id="am-freq" type="text" inputmode="decimal" value="${khz}" />
+               <span class="dial-unit">kHz</span>
+               <button id="am-up" class="secondary">+</button>
+               <button id="am-go">Tune</button>
+             </div>
+             <p class="note" style="margin:8px 0 0">${AM_MIN_HZ / 1e3}–${AM_MAX_HZ / 1e3} kHz · 10 kHz steps · use Seek in “Now playing”.</p>`
       }
     </section>`;
 }
@@ -1420,14 +1504,13 @@ function nowPlayingInner(): string {
       </div>`;
   }
 
-  const digits = r.mode === "wbfm" ? 1 : 4;
   const ident = tunedStationLabel();
-  const canSeek = r.mode === "wbfm" || r.mode === "nbfm";
+  const canSeek = r.mode === "wbfm" || r.mode === "nbfm" || r.mode === "am";
   return `
     <h2>Now playing</h2>
     <div class="mode-line">
       <span class="mode">${esc(meta?.label ?? r.mode)}</span>
-      <span class="freq">${(r.frequency_hz / 1e6).toFixed(digits)} MHz</span>
+      <span class="freq">${freqLabel(r.mode, r.frequency_hz)}</span>
       <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "running" : "stopped"}</span>
     </div>
     ${ident ? `<p class="note" style="margin:0 0 12px">${esc(ident)}</p>` : ""}

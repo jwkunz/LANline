@@ -1,16 +1,17 @@
 # LANline — web client
 
 Vanilla TypeScript + Vite. Mode-selection wizard (NOAA Weather / FM Broadcast /
-ADS-B / AIS / Debug Tone), nearest-station finders, seek, a shared radar scope
-for the ADS-B + AIS traffic trackers (canvas, no map tiles), REST session with
-heartbeat, live radio/telemetry display, and received-audio playback over
-WebRTC/Opus (Play button — a user gesture is required to start audio).
+AM Radio / ADS-B / AIS / Debug Tone), nearest-station finders, seek, a shared
+radar scope for the ADS-B + AIS traffic trackers (canvas, no map tiles), REST
+session with heartbeat, live radio/telemetry display, and received-audio
+playback over WebRTC/Opus (Play button — a user gesture is required to start
+audio).
 
 `npm run build` produces a **single self-contained `dist/index.html`** (all
-JS/CSS inlined, via `vite-plugin-singlefile`). That bundle plus the two station
-databases in `public/` are what the `lanline-server` binary embeds and serves at
-`/`, and what the Android APK ships as `file://` assets — so it must load from a
-non-root base and make same-origin API calls.
+JS/CSS inlined, via `vite-plugin-singlefile`). That bundle plus the three
+station databases in `public/` are what the `lanline-server` binary embeds and
+serves at `/`, and what the Android APK ships as `file://` assets — so it must
+load from a non-root base and make same-origin API calls.
 
 ## Connecting
 
@@ -39,9 +40,9 @@ npm run preview    # serve the built bundle
 | `src/audio.ts` | `AudioSession`: recvonly `RTCPeerConnection`, non-trickle offer |
 | `src/discovery.ts` | `window.LanlineNative` bridge (Android beacon discovery) |
 | `src/geo.ts` | haversine nearest-N + `lat, lon` parse + XHR JSON loader (works from `file://`) |
-| `src/nwr.ts` / `src/fm.ts` | NOAA Weather Radio + FM broadcast station directories, nearest-station search |
+| `src/nwr.ts` / `src/fm.ts` / `src/am.ts` | NOAA Weather Radio + FM broadcast + AM broadcast station directories, nearest-station search |
 | `src/adsb.ts` / `src/ais.ts` | ADS-B + AIS track types + the equirectangular projection the shared radar scope uses |
-| `public/nwr-stations.json` / `public/fm-stations.json` | the bundled directories (served by the server too) |
+| `public/nwr-stations.json` / `public/fm-stations.json` / `public/am-stations.json` | the bundled directories (served by the server too) |
 | `src/main.ts` | app: origin/host connect flow, mode wizard, heartbeat + 1 Hz poll loops, seek, rendering |
 | `src/style.css` | light/dark styling |
 
@@ -50,4 +51,5 @@ Regenerate the station data (committed so builds need no network):
 ```sh
 node ../scripts/fetch-nwr.mjs     # ~1000 NWR transmitters, from NWS CCL.js
 node ../scripts/fetch-fm.mjs      # ~11k licensed FM stations, from the FCC FM Query
+node ../scripts/fetch-am.mjs      # ~4.3k licensed AM stations, from the FCC AM Query
 ```
