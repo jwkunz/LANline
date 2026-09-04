@@ -1,16 +1,21 @@
 package land.my.sdrc2
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 
 /**
  * Single-activity WebView host. Loads the bundled web client (or a configured
@@ -22,6 +27,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private val beacon = BeaconListener()
     private var multicastLock: WifiManager.MulticastLock? = null
+
+    private var pendingGeo: Pair<String, GeolocationPermissions.Callback>? = null
+    private val locationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            pendingGeo?.let { (origin, cb) -> cb.invoke(origin, granted, false) }
+            pendingGeo = null
+        }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,6 +54,8 @@ class MainActivity : AppCompatActivity() {
             // server on the LAN; allow cross-origin XHR/fetch from file://.
             @Suppress("DEPRECATION")
             allowUniversalAccessFromFileURLs = true
+            @Suppress("DEPRECATION")
+            setGeolocationEnabled(true)
         }
         WebView.setWebContentsDebuggingEnabled(true)
 
@@ -50,6 +64,22 @@ class MainActivity : AppCompatActivity() {
             override fun onPermissionRequest(request: PermissionRequest) {
                 // Receive-only WebRTC needs no capture permission.
                 request.deny()
+            }
+
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String,
+                callback: GeolocationPermissions.Callback,
+            ) {
+                val granted = ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    callback.invoke(origin, true, false)
+                } else {
+                    pendingGeo = origin to callback
+                    locationPermission.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
+                }
             }
         }
 

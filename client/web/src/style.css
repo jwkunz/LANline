@@ -176,6 +176,34 @@ button:disabled {
   color: var(--muted);
 }
 
+.stations {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.station {
+  display: grid;
+  grid-template-columns: 84px 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-weight: 400;
+  padding: 8px 10px;
+}
+.station:hover { border-color: var(--accent); }
+.station.tuned {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.station .s-call { font-weight: 600; font-variant-numeric: tabular-nums; }
+.station .s-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
 .note {
   color: var(--muted);
   font-size: 13px;

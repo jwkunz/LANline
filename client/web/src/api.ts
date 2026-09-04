@@ -105,6 +105,9 @@ export class Client {
   deleteSession = (id: string) =>
     this.request<null>("DELETE", `/api/v1/sessions/${id}`, { auth: true });
 
+  patchRadio = (patch: Record<string, unknown>) =>
+    this.request<RadioConfig>("PATCH", "/api/v1/radio", { auth: true, body: patch });
+
   startRadio = () =>
     this.request<RadioConfig>("POST", "/api/v1/radio/start", { auth: true });
 

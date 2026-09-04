@@ -22,5 +22,13 @@ Enter the server host from the server's startup log (e.g.
 | `src/types.ts` | TS mirrors of `server/src/model.rs` DTOs |
 | `src/api.ts` | typed `fetch` wrapper + `ApiError` + host normalization |
 | `src/audio.ts` | `AudioSession`: recvonly `RTCPeerConnection`, non-trickle offer |
-| `src/main.ts` | app: connect flow, heartbeat + 1 Hz poll loops, rendering |
+| `src/discovery.ts` | `window.SdrNative` bridge (Android beacon discovery) |
+| `src/nwr.ts` + `src/nwr-stations.json` | bundled NOAA Weather Radio transmitter directory + nearest-station search |
+| `src/main.ts` | app: connect flow, heartbeat + 1 Hz poll loops, station finder, rendering |
 | `src/style.css` | light/dark styling |
+
+Regenerate the station data (1000+ transmitters, from NWS `CCL.js`):
+
+```sh
+node ../../scripts/fetch-nwr.mjs
+```

@@ -2,6 +2,7 @@ import "./style.css";
 import { ApiError, Client, normalizeBase } from "./api";
 import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
+import { nearestStations, parseLatLon, type NearbyStation } from "./nwr";
 import type {
   AudioStateResponse,
   CreateSessionResponse,
@@ -29,8 +30,12 @@ interface State {
   audioState: AudioState;
   audioDetail: string | null;
   audioStats: AudioStateResponse | null;
+  nearby: NearbyStation[];
+  stationsNote: string | null;
   log: string[];
 }
+
+const LOC_KEY = "sdrc2.loc";
 
 const state: State = {
   phase: "disconnected",
@@ -46,6 +51,8 @@ const state: State = {
   audioState: "idle",
   audioDetail: null,
   audioStats: null,
+  nearby: [],
+  stationsNote: null,
   log: [],
 };
 
@@ -207,6 +214,10 @@ async function connect(hostRaw: string): Promise<void> {
     );
     startTimers();
 
+    // Pre-populate the station list from a saved location.
+    const savedLoc = localStorage.getItem(LOC_KEY);
+    if (savedLoc) findStations(savedLoc);
+
     // In the native wrapper, behave like an appliance: start the radio and
     // begin playback automatically.
     if (NATIVE) void autoListen();
@@ -294,6 +305,71 @@ function toggleMute(): void {
   if (state.audio) {
     state.audio.setMuted(!state.audio.muted);
     render();
+  }
+}
+
+// --- NOAA Weather Radio station finder ------------------------------
+
+function locInputValue(): string {
+  return panels.querySelector<HTMLInputElement>("#loc")?.value ?? "";
+}
+
+function findStations(fromText?: string): void {
+  const text = (fromText ?? locInputValue()).trim();
+  const parsed = text ? parseLatLon(text) : null;
+  if (!parsed) {
+    setState({
+      nearby: [],
+      stationsNote:
+        "enter your location as `lat, lon` (e.g. 40.76, -111.89), or tap “My location”",
+    });
+    return;
+  }
+  localStorage.setItem(LOC_KEY, `${parsed.lat}, ${parsed.lon}`);
+  const nearby = nearestStations(parsed.lat, parsed.lon, 20);
+  setState({
+    nearby,
+    stationsNote: `nearest transmitters to ${parsed.lat.toFixed(3)}, ${parsed.lon.toFixed(3)}`,
+  });
+}
+
+function useMyLocation(): void {
+  if (!navigator.geolocation) {
+    setState({ stationsNote: "geolocation unavailable — enter lat, lon manually" });
+    return;
+  }
+  setState({ stationsNote: "locating…" });
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const v = `${pos.coords.latitude.toFixed(5)}, ${pos.coords.longitude.toFixed(5)}`;
+      const el = panels.querySelector<HTMLInputElement>("#loc");
+      if (el) el.value = v;
+      findStations(v);
+    },
+    (err) =>
+      setState({
+        stationsNote: `location failed (${err.message}) — enter lat, lon manually`,
+      }),
+    { enableHighAccuracy: false, timeout: 10_000, maximumAge: 600_000 },
+  );
+}
+
+async function tuneToStation(s: NearbyStation): Promise<void> {
+  if (!state.client) return;
+  try {
+    // Only switch mode if we're not already on NBFM (a mode set would reset
+    // the mode params); a bare frequency change is a gapless live retune.
+    const patch: Record<string, unknown> = { frequency_hz: s.freq_hz };
+    if (state.radio?.mode !== "nbfm") patch.mode = "nbfm";
+    let radio = await state.client.patchRadio(patch);
+    logLine(
+      `tuned ${s.callsign} · ${s.site}, ${s.state} · ${(s.freq_hz / 1e6).toFixed(3)} MHz`,
+    );
+    if (!radio.running) radio = await state.client.startRadio();
+    setState({ radio });
+    if (state.audio && state.audioState === "idle") void state.audio.start();
+  } catch (e) {
+    logLine(`tune failed — ${(e as ApiError).message}`);
   }
 }
 
@@ -405,6 +481,62 @@ function render(): void {
   panels
     .querySelector<HTMLInputElement>("#audio-mute")
     ?.addEventListener("change", () => toggleMute());
+  panels
+    .querySelector<HTMLButtonElement>("#loc-find")
+    ?.addEventListener("click", () => findStations());
+  panels
+    .querySelector<HTMLButtonElement>("#loc-me")
+    ?.addEventListener("click", () => useMyLocation());
+  panels.querySelector<HTMLInputElement>("#loc")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") findStations();
+  });
+  panels.querySelectorAll<HTMLButtonElement>(".station").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const s = state.nearby.find((x) => x.callsign === btn.dataset.call);
+      if (s) void tuneToStation(s);
+    });
+  });
+}
+
+function stationsCardHtml(): string {
+  const r = state.radio!;
+  const saved = localStorage.getItem(LOC_KEY) ?? "";
+  const rows = state.nearby
+    .map((s) => {
+      const tuned = s.freq_hz === r.frequency_hz;
+      const mhz = (s.freq_hz / 1e6).toFixed(3);
+      const flag =
+        s.status === "out_of_service"
+          ? " · out of service"
+          : s.status === "degraded"
+            ? " · degraded"
+            : "";
+      return `<button class="station${tuned ? " tuned" : ""}" data-call="${esc(s.callsign)}">
+        <span class="s-call">${esc(s.callsign)}${tuned ? " ✓" : ""}</span>
+        <span class="s-site">${esc(s.site)}, ${esc(s.state)}</span>
+        <span class="s-meta">${mhz} MHz · ${s.distance_mi.toFixed(0)} mi${flag}</span>
+      </button>`;
+    })
+    .join("");
+
+  return `
+    <section class="card">
+      <h2>NOAA Weather Stations</h2>
+      <div class="connect-row">
+        <input id="loc" type="text" spellcheck="false" autocapitalize="off"
+               placeholder="your location — lat, lon" value="${esc(saved)}" />
+        <button id="loc-me" class="secondary">📍 My location</button>
+        <button id="loc-find">Find</button>
+      </div>
+      ${state.stationsNote ? `<p class="note" style="margin:10px 0 0">${esc(state.stationsNote)}</p>` : ""}
+      ${
+        rows
+          ? `<div class="stations">${rows}</div>
+             <p class="note" style="margin:8px 0 0">Tuning picks the channel; the radio then
+             receives the strongest transmitter on it.</p>`
+          : ""
+      }
+    </section>`;
 }
 
 function audioCardHtml(): string {
@@ -514,6 +646,8 @@ function panelsHtml(): string {
         </button>
       </div>
     </section>
+
+    ${stationsCardHtml()}
 
     ${audioCardHtml()}
 
