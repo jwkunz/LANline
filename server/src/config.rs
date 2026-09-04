@@ -59,6 +59,10 @@ pub struct Config {
     #[arg(long, env = "LANLINE_DEBUG_TONE", default_value_t = false)]
     pub debug_tone: bool,
 
+    /// TCP port for the Beast binary Mode S feed (ADS-B). `0` disables it.
+    #[arg(long, env = "LANLINE_BEAST_PORT", default_value_t = 30005)]
+    pub beast_port: u16,
+
     /// Also write the pre-Opus 48 kHz mono audio to this path as a 16-bit WAV
     /// (diagnostic; overwritten on each pipeline start).
     #[arg(long, env = "LANLINE_DUMP_WAV")]

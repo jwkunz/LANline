@@ -4,6 +4,7 @@
 //! audio pipeline (440 Hz `debug_tone` / silence) → Opus → per-session WebRTC.
 //! The real SoapySDR DSP source replaces the synth in phase 1c.
 
+mod adsb;
 mod api;
 mod audio;
 mod catalog;
@@ -84,7 +85,8 @@ async fn main() -> Result<()> {
     )
     .await?;
     let audio_in = net::pick_udp_port(config.bind, config.audio_in_port)?;
-    let ports = Ports { c2: c2_port, audio_out, audio_in };
+    let beast = adsb::beast::serve(config.bind, config.beast_port, radio_mgr.adsb().beast_tx.clone());
+    let ports = Ports { c2: c2_port, audio_out, audio_in, beast };
 
     let state = AppState::new(
         config.clone(),
@@ -135,11 +137,12 @@ async fn main() -> Result<()> {
     // --- serve -------------------------------------------------------
     let listener = tokio::net::TcpListener::from_std(tcp)?;
     tracing::info!(
-        "listening: C2 http://{host}:{c2}  audio_out udp/{ao}  audio_in udp/{ai}  beacon udp/{bp}",
+        "listening: C2 http://{host}:{c2}  audio_out udp/{ao}  audio_in udp/{ai}  beast tcp/{be}  beacon udp/{bp}",
         host = advertised_host,
         c2 = ports.c2,
         ao = ports.audio_out,
         ai = ports.audio_in,
+        be = ports.beast,
         bp = config.beacon_port,
     );
     let name_url = match (config.no_mdns, advertised_host) {

@@ -27,6 +27,7 @@ same port also serves the bundled web client and is advertised over mDNS as
 - [Meta](#meta)
 - [Devices](#devices)
 - [Modes](#modes)
+- [ADS-B track export](#adsb-track-export)
 - [Presets](#presets)
 - [Radio configuration & control](#radio-configuration--control)
 - [Sessions](#sessions)
@@ -130,8 +131,8 @@ Server identity and current capability summary.
   "version": "0.1.0",
   "hostname": "bench-linux",
   "time": "2026-09-03T17:04:11Z",
-  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731 },
-  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "debug_tone"],
+  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005 },
+  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "adsb", "debug_tone"],
   "selected_device": {
     "id": "hackrf/0000000000000000457863c8...",
     "driver": "hackrf",
@@ -143,6 +144,8 @@ Server identity and current capability summary.
 
 `capabilities` is dynamic: `"tx"` appears only when the selected device
 supports transmit. `selected_device` is `null` when none is selected.
+`ports.beast` is the TCP port of the [Beast Mode S feed](#adsb-track-export),
+`0` when disabled (`--beast-port 0`).
 
 ---
 
@@ -290,6 +293,19 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "adsb",
+    "name": "ADS-B (1090 MHz aircraft)",
+    "tx_capable": false,
+    "params": {
+      "reference_lat":  { "type": "number", "default": 0, "min": -90,  "max": 90,  "unit": "deg" },
+      "reference_lon":  { "type": "number", "default": 0, "min": -180, "max": 180, "unit": "deg" },
+      "max_range_nm":   { "type": "number", "default": 250, "min": 10, "max": 500, "unit": "NM" },
+      "trail_seconds":  { "type": "number", "default": 120, "min": 10, "max": 600, "unit": "s" },
+      "forget_seconds": { "type": "number", "default": 60,  "min": 10, "max": 600, "unit": "s" },
+      "fix_errors":     { "type": "number", "default": 1, "enum": [0, 1], "unit": "bool" }
+    }
+  },
+  {
     "id": "debug_tone",
     "name": "Debug Tone (A4 440 Hz)",
     "tx_capable": false,
@@ -310,6 +326,83 @@ and notches the 19 kHz stereo pilot; it wants a wider `tuner.sample_rate_hz`
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end
 check for the WebRTC path.
+
+`adsb` is a **non-audio** mode: it tunes 1090 MHz at 2 Msps, demodulates Mode S
+Extended Squitter, and folds decoded frames into an aircraft track table. It
+produces no Opus stream — read the tracks from [ADS-B track
+export](#adsb-track-export) (or the Beast TCP feed). Its `mode_params`:
+
+| param | default | meaning |
+|-------|--------:|---------|
+| `reference_lat`, `reference_lon` | `0`, `0` | receiver position for local CPR + range/bearing. `0,0` = unset (global CPR only, no range gate) |
+| `max_range_nm` | `250` | drop positions farther than this from the reference |
+| `trail_seconds` | `120` | position-trail length kept per aircraft |
+| `forget_seconds` | `60` | drop an aircraft after this long with no message |
+| `fix_errors` | `1` | attempt single-bit CRC correction on DF17/18 frames |
+
+---
+
+## ADS-B track export
+
+Available whenever the server is built with SDR support; populated only while
+the `adsb` mode pipeline runs (otherwise the tables are empty). Unauthenticated,
+read-only.
+
+### `GET /api/v1/adsb/aircraft`
+
+```json
+{
+  "time": "2026-09-04T12:09:41Z",
+  "mode": "adsb",
+  "running": true,
+  "receiver": [32.8986, -80.0405],
+  "messages": 39421,
+  "message_rate": 8.4,
+  "aircraft_count": 7,
+  "with_position": 7,
+  "aircraft": [
+    {
+      "icao": "ad6d03",
+      "callsign": "SWA3451",
+      "category": "A3",
+      "altitude_ft": 36875,
+      "lat": 32.771, "lon": -80.05,
+      "ground_speed_kt": 459.0,
+      "track_deg": 205.0,
+      "vertical_rate_fpm": -64,
+      "rssi_dbfs": -3.1,
+      "messages": 214,
+      "age_s": 0.4,
+      "pos_age_s": 0.9,
+      "distance_nm": 8.1,
+      "bearing_deg": 188.0,
+      "trail": [[32.79, -80.04], [32.78, -80.045]]
+    }
+  ]
+}
+```
+
+`aircraft` is sorted by `distance_nm` (positioned aircraft first, then by
+recency). Any field except `icao`, `messages`, `age_s` and `trail` may be
+`null` until the relevant message type is heard. `receiver` is `null` when no
+reference position was configured.
+
+### `GET /api/v1/adsb/messages`
+
+A ring buffer of the most recent raw frames (hex of the 7- or 14-byte Mode S
+frame), newest last:
+
+```json
+{ "time": "…", "count": 512, "messages": ["8dad6d039914c3b4184060783d2b", "…"] }
+```
+
+### Beast feed (TCP `ports.beast`, default `30005`)
+
+A raw **Beast binary** stream of every CRC-valid frame:
+`0x1a <type> <6-byte 12 MHz timestamp> <1-byte signal> <frame>`, with `0x1a`
+bytes in the payload doubled. `type` is `0x32` (7-byte) or `0x33` (14-byte).
+Point `readsb` / `tar1090` / Virtual Radar Server at it. Disable with
+`--beast-port 0`.
 
 ---
 

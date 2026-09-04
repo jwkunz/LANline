@@ -30,6 +30,8 @@ pub struct Ports {
     pub c2: u16,
     pub audio_out: u16,
     pub audio_in: u16,
+    /// Beast binary Mode S feed (ADS-B). 0 when disabled.
+    pub beast: u16,
 }
 
 #[derive(Serialize, Clone, Debug)]

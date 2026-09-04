@@ -84,7 +84,12 @@ impl Beacon {
             "version": SERVER_VERSION,
             "hostname": self.state.hostname,
             "advertised_host": host.to_string(),
-            "ports": { "c2": ports.c2, "audio_out": ports.audio_out, "audio_in": ports.audio_in },
+            "ports": {
+                "c2": ports.c2,
+                "audio_out": ports.audio_out,
+                "audio_in": ports.audio_in,
+                "beast": ports.beast,
+            },
             "c2_base_url": format!("http://{host}:{}", ports.c2),
             "device": device,
             "devices_available": devices_available,

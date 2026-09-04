@@ -1,5 +1,6 @@
 //! axum router assembly.
 
+mod adsb;
 mod audio;
 mod devices;
 mod meta;
@@ -32,6 +33,8 @@ pub fn router(state: AppState) -> Router {
         .route("/radio/start", post(radio::start))
         .route("/radio/stop", post(radio::stop))
         .route("/radio/status", get(radio::status))
+        .route("/adsb/aircraft", get(adsb::aircraft))
+        .route("/adsb/messages", get(adsb::messages))
         .route("/radio/tx", get(reserved::stub).patch(reserved::stub))
         .route("/radio/tx/ptt", post(reserved::stub))
         .route("/sessions", get(sessions::list).post(sessions::create))
@@ -121,7 +124,7 @@ mod tests {
         .unwrap();
         let state = AppState::new(
             config,
-            Ports { c2: 0, audio_out, audio_in: 0 },
+            Ports { c2: 0, audio_out, audio_in: 0, beast: 0 },
             Ipv4Addr::LOCALHOST.into(),
             registry,
             sessions,
@@ -280,6 +283,25 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("application/json"));
+    }
+
+    #[tokio::test]
+    async fn adsb_endpoints_report_empty_when_idle() {
+        let app = app().await;
+
+        let (s, b) = send(&app, get("/api/v1/adsb/aircraft")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["aircraft_count"], 0);
+        assert_eq!(b["running"], false);
+        assert!(b["aircraft"].as_array().unwrap().is_empty());
+
+        let (s, b) = send(&app, get("/api/v1/adsb/messages")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["count"], 0);
+
+        // adsb is advertised as a mode + capability
+        let (_, modes) = send(&app, get("/api/v1/modes")).await;
+        assert!(modes.as_array().unwrap().iter().any(|m| m["id"] == "adsb"));
     }
 
     #[tokio::test]

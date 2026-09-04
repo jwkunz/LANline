@@ -8,6 +8,7 @@
 #[cfg(feature = "soapy")]
 pub mod dsp;
 
+use crate::adsb::AdsbShared;
 use crate::audio::{rms_dbfs, AudioFrame};
 use crate::model::RadioConfig;
 use crate::registry::DeviceRegistry;
@@ -51,6 +52,7 @@ pub struct RadioManager {
     tx: broadcast::Sender<AudioFrame>,
     run: Mutex<RunState>,
     telemetry: Arc<Mutex<Telemetry>>,
+    adsb: Arc<AdsbShared>,
 }
 
 #[derive(Default)]
@@ -84,11 +86,18 @@ impl RadioManager {
             tx,
             run: Mutex::new(RunState::default()),
             telemetry: Arc::new(Mutex::new(Telemetry::default())),
+            adsb: Arc::new(AdsbShared::new()),
         })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
         self.tx.subscribe()
+    }
+
+    /// Shared ADS-B track table + Beast feed handle (populated only while the
+    /// `adsb` mode pipeline is running).
+    pub fn adsb(&self) -> Arc<AdsbShared> {
+        self.adsb.clone()
     }
 
     pub fn is_running(&self) -> bool {
@@ -116,6 +125,7 @@ impl RadioManager {
 
         let stop_thread = stop.clone();
         let dump = self.dump_wav.clone();
+        let adsb = self.adsb.clone();
 
         #[cfg(feature = "soapy")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<PipelineCmd>();
@@ -123,9 +133,9 @@ impl RadioManager {
         let cmd_rx = ();
 
         let handle = std::thread::Builder::new()
-            .name("audio-pipeline".into())
-            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx))
-            .expect("spawn audio-pipeline thread");
+            .name("rx-pipeline".into())
+            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb))
+            .expect("spawn rx-pipeline thread");
 
         run.stop = Some(stop);
         run.handle = Some(handle);
@@ -264,6 +274,26 @@ enum SourceKind {
     Silence,
     #[cfg(feature = "soapy")]
     Sdr(Box<SdrParams>),
+    #[cfg(feature = "soapy")]
+    Adsb(Box<AdsbSdrParams>),
+}
+
+#[cfg(feature = "soapy")]
+struct AdsbSdrParams {
+    soapy_args: String,
+    device_rate: f64,
+    freq_hz: f64,
+    channel: usize,
+    antenna: Option<String>,
+    agc: bool,
+    gain_overall_db: Option<f64>,
+    gain_elements_db: Vec<(String, f64)>,
+    settings: Vec<(String, String)>,
+    reference: Option<(f64, f64)>,
+    max_range_nm: f64,
+    trail_secs: f64,
+    forget_secs: f64,
+    fix_errors: bool,
 }
 
 #[cfg(feature = "soapy")]
@@ -332,6 +362,49 @@ impl PipelineParams {
                 None => SourceKind::Silence,
                 }
             }
+            "adsb" => {
+                #[cfg(not(feature = "soapy"))]
+                {
+                    let _ = device;
+                    SourceKind::Silence
+                }
+                #[cfg(feature = "soapy")]
+                match device {
+                    Some(dev) => {
+                        let rlat = param("reference_lat", 0.0);
+                        let rlon = param("reference_lon", 0.0);
+                        let reference =
+                            (rlat.abs() > 0.01 || rlon.abs() > 0.01).then_some((rlat, rlon));
+                        SourceKind::Adsb(Box::new(AdsbSdrParams {
+                            soapy_args: dev.soapy_args.clone(),
+                            device_rate: cfg.tuner.sample_rate_hz,
+                            freq_hz: cfg.frequency_hz as f64,
+                            channel: cfg.tuner.channel,
+                            antenna: cfg.tuner.antenna.clone(),
+                            agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
+                            gain_overall_db: cfg.tuner.gain_db,
+                            gain_elements_db: cfg
+                                .tuner
+                                .gain_elements_db
+                                .iter()
+                                .map(|(k, v)| (k.clone(), *v))
+                                .collect(),
+                            settings: cfg
+                                .tuner
+                                .device_settings
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                            reference,
+                            max_range_nm: param("max_range_nm", 250.0),
+                            trail_secs: param("trail_seconds", 120.0),
+                            forget_secs: param("forget_seconds", 60.0),
+                            fix_errors: param("fix_errors", 1.0) != 0.0,
+                        }))
+                    }
+                    None => SourceKind::Silence,
+                }
+            }
             _ => SourceKind::Silence,
         };
 
@@ -367,7 +440,9 @@ fn run_pipeline(
     stop: Arc<AtomicBool>,
     dump: Option<PathBuf>,
     cmd_rx: CmdRx,
+    adsb: Arc<AdsbShared>,
 ) {
+    let _ = &adsb;
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
         Ok(w) => {
@@ -392,6 +467,8 @@ fn run_pipeline(
         SourceKind::Sdr(sdr) => {
             run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut(), cmd_rx)
         }
+        #[cfg(feature = "soapy")]
+        SourceKind::Adsb(p) => run_adsb(*p, adsb, &telemetry, &stop, cmd_rx),
     }
 }
 
@@ -626,6 +703,149 @@ fn run_sdr(
                 t.squelch_open = m.squelch_open;
                 t.overruns = overruns;
             }
+        }
+    }
+
+    let _ = stream.deactivate(None);
+}
+
+/// ADS-B pipeline: 2 Msps @ 1090 MHz into the [`crate::adsb`] demod/tracker.
+/// Produces no audio — the tracks are read over REST and the Beast feed.
+#[cfg(feature = "soapy")]
+fn run_adsb(
+    p: AdsbSdrParams,
+    shared: Arc<AdsbShared>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+    cmd_rx: mpsc::Receiver<PipelineCmd>,
+) {
+    use crate::adsb::demod::Demod;
+    use num_complex::Complex32;
+    use soapysdr::{Device, Direction, ErrorCode};
+
+    let dir = Direction::Rx;
+    let ch = p.channel;
+
+    shared
+        .tracker
+        .lock()
+        .unwrap()
+        .reset(p.reference, p.max_range_nm, p.trail_secs, p.forget_secs);
+    shared.hex.lock().unwrap().clear();
+
+    let dev = match Device::new(p.soapy_args.as_str()) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("adsb: cannot open device: {e}");
+            return;
+        }
+    };
+    let log_set = |what: &str, r: Result<(), soapysdr::Error>| {
+        if let Err(e) = r {
+            tracing::warn!("adsb: set {what}: {e}");
+        }
+    };
+    log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
+    log_set("frequency", dev.set_frequency(dir, ch, p.freq_hz, ""));
+    if let Some(ant) = &p.antenna {
+        log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
+    }
+    if p.agc {
+        log_set("agc", dev.set_gain_mode(dir, ch, true));
+    } else {
+        log_set("gain_mode", dev.set_gain_mode(dir, ch, false));
+        if let Some(g) = p.gain_overall_db {
+            log_set("gain", dev.set_gain(dir, ch, g));
+        }
+        for (name, v) in &p.gain_elements_db {
+            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+        }
+    }
+    for (k, v) in &p.settings {
+        log_set("setting", dev.write_setting(k.as_str(), v.as_str()));
+    }
+
+    let mut stream = match dev.rx_stream::<Complex32>(&[ch]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("adsb: rx_stream: {e}");
+            return;
+        }
+    };
+    if let Err(e) = stream.activate(None) {
+        tracing::error!("adsb: stream activate: {e}");
+        return;
+    }
+
+    let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
+    let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
+    let mut demod = Demod::new(p.fix_errors);
+
+    telemetry.lock().unwrap().source = "adsb";
+    tracing::info!(
+        "adsb: {} @ {:.3} MHz, {:.1} Msps, ref {}",
+        p.soapy_args,
+        p.freq_hz / 1e6,
+        p.device_rate / 1e6,
+        match p.reference {
+            Some((la, lo)) => format!("{la:.3},{lo:.3}"),
+            None => "none".into(),
+        },
+    );
+
+    let mut frames: u64 = 0;
+    let mut overruns: u64 = 0;
+    let mut rssi_ema = -60.0f32;
+    let mut last_status = Instant::now();
+
+    while !stop.load(Ordering::SeqCst) {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if let PipelineCmd::Gain { agc, overall, elements } = cmd {
+                log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
+                if !agc {
+                    if let Some(g) = overall {
+                        log_set("gain", dev.set_gain(dir, ch, g));
+                    }
+                    for (name, v) in &elements {
+                        log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+                    }
+                }
+            }
+        }
+
+        let n = match stream.read(&mut [iq.as_mut_slice()], 200_000) {
+            Ok(n) => n,
+            Err(e) => {
+                match e.code {
+                    ErrorCode::Timeout => {}
+                    ErrorCode::Overflow => overruns += 1,
+                    _ => {
+                        tracing::warn!("adsb: stream read: {e}");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                continue;
+            }
+        };
+        if n == 0 {
+            continue;
+        }
+
+        let shared_ref = &shared;
+        demod.process(&iq[..n], |f| {
+            frames += 1;
+            rssi_ema = rssi_ema * 0.95 + f.rssi_dbfs * 0.05;
+            shared_ref.record(&f);
+        });
+
+        if last_status.elapsed() >= Duration::from_millis(500) {
+            last_status = Instant::now();
+            shared.tracker.lock().unwrap().prune(shared.now_s());
+            let mut t = telemetry.lock().unwrap();
+            t.frames_sent = frames;
+            t.rssi_dbfs = Some(rssi_ema);
+            t.squelch_open = frames > 0;
+            t.overruns = overruns;
         }
     }
 

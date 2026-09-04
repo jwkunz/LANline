@@ -33,6 +33,7 @@ Three advertised ports:
 | `c2` | TCP / HTTP | REST API + WebRTC signaling + the embedded web client at `/` |
 | `audio_out` | UDP | WebRTC media (ICE host candidate) for the receive stream |
 | `audio_in` | UDP | Reserved — inbound Opus to modulate (phase 2) |
+| `beast` | TCP | Beast binary Mode S feed (ADS-B); `0` when disabled |
 
 `c2` is **fixed** (default `8730`) so a bookmarked browser URL survives a
 restart; `audio_out`/`audio_in` are random, chosen at startup. Pass `--c2-port 0`
@@ -65,14 +66,24 @@ server/src/
     modes.rs           GET /modes
     presets.rs         GET /presets, POST /presets/{id}/apply
     radio.rs           GET/PATCH /radio, start/stop, GET /radio/status
+    adsb.rs            GET /adsb/aircraft, GET /adsb/messages
     sessions.rs        session CRUD + heartbeat
     audio.rs           WebRTC signaling: offer/ice/state/close
     reserved.rs        phase-2 endpoints -> 501
 
   discovery.rs         UDP beacon: pick ports, enumerate broadcast addrs, emit JSON at 1 Hz
 
+  adsb/
+    mod.rs             AdsbShared: tracker + hex ring + Beast broadcast, on RadioManager
+    demod.rs           2 Msps PPM demod: magnitude, preamble gate, bit slice -> CRC-valid frames
+    message.rs         Mode S CRC-24 (+ 1-bit fix), DF17/18 ME decode (ident / position / velocity)
+    cpr.rs             Compact Position Reporting: global (even/odd) + local decode
+    tracker.rs         per-ICAO track table: CPR folding, trails, expiry, JSON snapshot
+    beast.rs           Beast binary encoder + TCP fan-out server
+
   radio/
-    mod.rs             RadioManager: owns config + pipeline task, hot-apply, telemetry
+    mod.rs             RadioManager: owns config + pipeline task, hot-apply, telemetry;
+                       run_sdr (FM -> Opus) and run_adsb (IQ -> adsb decode, no audio)
     soapy.rs           enumerate(), open(), capability probe, RX stream reader
     source.rs          Source trait: SoapySource | DebugToneSource -> IQ or audio frames
     dsp/
@@ -96,8 +107,10 @@ server/src/
 ## Data / task model
 
 - **One SDR, one DSP pipeline.** `RadioManager` runs the pipeline on a
-  dedicated blocking task (SoapySDR reads are blocking). It produces 20 ms
-  Opus frames onto a `broadcast::channel`.
+  dedicated blocking task (SoapySDR reads are blocking). FM modes produce 20 ms
+  Opus frames onto a `broadcast::channel`; the `adsb` mode instead feeds the
+  Mode S decoder and writes an aircraft table read over REST + a Beast TCP feed
+  (no audio path).
 - **N sessions, N WebRTC peers, shared audio.** Each peer task holds a
   `broadcast::Receiver` and writes samples into its `TrackLocalStaticSample`.
   Slow/backpressured receivers drop frames (lag), they never stall the
@@ -140,3 +153,7 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   wired to `nbfm` mode with live retune (pipeline bounce). Device-range
   validation on `PATCH /radio`. `--dump-wav <path>` writes the pre-Opus audio
   for offline inspection.
+- **2c** — `adsb` mode: `adsb/` (2 Msps PPM demod → Mode S CRC/DF17-18 →
+  CPR → per-ICAO track table), `GET /api/v1/adsb/{aircraft,messages}`, a Beast
+  TCP feed (`--beast-port`, default 30005), and the web client's radar scope
+  (canvas, range rings, trails — no tiles).
