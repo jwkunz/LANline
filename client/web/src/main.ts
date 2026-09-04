@@ -1,6 +1,7 @@
 import "./style.css";
 import { ApiError, Client, normalizeBase } from "./api";
 import { AudioSession, type AudioState } from "./audio";
+import { nativeDiscovery, serverHost } from "./discovery";
 import type {
   AudioStateResponse,
   CreateSessionResponse,
@@ -60,6 +61,7 @@ app.innerHTML = `
   <p class="tagline">Discover a radio server on the LAN and watch the receive session.</p>
   <section class="card">
     <h2>Connection</h2>
+    <div id="discovered" class="discovered" hidden></div>
     <div class="connect-row">
       <input id="host" type="text" spellcheck="false" autocapitalize="off"
              placeholder="server host, e.g. 192.168.1.50:41785" />
@@ -74,12 +76,47 @@ const hostInput = app.querySelector<HTMLInputElement>("#host")!;
 const actionBtn = app.querySelector<HTMLButtonElement>("#action")!;
 const connStatus = app.querySelector<HTMLParagraphElement>("#conn-status")!;
 const panels = app.querySelector<HTMLDivElement>("#panels")!;
+const discoveredBox = app.querySelector<HTMLDivElement>("#discovered")!;
 
 hostInput.value = localStorage.getItem(HOST_KEY) ?? "";
 actionBtn.addEventListener("click", onAction);
 hostInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") onAction();
 });
+
+// LAN discovery (Android wrapper only).
+const pollDiscovered = nativeDiscovery();
+if (pollDiscovered) {
+  const renderDiscovered = (): void => {
+    if (state.phase === "connected" || state.phase === "connecting") {
+      discoveredBox.hidden = true;
+      return;
+    }
+    const servers = pollDiscovered().sort((a, b) => a.hostname.localeCompare(b.hostname));
+    if (servers.length === 0) {
+      discoveredBox.hidden = true;
+      return;
+    }
+    discoveredBox.hidden = false;
+    discoveredBox.innerHTML =
+      `<div class="note" style="margin-bottom:6px">Discovered on LAN</div>` +
+      servers
+        .map((s) => {
+          const host = serverHost(s);
+          const dev = s.device ? ` · ${esc(s.device)}` : "";
+          return `<button class="secondary disc-item" data-host="${esc(host)}">${esc(s.hostname)}${dev}</button>`;
+        })
+        .join("");
+    discoveredBox.querySelectorAll<HTMLButtonElement>(".disc-item").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        hostInput.value = btn.dataset.host ?? "";
+        if (state.phase !== "connected" && state.phase !== "connecting") onAction();
+      });
+    });
+  };
+  renderDiscovered();
+  window.setInterval(renderDiscovered, 2000);
+}
 
 // --- actions -------------------------------------------------------------
 

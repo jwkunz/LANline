@@ -72,6 +72,17 @@ h1 .sub {
   margin: 0 0 12px;
 }
 
+.discovered {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.disc-item {
+  font-weight: 500;
+}
+
 .connect-row {
   display: flex;
   gap: 8px;
