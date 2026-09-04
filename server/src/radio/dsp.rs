@@ -1,16 +1,23 @@
-//! FM receive DSP: IQ at the device sample rate → mono audio at 48 kHz.
-//! Handles both narrowband (NWR voice, ~16 kHz channel) and wideband
-//! (broadcast, ~200 kHz channel) FM — the chain is the same, only the
-//! constants scale with `channel_bw_hz`.
+//! Analog receive DSP: IQ at the device sample rate → mono audio at 48 kHz.
+//! Two chains, both built on the same decimate/squelch/resample skeleton:
 //!
-//! Chain: digital LO offset (dodge the ZIF DC spike) → windowed-sinc FIR
-//! decimation to the channel rate → polar FM discriminator → de-emphasis →
-//! audio low-pass → noise squelch → linear resample to 48 kHz.
+//! - [`FmChain`] — FM, narrowband (NWR voice, ~16 kHz channel) or wideband
+//!   (broadcast, ~200 kHz channel); only the constants scale with
+//!   `channel_bw_hz`. Digital LO offset (dodge the ZIF DC spike) → FIR
+//!   decimation to the channel rate → polar FM discriminator → de-emphasis →
+//!   audio low-pass → noise squelch → linear resample to 48 kHz.
+//! - [`AmChain`] — AM (mediumwave / shortwave broadcast). Same decimation,
+//!   but a plain AGC'd envelope detector stands in for the discriminator:
+//!   `(mag − slow_avg) / slow_avg` removes the carrier level and normalizes
+//!   for signal strength in one step.
 
 use num_complex::Complex32;
 use std::f64::consts::PI;
 
 const AUDIO_RATE: f64 = 48_000.0;
+/// Target envelope level for [`AmChain`]'s output AGC — leaves headroom below
+/// full scale for peaks the ~10 ms envelope tracker hasn't caught up to yet.
+const AM_TARGET_ENV: f32 = 0.2;
 
 #[derive(Clone, Copy, Debug)]
 pub struct FmParams {
@@ -190,6 +197,166 @@ impl FmChain {
         }
 
         // 4. resample channel rate → 48 kHz
+        self.resamp.process(&self.scratch_audio, out);
+
+        let snr_db = 20.0 * ((self.sig_env + 1e-6) / (self.noise_env + 1e-6)).log10();
+        self.metrics = ChainMetrics {
+            rssi_dbfs,
+            snr_db,
+            squelch_open: open,
+            audio_dbfs: 20.0 * (peak + 1e-6).log10(),
+        };
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AmParams {
+    pub channel_bw_hz: f64,
+    pub audio_lpf_hz: f64,
+    /// RSSI floor (dBFS): gates "no antenna / dead band".
+    pub squelch_dbfs: f64,
+    /// Noise-squelch threshold, same idea as [`FmParams::noise_squelch`] but
+    /// measured on the AGC'd envelope instead of the FM discriminator output.
+    pub noise_squelch: f64,
+    pub lo_offset_hz: f64,
+}
+
+impl Default for AmParams {
+    fn default() -> Self {
+        Self {
+            channel_bw_hz: 10_000.0,
+            audio_lpf_hz: 5_000.0,
+            squelch_dbfs: -80.0,
+            noise_squelch: 0.5,
+            lo_offset_hz: 25_000.0,
+        }
+    }
+}
+
+/// AM (envelope-detection) receive chain: NCO/decimate → magnitude → AGC'd
+/// envelope (`(mag − slow_avg) / slow_avg` removes the carrier's DC level and
+/// normalizes for signal strength in one step) → audio low-pass → squelch →
+/// resample to 48 kHz. Structurally a sibling of [`FmChain`] — same
+/// decimation/squelch/resample machinery, a plain envelope detector standing
+/// in for the FM discriminator.
+pub struct AmChain {
+    nco: Nco,
+    decim: FirDecimator,
+    channel_rate: f64,
+    agc_avg: f32,
+    agc_k: f32,
+    audio_lp: Biquad,
+    noise_hp: Biquad,
+    noise_env: f32,
+    noise_gate: f32,
+    squelch_thresh_dbfs: f32,
+    squelch_gain: f32,
+    sig_env: f32,
+    metrics: ChainMetrics,
+    resamp: LinearResampler,
+    scratch_iq: Vec<Complex32>,
+    scratch_audio: Vec<f32>,
+}
+
+impl AmChain {
+    pub fn new(device_rate: f64, p: AmParams) -> Self {
+        let target = (p.channel_bw_hz * 1.6).max(48_000.0);
+        let decim = ((device_rate / target).floor() as usize).max(1);
+        let channel_rate = device_rate / decim as f64;
+
+        let cutoff = (p.channel_bw_hz * 0.6).clamp(3_000.0, channel_rate / 2.0 * 0.9);
+        let num_taps = (16 * decim + 1).min(1023);
+
+        // AGC time constant: slow enough to ride through the audio (~200 ms),
+        // fast enough to track fading / a retune.
+        let agc_k = (1.0 / (0.2 * channel_rate)) as f32;
+        let audio_lp = Biquad::lowpass(channel_rate, p.audio_lpf_hz.min(channel_rate / 2.5), 0.707);
+        let noise_hp = Biquad::highpass(
+            channel_rate,
+            (p.audio_lpf_hz * 1.3).clamp(3_000.0, channel_rate * 0.45),
+            0.707,
+        );
+
+        Self {
+            nco: Nco::new(-p.lo_offset_hz / device_rate),
+            decim: FirDecimator::new(decim, cutoff, device_rate, num_taps),
+            channel_rate,
+            agc_avg: 0.05, // small nonzero seed so early blocks don't divide by ~0
+            agc_k,
+            audio_lp,
+            noise_hp,
+            noise_env: 1.0,
+            noise_gate: (p.noise_squelch as f32).clamp(0.02, 2.0),
+            squelch_thresh_dbfs: p.squelch_dbfs as f32,
+            squelch_gain: 0.0,
+            sig_env: 0.0,
+            metrics: ChainMetrics::default(),
+            resamp: LinearResampler::new(channel_rate, AUDIO_RATE),
+            scratch_iq: Vec::new(),
+            scratch_audio: Vec::new(),
+        }
+    }
+
+    pub fn channel_rate(&self) -> f64 {
+        self.channel_rate
+    }
+
+    pub fn metrics(&self) -> ChainMetrics {
+        self.metrics
+    }
+
+    /// Retune-time housekeeping: reseed the AGC so a step in carrier level
+    /// doesn't leave a stale average biasing the next few audio samples.
+    pub fn on_retune(&mut self) {
+        self.agc_avg = 0.05;
+        self.noise_env = 1.0;
+    }
+
+    /// Consume a block of device-rate IQ, append 48 kHz mono audio to `out`.
+    pub fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
+        self.scratch_iq.clear();
+        self.scratch_iq.reserve(iq.len() / self.decim.decim + 4);
+        self.nco.mix_into(iq, &mut self.decim, &mut self.scratch_iq);
+        let chan = &self.scratch_iq;
+        if chan.is_empty() {
+            return;
+        }
+
+        let power: f32 = chan.iter().map(|c| c.norm_sqr()).sum::<f32>() / chan.len() as f32;
+        let rssi_dbfs = 10.0 * (power + 1e-12).log10();
+        let open = rssi_dbfs >= self.squelch_thresh_dbfs && self.noise_env < self.noise_gate;
+        let target = if open { 1.0 } else { 0.0 };
+        let ramp = (1.0 / (0.005 * self.channel_rate as f32)).min(1.0);
+        let nk = (1.0 / (0.010 * self.channel_rate as f32)).min(1.0);
+
+        self.scratch_audio.clear();
+        self.scratch_audio.reserve(chan.len());
+        let mut peak = 0.0f32;
+        for &x in chan {
+            let mag = x.norm();
+            self.agc_avg += (mag - self.agc_avg) * self.agc_k;
+            let raw = (mag - self.agc_avg) / (self.agc_avg + 1e-4);
+
+            let hf = self.noise_hp.process(raw);
+            self.noise_env += (hf.abs() - self.noise_env) * nk;
+
+            let mut a = self.audio_lp.process(raw);
+            self.sig_env += (a.abs() - self.sig_env) * nk;
+
+            // Output-level AGC: strong stations or deep modulation can drive
+            // the normalized envelope well past unity (the input AGC above
+            // only removes the carrier's DC level, it doesn't bound the
+            // result). Scale toward a comfortable listening level using the
+            // same envelope tracker, then hard-clamp as a last resort.
+            let out_gain = (AM_TARGET_ENV / (self.sig_env + 1e-3)).clamp(0.25, 6.0);
+            a *= out_gain;
+
+            self.squelch_gain += (target - self.squelch_gain) * ramp;
+            a *= self.squelch_gain;
+            peak = peak.max(a.abs());
+            self.scratch_audio.push(a.clamp(-1.0, 1.0));
+        }
+
         self.resamp.process(&self.scratch_audio, out);
 
         let snr_db = 20.0 * ((self.sig_env + 1e-6) / (self.noise_env + 1e-6)).log10();
@@ -452,6 +619,29 @@ pub fn fm_modulate(
     out
 }
 
+/// Reference AM (envelope) modulator, used only by tests.
+#[cfg(test)]
+pub fn am_modulate(
+    fs: f64,
+    n: usize,
+    tone_hz: f64,
+    mod_index: f64,
+    lo_offset_hz: f64,
+) -> Vec<Complex32> {
+    let mut phase = 0.0f64;
+    let mut msg_phase = 0.0f64;
+    let dt = 1.0 / fs;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let msg = (2.0 * PI * msg_phase).sin();
+        msg_phase += tone_hz * dt;
+        let env = (1.0 + mod_index * msg).max(0.0);
+        phase += 2.0 * PI * lo_offset_hz * dt;
+        out.push(Complex32::new((env * phase.cos()) as f32, (env * phase.sin()) as f32));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +723,51 @@ mod tests {
             })
             .collect();
         let mut chain = FmChain::new(fs, params);
+        let mut audio = Vec::new();
+        for block in noise.chunks(8192) {
+            chain.process(block, &mut audio);
+        }
+        assert!(!chain.metrics().squelch_open, "rssi {}", chain.metrics().rssi_dbfs);
+        let peak = audio.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        assert!(peak < 0.05, "muted audio peak {peak}");
+    }
+
+    #[test]
+    fn am_recovers_modulating_tone() {
+        let fs = 2_000_000.0;
+        let tone = 1_000.0;
+        let params = AmParams::default();
+        let iq = am_modulate(fs, 800_000, tone, 0.8, params.lo_offset_hz);
+        let mut chain = AmChain::new(fs, params);
+        let mut audio = Vec::new();
+        for block in iq.chunks(8192) {
+            chain.process(block, &mut audio);
+        }
+
+        assert!(audio.len() > 6_000, "got {} samples", audio.len());
+        let tail = &audio[audio.len() / 2..];
+        let at_tone = goertzel(tail, AUDIO_RATE, tone as f64);
+        let off_tone = goertzel(tail, AUDIO_RATE, 300.0);
+        assert!(at_tone > 0.1, "tone amplitude {at_tone}");
+        assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");
+        assert!(chain.metrics().squelch_open, "squelch should open on a carrier");
+    }
+
+    #[test]
+    fn am_squelch_stays_closed_on_noise() {
+        let fs = 2_000_000.0;
+        let params = AmParams { squelch_dbfs: -40.0, ..AmParams::default() };
+        let mut state = 987654321u64;
+        let noise: Vec<Complex32> = (0..400_000)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let r = ((state >> 33) as f32 / u32::MAX as f32 - 0.5) * 0.002;
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let i = ((state >> 33) as f32 / u32::MAX as f32 - 0.5) * 0.002;
+                Complex32::new(r, i)
+            })
+            .collect();
+        let mut chain = AmChain::new(fs, params);
         let mut audio = Vec::new();
         for block in noise.chunks(8192) {
             chain.process(block, &mut audio);

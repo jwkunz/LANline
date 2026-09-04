@@ -5,7 +5,8 @@
 use std::path::Path;
 use std::{env, fs};
 
-const ASSETS: &[&str] = &["index.html", "nwr-stations.json", "fm-stations.json"];
+const ASSETS: &[&str] =
+    &["index.html", "nwr-stations.json", "fm-stations.json", "am-stations.json"];
 
 const PLACEHOLDER_HTML: &str = "<!doctype html><meta charset=utf-8><title>LANline</title>\
 <body style=\"font:16px system-ui;margin:3rem;max-width:34rem\">\

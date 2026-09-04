@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/index.html", get(webui::index))
         .route("/nwr-stations.json", get(webui::nwr_stations))
         .route("/fm-stations.json", get(webui::fm_stations))
+        .route("/am-stations.json", get(webui::am_stations))
         .nest("/api/v1", v1)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
@@ -277,15 +278,51 @@ mod tests {
         let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("LANline"));
 
-        let res = app.clone().oneshot(get("/nwr-stations.json")).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        assert!(res
-            .headers()
-            .get("content-type")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .contains("application/json"));
+        for path in ["/nwr-stations.json", "/fm-stations.json", "/am-stations.json"] {
+            let res = app.clone().oneshot(get(path)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            assert!(
+                res.headers()
+                    .get("content-type")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("application/json"),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn am_mode_is_selectable() {
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        let (_, modes) = send(&app, get("/api/v1/modes")).await;
+        assert!(modes.as_array().unwrap().iter().any(|m| m["id"] == "am"));
+
+        let (s, b) = send(
+            &app,
+            json_req("PATCH", "/api/v1/radio", Some(&token), json!({ "mode": "am" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["mode"], "am");
+        assert_eq!(b["mode_params"]["channel_bw_hz"], 10000.0);
+
+        // am needs an SDR like nbfm/wbfm -> 503 with no device selected
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/start", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(b["error"]["code"], "device_unavailable");
     }
 
     #[tokio::test]

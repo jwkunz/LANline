@@ -94,17 +94,12 @@ server/src/
 
   radio/
     mod.rs             RadioManager: owns config + pipeline task, hot-apply, telemetry;
-                       run_sdr (FM -> Opus) and run_adsb (IQ -> adsb decode, no audio)
-    soapy.rs           enumerate(), open(), capability probe, RX stream reader
-    source.rs          Source trait: SoapySource | DebugToneSource -> IQ or audio frames
-    dsp/
-      mod.rs           assemble the chain from RadioConfig
-      decimate.rs      integer FIR decimation stages
-      resample.rs      rational resampler to land exactly on 48 kHz
-      fm_demod.rs      polar discriminator (I·dQ − Q·dI)/(I²+Q²)
-      deemphasis.rs    one-pole 75/50 µs de-emphasis IIR
-      squelch.rs       power / noise squelch, mutes audio
-    tone.rs            440 Hz (A4) generator for debug_tone
+                       run_sdr (nbfm/wbfm/am -> Opus, picks FmChain/AmChain via
+                       the Chain enum), run_adsb and run_ais (IQ -> track table,
+                       no audio)
+    dsp.rs             FmChain (NBFM/WBFM) + AmChain (AM), sharing one
+                       decimate/squelch/resample skeleton; Nco/FirDecimator/
+                       Biquad/LinearResampler building blocks
 
   audio/
     opus.rs            audiopus encoder wrapper (20 ms, 48k, mono)
@@ -172,3 +167,22 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
 - **2d** — `ais` mode: `ais/` (two-channel 9600-baud GMSK → HDLC → ITU-R
   M.1371 → per-MMSI vessel table), `GET /api/v1/ais/{vessels,messages}`, an
   AIVDM TCP feed (`--ais-nmea-port`, default 10110), sharing the radar scope.
+- **2e** — `am` mode: `dsp::AmChain`, a sibling of `FmChain` sharing its
+  decimate/squelch/resample machinery with a plain AGC'd envelope detector in
+  place of the discriminator (`run_sdr` picks the chain via a small `Chain`
+  enum). Station-picker wizard (`web/src/am.ts`, `scripts/fetch-am.mjs`) mirrors
+  `wbfm`'s. See [below](#am-and-hackrf-mflf-sensitivity) for what to expect
+  from a HackRF at mediumwave.
+
+### AM and HackRF MF/LF sensitivity
+
+The HackRF's front end has no dedicated preselection filtering or LNA below
+~30 MHz, so mediumwave (0.53–1.7 MHz) sensitivity is notably worse than a
+purpose-built AM/shortwave receiver — but it isn't unusable. Bench-verified: a
+5 kW station ~6 mi away decoded cleanly at max gain (`AMP` 14 dB, `LNA` 40 dB,
+`VGA` 62 dB) — real speech, correct band-limiting, >160 dB of quiet/loud
+dynamic range in a `--dump-wav` capture, and station-to-station SNR that
+tracked actual transmitter power/distance rather than sitting at a constant
+floor (which would point to a self-generated spur instead of a real signal).
+Expect it to favor nearby, higher-power stations; a random-wire antenna
+tuned for AM will do much better than the stock 1090 MHz-ish whip.
