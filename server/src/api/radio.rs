@@ -47,14 +47,17 @@ pub async fn patch_radio(
         let cfg: RadioConfig = serde_json::from_value(merged)
             .map_err(|e| ApiError::invalid_parameter(e.to_string()))?;
 
-        // Phase 1b validates structure + the mode id. Device-range and
-        // mode-parameter validation lands with the real pipeline in phase 1c.
         if !crate::catalog::modes().iter().any(|m| m.id == cfg.mode) {
             return Err(ApiError::invalid_parameter(format!("unknown mode `{}`", cfg.mode))
                 .with_details(serde_json::json!({
                     "field": "mode",
                     "allowed": crate::catalog::modes().iter().map(|m| m.id).collect::<Vec<_>>()
                 })));
+        }
+
+        // Validate the tuner against the selected device's real capabilities.
+        if let Some(dev) = st.registry.selected() {
+            crate::registry::validate_against_device(&cfg, &dev)?;
         }
         cfg
     };
@@ -135,11 +138,11 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
         frequency_hz,
         device_status,
         dsp: DspStatus {
-            rssi_dbfs: None,
+            rssi_dbfs: tele.rssi_dbfs.map(f64::from),
             snr_db: None,
             squelch_open: tele.squelch_open,
-            audio_level_dbfs: tele.audio_level_dbfs.map(|v| v as f64),
-            sample_overruns: 0,
+            audio_level_dbfs: tele.audio_level_dbfs.map(f64::from),
+            sample_overruns: tele.overruns,
             pipeline_latency_ms: running.then_some(20.0),
         },
         audio: AudioStatus {

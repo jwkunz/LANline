@@ -123,6 +123,9 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   UDP-muxed `audio_out`, one peer per session, send-only Opus track). `debug_tone`
   = 440 Hz A4; other modes emit silence until 1c. `radio/start|stop|status` and
   `sessions/{id}/audio/*` are live.
-- **1c** — real SoapySDR RX + `radio/dsp/` (decimation, FM discriminator,
-  de-emphasis, squelch, rational resampler) replacing the synth source;
-  device-range validation on `PATCH /radio`.
+- **1c** — real SoapySDR RX + `radio/dsp.rs` (LO-offset NCO → windowed-sinc
+  FIR decimation to ~50 kHz → polar FM discriminator → de-emphasis → audio
+  low-pass → amplitude-normalized noise squelch → linear resample to 48 kHz),
+  wired to `nbfm` mode with live retune (pipeline bounce). Device-range
+  validation on `PATCH /radio`. `--dump-wav <path>` writes the pre-Opus audio
+  for offline inspection.

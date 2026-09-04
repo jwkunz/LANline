@@ -14,13 +14,13 @@ Clients: a **web app** (`client/web`) and, later, an **Android** wrapper
 
 ## Phase roadmap
 
-| Phase | Scope |
-|------:|-------|
-| 1a | Workspace, REST API + docs, stubbed server, discovery beacon, web app shell (connection/mode/telemetry, no audio) |
-| 1b | Opus encoder + WebRTC; **Debug Mode** 440 Hz (A4) tone playing end-to-end in the browser |
-| 1c | Real NBFM receive; hear NOAA weather radio **KHB29 on 162.550 MHz**; retune over REST |
-| 1d | Session reaper, error taxonomy, logging, tests, polish |
-| 2  | Android WebView wrapper + native beacon listener; transmit / modulate path |
+| Phase | Scope | Status |
+|------:|-------|:------:|
+| 1a | Workspace, REST API + docs, discovery beacon, SoapySDR enumeration, web app shell | ✅ |
+| 1b | Opus encoder + WebRTC; **Debug Mode** 440 Hz (A4) tone end-to-end in the browser | ✅ |
+| 1c | Real NBFM receive of NOAA weather radio **KHB29 on 162.550 MHz**; live retune + device-range validation over REST | ✅ |
+| 1d | Live retune without an audio gap, noise-squelch tuning, SNR metric, more tests, polish | |
+| 2  | Android WebView wrapper + native beacon listener; transmit / modulate path | |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR)
 service. More modes are added through the REST API over time.
@@ -43,14 +43,15 @@ The server links the SoapySDR that ships with
 already carries the HackRF, PlutoSDR and RTL-SDR modules.
 
 ```sh
-source scripts/dev-env.sh      # sets PKG_CONFIG_PATH, LD_LIBRARY_PATH,
+source scripts/dev-env.sh      # sets PKG_CONFIG_PATH, RUSTFLAGS rpath,
                                # SOAPY_SDR_PLUGIN_PATH, LIBCLANG_PATH
-cargo run -p sdr-c2-server
+cargo run -p sdr-c2-server                    # discovers the HackRF, serves the API
+cargo run -p sdr-c2-server -- --debug-tone    # 440 Hz A4, no SDR needed
+cargo run -p sdr-c2-server -- --dump-wav /tmp/rx.wav   # also save pre-Opus audio
 ```
 
 Sanity-check the radio independently with `SoapySDRUtil --find` from inside the
-same shell. Non-root USB access to the HackRF may need a udev rule (added in
-phase 1c).
+same shell.
 
 ## Running the web client
 

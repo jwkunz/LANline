@@ -1,16 +1,24 @@
 //! The receive pipeline and its lifecycle.
 //!
-//! Phase 1b: the pipeline synthesizes audio (a 440 Hz tone in `debug_tone`
-//! mode, digital silence otherwise), Opus-encodes 20 ms frames, and fans them
-//! out on a broadcast channel that each WebRTC session subscribes to. The real
-//! SoapySDR + DSP source replaces the synth in phase 1c.
+//! `debug_tone` mode synthesizes a 440 Hz A4; `nbfm` mode opens the selected
+//! SoapySDR device and runs the [`dsp`] NBFM chain; any other mode emits
+//! digital silence. Every path produces 20 ms Opus frames on a broadcast
+//! channel that each WebRTC session subscribes to.
+
+#[cfg(feature = "soapy")]
+pub mod dsp;
 
 use crate::audio::{rms_dbfs, AudioFrame};
 use crate::model::RadioConfig;
+use crate::registry::DeviceRegistry;
 use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate};
 use bytes::Bytes;
+#[cfg(feature = "soapy")]
+use dsp::{NbfmChain, NbfmParams};
+use crate::audio::wav::WavDump;
 use std::f64::consts::TAU;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -19,17 +27,22 @@ use tokio::sync::broadcast;
 
 const BROADCAST_CAPACITY: usize = 64;
 const OPUS_MAX_FRAME: usize = 4000;
+const AUDIO_RATE: u32 = 48_000;
 
 #[derive(Default, Clone)]
 pub struct Telemetry {
     pub frames_sent: u64,
     pub audio_level_dbfs: Option<f32>,
+    pub rssi_dbfs: Option<f32>,
     pub squelch_open: bool,
+    pub overruns: u64,
     pub source: &'static str,
 }
 
 pub struct RadioManager {
     cfg: Arc<Mutex<RadioConfig>>,
+    registry: Arc<DeviceRegistry>,
+    dump_wav: Option<PathBuf>,
     tx: broadcast::Sender<AudioFrame>,
     run: Mutex<RunState>,
     telemetry: Arc<Mutex<Telemetry>>,
@@ -43,10 +56,16 @@ struct RunState {
 }
 
 impl RadioManager {
-    pub fn new(cfg: Arc<Mutex<RadioConfig>>) -> Arc<Self> {
+    pub fn new(
+        cfg: Arc<Mutex<RadioConfig>>,
+        registry: Arc<DeviceRegistry>,
+        dump_wav: Option<PathBuf>,
+    ) -> Arc<Self> {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Arc::new(Self {
             cfg,
+            registry,
+            dump_wav,
             tx,
             run: Mutex::new(RunState::default()),
             telemetry: Arc::new(Mutex::new(Telemetry::default())),
@@ -70,16 +89,21 @@ impl RadioManager {
         if run.running {
             return;
         }
-        let params = PipelineParams::from_config(&self.cfg.lock().unwrap());
+        let params = {
+            let cfg = self.cfg.lock().unwrap();
+            let device = self.registry.selected();
+            PipelineParams::from_config(&cfg, device.as_ref())
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let tx = self.tx.clone();
         let tele = self.telemetry.clone();
         *self.telemetry.lock().unwrap() = Telemetry::default();
 
         let stop_thread = stop.clone();
+        let dump = self.dump_wav.clone();
         let handle = std::thread::Builder::new()
             .name("audio-pipeline".into())
-            .spawn(move || run_pipeline(params, tx, tele, stop_thread))
+            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump))
             .expect("spawn audio-pipeline thread");
 
         run.stop = Some(stop);
@@ -113,45 +137,121 @@ impl RadioManager {
     }
 }
 
-enum Source {
-    Tone { hz: f64, amp: f32 },
-    Silence,
-}
+// --- pipeline parameters ------------------------------------------------
 
 struct PipelineParams {
-    source: Source,
-    sample_rate: u32,
+    kind: SourceKind,
+    frames: FrameCfg,
+}
+
+#[derive(Clone, Copy)]
+struct FrameCfg {
     frame_samples: usize,
     frame: Duration,
     bitrate_bps: i32,
 }
 
-impl PipelineParams {
-    fn from_config(cfg: &RadioConfig) -> Self {
-        let sample_rate = cfg.audio.sample_rate_hz.max(8000);
-        let frame_ms = cfg.audio.frame_ms.clamp(10, 60);
-        let frame_samples = (sample_rate as usize / 1000) * frame_ms as usize;
+enum SourceKind {
+    Tone { hz: f64, amp: f32 },
+    Silence,
+    #[cfg(feature = "soapy")]
+    Sdr(Box<SdrParams>),
+}
 
-        let source = if cfg.mode == "debug_tone" {
-            let hz = param(cfg, "tone_hz", 440.0).clamp(20.0, 20_000.0);
-            let level_dbfs = param(cfg, "level_dbfs", -12.0).clamp(-60.0, -1.0);
-            Source::Tone { hz, amp: 10f64.powf(level_dbfs / 20.0) as f32 }
-        } else {
-            Source::Silence
+#[cfg(feature = "soapy")]
+struct SdrParams {
+    soapy_args: String,
+    device_rate: f64,
+    freq_hz: f64,
+    channel: usize,
+    antenna: Option<String>,
+    agc: bool,
+    gain_overall_db: Option<f64>,
+    gain_elements_db: Vec<(String, f64)>,
+    dc_offset: bool,
+    settings: Vec<(String, String)>,
+    nbfm: NbfmParams,
+}
+
+impl PipelineParams {
+    fn from_config(cfg: &RadioConfig, device: Option<&crate::model::DeviceInfo>) -> Self {
+        let frame_ms = cfg.audio.frame_ms.clamp(10, 60);
+        let frame_samples = (AUDIO_RATE as usize / 1000) * frame_ms as usize;
+        let bitrate_bps = cfg.audio.opus_bitrate_bps as i32;
+        let frame = Duration::from_millis(frame_ms as u64);
+
+        let param = |key: &str, default: f64| -> f64 {
+            cfg.mode_params.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
         };
 
-        Self {
-            source,
-            sample_rate,
-            frame_samples,
-            frame: Duration::from_millis(frame_ms as u64),
-            bitrate_bps: cfg.audio.opus_bitrate_bps as i32,
-        }
+        let kind = match cfg.mode.as_str() {
+            "debug_tone" => {
+                let hz = param("tone_hz", 440.0).clamp(20.0, 20_000.0);
+                let level_dbfs = param("level_dbfs", -12.0).clamp(-60.0, -1.0);
+                SourceKind::Tone { hz, amp: 10f64.powf(level_dbfs / 20.0) as f32 }
+            }
+            "nbfm" => {
+                #[cfg(not(feature = "soapy"))]
+                {
+                    let _ = device;
+                    SourceKind::Silence
+                }
+                #[cfg(feature = "soapy")]
+                match device {
+                Some(dev) => SourceKind::Sdr(Box::new(SdrParams {
+                    soapy_args: dev.soapy_args.clone(),
+                    device_rate: cfg.tuner.sample_rate_hz,
+                    freq_hz: cfg.frequency_hz as f64,
+                    channel: cfg.tuner.channel,
+                    antenna: cfg.tuner.antenna.clone(),
+                    agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
+                    gain_overall_db: cfg.tuner.gain_db,
+                    gain_elements_db: cfg
+                        .tuner
+                        .gain_elements_db
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect(),
+                    dc_offset: cfg.tuner.dc_offset_correction,
+                    settings: cfg
+                        .tuner
+                        .device_settings
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    nbfm: NbfmParams {
+                        deviation_hz: param("deviation_hz", 5_000.0),
+                        channel_bw_hz: param("channel_bw_hz", 16_000.0),
+                        deemphasis_us: param("deemphasis_us", 75.0),
+                        audio_lpf_hz: param("audio_lpf_hz", 3_400.0),
+                        squelch_dbfs: param("squelch_db", -80.0),
+                        lo_offset_hz: cfg.tuner.lo_offset_hz.abs().max(1.0),
+                    },
+                })),
+                None => SourceKind::Silence,
+                }
+            }
+            _ => SourceKind::Silence,
+        };
+
+        Self { kind, frames: FrameCfg { frame_samples, frame, bitrate_bps } }
     }
 }
 
-fn param(cfg: &RadioConfig, key: &str, default: f64) -> f64 {
-    cfg.mode_params.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+// --- pipeline execution ------------------------------------------------
+
+fn new_encoder(bitrate_bps: i32) -> Option<Encoder> {
+    let mut enc = match Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Audio) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("opus encoder init failed: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = enc.set_bitrate(Bitrate::BitsPerSecond(bitrate_bps)) {
+        tracing::warn!("opus set_bitrate failed: {e}");
+    }
+    Some(enc)
 }
 
 fn run_pipeline(
@@ -159,39 +259,68 @@ fn run_pipeline(
     tx: broadcast::Sender<AudioFrame>,
     telemetry: Arc<Mutex<Telemetry>>,
     stop: Arc<AtomicBool>,
+    dump: Option<PathBuf>,
 ) {
-    let mut encoder = match Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Audio) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("opus encoder init failed: {e}");
-            return;
+    let fc = p.frames;
+    let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
+        Ok(w) => {
+            tracing::info!("dumping pipeline audio to {}", path.display());
+            Some(w)
         }
-    };
-    if let Err(e) = encoder.set_bitrate(Bitrate::BitsPerSecond(p.bitrate_bps)) {
-        tracing::warn!("opus set_bitrate failed: {e}");
+        Err(e) => {
+            tracing::warn!("dump-wav {}: {e}", path.display());
+            None
+        }
+    });
+    match p.kind {
+        SourceKind::Tone { hz, amp } => {
+            run_synth(Synth::Tone { hz, amp }, fc, &tx, &telemetry, &stop, wav.as_mut())
+        }
+        SourceKind::Silence => {
+            run_synth(Synth::Silence, fc, &tx, &telemetry, &stop, wav.as_mut())
+        }
+        #[cfg(feature = "soapy")]
+        SourceKind::Sdr(sdr) => run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut()),
     }
+}
 
+enum Synth {
+    Tone { hz: f64, amp: f32 },
+    Silence,
+}
+
+fn run_synth(
+    synth: Synth,
+    fc: FrameCfg,
+    tx: &broadcast::Sender<AudioFrame>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+    mut wav: Option<&mut WavDump>,
+) {
+    let Some(encoder) = new_encoder(fc.bitrate_bps) else {
+        return;
+    };
     {
         let mut t = telemetry.lock().unwrap();
-        t.source = match p.source {
-            Source::Tone { .. } => "debug_tone",
-            Source::Silence => "silence",
+        t.source = match synth {
+            Synth::Tone { .. } => "debug_tone",
+            Synth::Silence => "silence",
         };
-        t.squelch_open = matches!(p.source, Source::Tone { .. });
+        t.squelch_open = matches!(synth, Synth::Tone { .. });
     }
 
-    let mut pcm = vec![0f32; p.frame_samples];
+    let mut pcm = vec![0f32; fc.frame_samples];
     let mut buf = vec![0u8; OPUS_MAX_FRAME];
     let mut phase = 0f64;
-    let dphase = match p.source {
-        Source::Tone { hz, .. } => TAU * hz / p.sample_rate as f64,
-        Source::Silence => 0.0,
+    let dphase = match synth {
+        Synth::Tone { hz, .. } => TAU * hz / AUDIO_RATE as f64,
+        Synth::Silence => 0.0,
     };
+    let mut next = Instant::now() + fc.frame;
 
-    let mut next = Instant::now() + p.frame;
     while !stop.load(Ordering::SeqCst) {
-        match p.source {
-            Source::Tone { amp, .. } => {
+        match synth {
+            Synth::Tone { amp, .. } => {
                 for s in pcm.iter_mut() {
                     *s = phase.sin() as f32 * amp;
                     phase += dphase;
@@ -200,30 +329,163 @@ fn run_pipeline(
                     }
                 }
             }
-            Source::Silence => pcm.iter_mut().for_each(|s| *s = 0.0),
+            Synth::Silence => pcm.iter_mut().for_each(|s| *s = 0.0),
         }
 
         let rms = rms_dbfs(&pcm);
-        match encoder.encode_float(&pcm, &mut buf) {
-            Ok(n) => {
-                let _ = tx.send(AudioFrame {
-                    data: Bytes::copy_from_slice(&buf[..n]),
-                    duration: p.frame,
-                });
-                let mut t = telemetry.lock().unwrap();
-                t.frames_sent = t.frames_sent.wrapping_add(1);
-                t.audio_level_dbfs = Some(rms);
-            }
-            Err(e) => tracing::warn!("opus encode failed: {e}"),
+        if let Some(w) = wav.as_deref_mut() {
+            w.write(&pcm);
+        }
+        if let Ok(n) = encoder.encode_float(&pcm, &mut buf) {
+            let _ = tx.send(AudioFrame {
+                data: Bytes::copy_from_slice(&buf[..n]),
+                duration: fc.frame,
+            });
+            let mut t = telemetry.lock().unwrap();
+            t.frames_sent = t.frames_sent.wrapping_add(1);
+            t.audio_level_dbfs = Some(rms);
         }
 
         let now = Instant::now();
         if next > now {
             std::thread::sleep(next - now);
         }
-        next += p.frame;
+        next += fc.frame;
         if next < now {
-            next = now + p.frame; // fell behind; resync
+            next = now + fc.frame;
         }
     }
+}
+
+#[cfg(feature = "soapy")]
+fn run_sdr(
+    sp: SdrParams,
+    fc: FrameCfg,
+    tx: &broadcast::Sender<AudioFrame>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+    mut wav: Option<&mut WavDump>,
+) {
+    use num_complex::Complex32;
+    use soapysdr::{Device, Direction, ErrorCode};
+
+    let dir = Direction::Rx;
+    let ch = sp.channel;
+
+    let dev = match Device::new(sp.soapy_args.as_str()) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("nbfm: cannot open device: {e}");
+            return;
+        }
+    };
+
+    let log_set = |what: &str, r: Result<(), soapysdr::Error>| {
+        if let Err(e) = r {
+            tracing::warn!("nbfm: set {what}: {e}");
+        }
+    };
+    log_set("sample_rate", dev.set_sample_rate(dir, ch, sp.device_rate));
+    let lo = sp.freq_hz - sp.nbfm.lo_offset_hz;
+    log_set("frequency", dev.set_frequency(dir, ch, lo, ""));
+    if let Some(ant) = &sp.antenna {
+        log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
+    }
+    if sp.agc {
+        log_set("agc", dev.set_gain_mode(dir, ch, true));
+    } else {
+        log_set("gain_mode", dev.set_gain_mode(dir, ch, false));
+        if let Some(g) = sp.gain_overall_db {
+            log_set("gain", dev.set_gain(dir, ch, g));
+        }
+        for (name, v) in &sp.gain_elements_db {
+            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+        }
+    }
+    if sp.dc_offset {
+        let _ = dev.set_dc_offset_mode(dir, ch, true);
+    }
+    for (k, v) in &sp.settings {
+        log_set("setting", dev.write_setting(k.as_str(), v.as_str()));
+    }
+
+    let mut stream = match dev.rx_stream::<Complex32>(&[ch]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("nbfm: rx_stream: {e}");
+            return;
+        }
+    };
+    if let Err(e) = stream.activate(None) {
+        tracing::error!("nbfm: stream activate: {e}");
+        return;
+    }
+
+    let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
+    let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
+    let mut chain = NbfmChain::new(sp.device_rate, sp.nbfm);
+    let encoder = match new_encoder(fc.bitrate_bps) {
+        Some(e) => e,
+        None => {
+            let _ = stream.deactivate(None);
+            return;
+        }
+    };
+    telemetry.lock().unwrap().source = "nbfm";
+    tracing::info!(
+        "nbfm: {} @ {:.4} MHz (LO {:.3} MHz), {:.3} Msps, channel rate {:.0} Hz",
+        sp.soapy_args,
+        sp.freq_hz / 1e6,
+        lo / 1e6,
+        sp.device_rate / 1e6,
+        chain.channel_rate(),
+    );
+
+    let mut acc: Vec<f32> = Vec::with_capacity(fc.frame_samples * 4);
+    let mut buf = vec![0u8; OPUS_MAX_FRAME];
+    let mut overruns: u64 = 0;
+
+    while !stop.load(Ordering::SeqCst) {
+        let n = match stream.read(&mut [iq.as_mut_slice()], 200_000) {
+            Ok(n) => n,
+            Err(e) => {
+                match e.code {
+                    ErrorCode::Timeout => {}
+                    ErrorCode::Overflow => overruns += 1,
+                    _ => {
+                        tracing::warn!("nbfm: stream read: {e}");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                continue;
+            }
+        };
+        if n == 0 {
+            continue;
+        }
+
+        chain.process(&iq[..n], &mut acc);
+
+        while acc.len() >= fc.frame_samples {
+            let pcm: Vec<f32> = acc.drain(..fc.frame_samples).collect();
+            if let Some(w) = wav.as_deref_mut() {
+                w.write(&pcm);
+            }
+            if let Ok(nb) = encoder.encode_float(&pcm, &mut buf) {
+                let _ = tx.send(AudioFrame {
+                    data: Bytes::copy_from_slice(&buf[..nb]),
+                    duration: fc.frame,
+                });
+                let m = chain.metrics();
+                let mut t = telemetry.lock().unwrap();
+                t.frames_sent = t.frames_sent.wrapping_add(1);
+                t.audio_level_dbfs = Some(m.audio_dbfs);
+                t.rssi_dbfs = Some(m.rssi_dbfs);
+                t.squelch_open = m.squelch_open;
+                t.overruns = overruns;
+            }
+        }
+    }
+
+    let _ = stream.deactivate(None);
 }

@@ -21,6 +21,7 @@ soapy = ["dep:soapysdr"]
 webrtc.workspace = true
 audiopus.workspace = true
 bytes.workspace = true
+num-complex.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower.workspace = true

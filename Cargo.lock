@@ -1735,6 +1735,7 @@ dependencies = [
  "bytes",
  "clap",
  "if-addrs",
+ "num-complex",
  "rand",
  "serde",
  "serde_json",

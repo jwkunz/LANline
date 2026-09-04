@@ -279,7 +279,9 @@ impl RadioConfig {
                 // resamples from here to 48 kHz.
                 sample_rate_hz: 2_000_000.0,
                 bandwidth_hz: None,
-                lo_offset_hz: 0.0,
+                // Offset the LO to keep the NWR carrier off the ZIF DC spike;
+                // the DSP chain mixes it back to baseband.
+                lo_offset_hz: 250_000.0,
                 gain_mode: GainMode::Manual,
                 gain_db: None,
                 gain_elements_db: BTreeMap::new(),

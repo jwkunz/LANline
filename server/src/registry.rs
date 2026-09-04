@@ -154,6 +154,101 @@ impl DeviceRegistry {
     }
 }
 
+/// Validate a proposed radio config against a device's reported capabilities.
+/// Returns the first violation as a `422` with the offending field in
+/// `details`.
+pub fn validate_against_device(
+    cfg: &crate::model::RadioConfig,
+    dev: &DeviceInfo,
+) -> Result<(), ApiError> {
+    use serde_json::json;
+    let rx = &dev.rx;
+
+    let bad = |field: &str, msg: String, allowed: serde_json::Value| {
+        ApiError::invalid_parameter(msg).with_details(json!({ "field": field, "allowed": allowed }))
+    };
+
+    if cfg.tuner.channel >= rx.channels {
+        return Err(bad(
+            "tuner.channel",
+            format!("channel {} out of range", cfg.tuner.channel),
+            json!({ "channels": rx.channels }),
+        ));
+    }
+
+    if !in_ranges(cfg.frequency_hz as f64, &rx.frequency_ranges_hz) {
+        return Err(bad(
+            "frequency_hz",
+            format!("{} Hz outside the tunable range", cfg.frequency_hz),
+            json!(rx.frequency_ranges_hz),
+        ));
+    }
+
+    if !in_ranges(cfg.tuner.sample_rate_hz, &rx.sample_rate_ranges_hz) {
+        return Err(bad(
+            "tuner.sample_rate_hz",
+            format!("{} Hz is not a supported sample rate", cfg.tuner.sample_rate_hz),
+            json!(rx.sample_rate_ranges_hz),
+        ));
+    }
+
+    if let Some(ant) = &cfg.tuner.antenna {
+        if !rx.antennas.iter().any(|a| a == ant) {
+            return Err(bad(
+                "tuner.antenna",
+                format!("unknown antenna `{ant}`"),
+                json!(rx.antennas),
+            ));
+        }
+    }
+
+    if matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc) && !rx.has_agc {
+        return Err(bad(
+            "tuner.gain_mode",
+            "device has no AGC".into(),
+            json!(["manual"]),
+        ));
+    }
+
+    if let Some(g) = cfg.tuner.gain_db {
+        let r = rx.overall_gain_range_db;
+        if g < r.min - 1e-6 || g > r.max + 1e-6 {
+            return Err(bad("tuner.gain_db", format!("{g} dB out of range"), json!(r)));
+        }
+    }
+
+    for (name, &val) in &cfg.tuner.gain_elements_db {
+        match rx.gain_elements.iter().find(|e| &e.name == name) {
+            None => {
+                return Err(bad(
+                    "tuner.gain_elements_db",
+                    format!("unknown gain element `{name}`"),
+                    json!(rx.gain_elements.iter().map(|e| &e.name).collect::<Vec<_>>()),
+                ))
+            }
+            Some(e) => {
+                if val < e.range_db.min - 1e-6 || val > e.range_db.max + 1e-6 {
+                    return Err(bad(
+                        "tuner.gain_elements_db",
+                        format!("{name} = {val} dB out of range"),
+                        json!(e.range_db),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn in_ranges(v: f64, ranges: &[crate::model::Range]) -> bool {
+    if ranges.is_empty() {
+        return true; // device reported nothing; don't second-guess it
+    }
+    let tol = (v.abs() * 1e-6).max(1.0);
+    ranges.iter().any(|r| v >= r.min - tol && v <= r.max + tol)
+}
+
 /// Choose a default device for startup: a known SDR driver first (in
 /// preference order), then any non-`audio` device. Sound cards (SoapySDR's
 /// `audio` module) are never auto-selected.

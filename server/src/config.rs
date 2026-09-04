@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 /// Runtime configuration for the SDR C2 server.
 #[derive(Debug, Clone, Parser)]
@@ -48,6 +49,11 @@ pub struct Config {
     /// Start in debug-tone mode (440 Hz A4, no SDR required).
     #[arg(long, env = "SDRC2_DEBUG_TONE", default_value_t = false)]
     pub debug_tone: bool,
+
+    /// Also write the pre-Opus 48 kHz mono audio to this path as a 16-bit WAV
+    /// (diagnostic; overwritten on each pipeline start).
+    #[arg(long, env = "SDRC2_DUMP_WAV")]
+    pub dump_wav: Option<PathBuf>,
 
     /// Maximum number of concurrent sessions.
     #[arg(long, env = "SDRC2_MAX_SESSIONS", default_value_t = 8)]

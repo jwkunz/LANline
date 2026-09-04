@@ -1,6 +1,8 @@
 //! Encoded-audio frame type shared between the DSP/tone pipeline and the
 //! per-session WebRTC senders.
 
+pub mod wav;
+
 use bytes::Bytes;
 use std::time::Duration;
 

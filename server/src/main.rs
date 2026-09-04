@@ -65,7 +65,8 @@ async fn main() -> Result<()> {
             radio.tuner.device_id = Some(dev.id);
         }
     }
-    let radio_mgr = radio::RadioManager::new(radio_cfg.clone());
+    let radio_mgr =
+        radio::RadioManager::new(radio_cfg.clone(), registry.clone(), config.dump_wav.clone());
 
     // --- sessions + media ------------------------------------------
     let sessions = Arc::new(sessions::SessionStore::new(

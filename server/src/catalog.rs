@@ -71,6 +71,7 @@ pub fn presets() -> Vec<Preset> {
             "frequency_hz": 162_550_000,
             "tuner": {
                 "sample_rate_hz": 2_000_000,
+                "lo_offset_hz": 250_000,
                 "gain_elements_db": { "AMP": 0, "LNA": 32, "VGA": 30 }
             },
             "mode_params": {
