@@ -18,6 +18,9 @@ default = ["soapy"]
 soapy = ["dep:soapysdr"]
 
 [dependencies]
+webrtc.workspace = true
+audiopus.workspace = true
+bytes.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower.workspace = true

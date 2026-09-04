@@ -1,7 +1,9 @@
 //! Shared application state handed to every axum handler.
 
 use crate::config::Config;
+use crate::media::WebrtcEngine;
 use crate::model::{Ports, RadioConfig};
+use crate::radio::RadioManager;
 use crate::registry::DeviceRegistry;
 use crate::sessions::SessionStore;
 use std::net::IpAddr;
@@ -21,7 +23,9 @@ pub struct Inner {
     pub advertised_host: IpAddr,
     pub registry: Arc<DeviceRegistry>,
     pub sessions: Arc<SessionStore>,
-    pub radio: Mutex<RadioConfig>,
+    pub radio: Arc<Mutex<RadioConfig>>,
+    pub radio_mgr: Arc<RadioManager>,
+    pub webrtc: Arc<WebrtcEngine>,
 }
 
 impl AppState {
@@ -31,6 +35,9 @@ impl AppState {
         advertised_host: IpAddr,
         registry: Arc<DeviceRegistry>,
         sessions: Arc<SessionStore>,
+        radio: Arc<Mutex<RadioConfig>>,
+        radio_mgr: Arc<RadioManager>,
+        webrtc: Arc<WebrtcEngine>,
     ) -> Self {
         AppState(Arc::new(Inner {
             server_id: Uuid::new_v4(),
@@ -40,7 +47,9 @@ impl AppState {
             advertised_host,
             registry,
             sessions,
-            radio: Mutex::new(RadioConfig::default_noaa()),
+            radio,
+            radio_mgr,
+            webrtc,
             config,
         }))
     }

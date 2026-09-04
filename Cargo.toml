@@ -32,3 +32,8 @@ soapysdr = "0.4"
 if-addrs = "0.13"
 rand = "0.8"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde-well-known"] }
+# 0.13 is the last release of the classic webrtc-rs API (pre-0.20 Sans-I/O
+# rewrite); it has UDPMux so every peer shares the advertised audio_out port.
+webrtc = "0.13"
+audiopus = "0.2"
+bytes = "1"

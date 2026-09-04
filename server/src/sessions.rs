@@ -114,12 +114,8 @@ impl SessionStore {
         }
     }
 
-    pub fn audio_state(&self, id: Uuid) -> Option<AudioConnState> {
-        self.inner.lock().unwrap().get(&id).map(|s| s.audio_state)
-    }
-
-    /// Drop expired sessions; returns the ids removed (for WebRTC teardown in
-    /// later phases).
+    /// Drop expired sessions; returns the ids removed so the caller can tear
+    /// down their WebRTC peers.
     pub fn reap(&self) -> Vec<Uuid> {
         let now = OffsetDateTime::now_utc();
         let mut map = self.inner.lock().unwrap();
@@ -131,10 +127,6 @@ impl SessionStore {
         dead
     }
 
-    pub fn active_count(&self) -> usize {
-        let now = OffsetDateTime::now_utc();
-        self.inner.lock().unwrap().values().filter(|s| s.expires > now).count()
-    }
 }
 
 fn random_token() -> String {

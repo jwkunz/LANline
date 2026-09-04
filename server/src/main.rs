@@ -1,15 +1,19 @@
 //! SDR command & control + streaming server.
 //!
-//! Phase 1a: REST API + discovery beacon + device enumeration. The DSP
-//! pipeline, Opus encoder and WebRTC audio arrive in phases 1b/1c.
+//! Phase 1b: REST API + discovery beacon + device enumeration + a synthesized
+//! audio pipeline (440 Hz `debug_tone` / silence) → Opus → per-session WebRTC.
+//! The real SoapySDR DSP source replaces the synth in phase 1c.
 
 mod api;
+mod audio;
 mod catalog;
 mod config;
 mod discovery;
 mod error;
+mod media;
 mod model;
 mod net;
+mod radio;
 mod registry;
 mod sessions;
 mod state;
@@ -18,10 +22,10 @@ mod util;
 use anyhow::Result;
 use clap::Parser;
 use config::Config;
-use model::Ports;
+use model::{Ports, RadioConfig};
 use state::AppState;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[tokio::main]
@@ -37,9 +41,6 @@ async fn main() -> Result<()> {
 
     // --- ports -----------------------------------------------------------
     let (tcp, c2_port) = net::bind_tcp(config.bind, config.c2_port)?;
-    let audio_out = net::pick_udp_port(config.bind, config.audio_out_port)?;
-    let audio_in = net::pick_udp_port(config.bind, config.audio_in_port)?;
-    let ports = Ports { c2: c2_port, audio_out, audio_in };
 
     let advertised_host = config.advertise_host.unwrap_or_else(|| {
         net::primary_ipv4()
@@ -51,24 +52,10 @@ async fn main() -> Result<()> {
     let registry = Arc::new(registry::DeviceRegistry::new());
     registry.select_auto(config.device.as_deref());
 
-    // --- sessions ----------------------------------------------------
-    let sessions = Arc::new(sessions::SessionStore::new(
-        config.heartbeat_s,
-        config.session_ttl_s(),
-        config.max_sessions,
-    ));
-
-    let state = AppState::new(
-        config.clone(),
-        ports,
-        advertised_host,
-        registry.clone(),
-        sessions.clone(),
-    );
-
-    // Reflect startup choices into the live radio config.
+    // --- radio config + pipeline -------------------------------------
+    let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
     {
-        let mut radio = state.radio.lock().unwrap();
+        let mut radio = radio_cfg.lock().unwrap();
         if config.debug_tone {
             radio.mode = "debug_tone".to_string();
             radio.mode_params = catalog::default_mode_params("debug_tone");
@@ -78,17 +65,47 @@ async fn main() -> Result<()> {
             radio.tuner.device_id = Some(dev.id);
         }
     }
+    let radio_mgr = radio::RadioManager::new(radio_cfg.clone());
+
+    // --- sessions + media ------------------------------------------
+    let sessions = Arc::new(sessions::SessionStore::new(
+        config.heartbeat_s,
+        config.session_ttl_s(),
+        config.max_sessions,
+    ));
+    let (webrtc, audio_out) =
+        media::WebrtcEngine::new(config.bind, config.audio_out_port, radio_mgr.clone(), sessions.clone())
+            .await?;
+    let audio_in = net::pick_udp_port(config.bind, config.audio_in_port)?;
+    let ports = Ports { c2: c2_port, audio_out, audio_in };
+
+    let state = AppState::new(
+        config.clone(),
+        ports,
+        advertised_host,
+        registry.clone(),
+        sessions.clone(),
+        radio_cfg,
+        radio_mgr.clone(),
+        webrtc.clone(),
+    );
+
+    if config.debug_tone {
+        radio_mgr.start();
+        state.radio.lock().unwrap().running = true;
+    }
 
     // --- background tasks -------------------------------------------
     {
         let sessions = sessions.clone();
+        let webrtc = webrtc.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(5));
             loop {
                 tick.tick().await;
-                let dead = sessions.reap();
-                if !dead.is_empty() {
-                    tracing::debug!("reaped {} expired session(s)", dead.len());
+                for id in sessions.reap() {
+                    webrtc.close(id).await;
+                    tracing::debug!("reaped session {id}");
                 }
             }
         });
