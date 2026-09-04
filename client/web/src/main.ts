@@ -86,7 +86,26 @@ hostInput.addEventListener("keydown", (e) => {
 
 // LAN discovery (Android wrapper only).
 const pollDiscovered = nativeDiscovery();
+const NATIVE = pollDiscovered !== null;
+
+const idle = (): boolean =>
+  state.phase === "disconnected" || state.phase === "error";
+
+// Auto-connect once to the saved host on launch. Discovery (below) is a
+// separate path that also fires once a beacon arrives, so a stale saved host
+// doesn't prevent connecting to a discovered server.
+let savedHostTried = false;
+if (hostInput.value.trim()) {
+  window.setTimeout(() => {
+    if (!savedHostTried && idle()) {
+      savedHostTried = true;
+      onAction();
+    }
+  }, 150);
+}
+
 if (pollDiscovered) {
+  let discoveryAutoTried = false;
   const renderDiscovered = (): void => {
     if (state.phase === "connected" || state.phase === "connecting") {
       discoveredBox.hidden = true;
@@ -97,6 +116,17 @@ if (pollDiscovered) {
       discoveredBox.hidden = true;
       return;
     }
+
+    // First server discovered on a fresh launch: connect to it automatically
+    // (even after a stale saved-host attempt failed).
+    if (!discoveryAutoTried && idle()) {
+      discoveryAutoTried = true;
+      hostInput.value = serverHost(servers[0]!);
+      state.error = null;
+      onAction();
+      return;
+    }
+
     discoveredBox.hidden = false;
     discoveredBox.innerHTML =
       `<div class="note" style="margin-bottom:6px">Discovered on LAN</div>` +
@@ -143,7 +173,7 @@ async function connect(hostRaw: string): Promise<void> {
     const server = await client.server();
     const modes = await client.modes().catch(() => [] as ModeInfo[]);
     const session = await client.createSession({
-      name: "web",
+      name: NATIVE ? "android" : "web",
       user_agent: navigator.userAgent,
       capabilities: ["webrtc-recv"],
     });
@@ -176,12 +206,35 @@ async function connect(hostRaw: string): Promise<void> {
       `connected to ${server.hostname} · server ${server.server_id.slice(0, 8)} · session ${session.session_id.slice(0, 8)}`,
     );
     startTimers();
+
+    // In the native wrapper, behave like an appliance: start the radio and
+    // begin playback automatically.
+    if (NATIVE) void autoListen();
   } catch (e) {
     const err = e as ApiError;
+    console.warn(`sdrc2: connect failed — ${err.code}: ${err.message}`);
     state.client = null;
     state.session = null;
     setState({ phase: "error", error: `${err.code}: ${err.message}` });
     logLine(`connect failed — ${err.message}`);
+  }
+}
+
+async function autoListen(): Promise<void> {
+  if (!state.client || !state.audio) return;
+  try {
+    if (!state.radio?.running) {
+      const radio = await state.client.startRadio();
+      setState({ radio });
+      logLine(`radio started (${radio.mode})`);
+    }
+  } catch (e) {
+    logLine(`auto start-radio failed — ${(e as ApiError).message}`);
+  }
+  try {
+    await state.audio.start();
+  } catch (e) {
+    logLine(`auto play failed — ${(e as Error).message}`);
   }
 }
 

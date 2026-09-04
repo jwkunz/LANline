@@ -74,9 +74,14 @@ async fn main() -> Result<()> {
         config.session_ttl_s(),
         config.max_sessions,
     ));
-    let (webrtc, audio_out) =
-        media::WebrtcEngine::new(config.bind, config.audio_out_port, radio_mgr.clone(), sessions.clone())
-            .await?;
+    let (webrtc, audio_out) = media::WebrtcEngine::new(
+        config.bind,
+        config.audio_out_port,
+        advertised_host,
+        radio_mgr.clone(),
+        sessions.clone(),
+    )
+    .await?;
     let audio_in = net::pick_udp_port(config.bind, config.audio_in_port)?;
     let ports = Ports { c2: c2_port, audio_out, audio_in };
 

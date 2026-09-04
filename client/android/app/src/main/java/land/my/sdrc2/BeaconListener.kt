@@ -40,12 +40,12 @@ class BeaconListener(private val port: Int = 50055) {
         if (job?.isActive == true) return
         job = scope.launch {
             try {
-                val s = DatagramSocket(null).apply {
-                    reuseAddress = true
-                    broadcast = true
-                    bind(InetSocketAddress(port))
-                }
+                val s = DatagramSocket(null as java.net.SocketAddress?)
+                s.reuseAddress = true
+                s.bind(InetSocketAddress(port))
+                runCatching { s.broadcast = true }
                 socket = s
+                Log.i(TAG, "listening on udp/$port")
                 val buf = ByteArray(8192)
                 while (isActive) {
                     val pkt = DatagramPacket(buf, buf.size)

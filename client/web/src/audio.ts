@@ -53,9 +53,15 @@ export class AudioSession {
     try {
       await pc.setLocalDescription(await pc.createOffer());
       await gatheringComplete(pc);
-      const answer = await this.client.audioOffer(
-        this.sessionId,
-        pc.localDescription!.sdp,
+      const offerSdp = pc.localDescription!.sdp;
+      console.info(
+        "sdrc2: offer candidates " +
+          JSON.stringify(offerSdp.split("\n").filter((l) => l.includes("candidate")).map((l) => l.trim())),
+      );
+      const answer = await this.client.audioOffer(this.sessionId, offerSdp);
+      console.info(
+        "sdrc2: answer candidates " +
+          JSON.stringify(answer.sdp.split("\n").filter((l) => l.includes("candidate")).map((l) => l.trim())),
       );
       await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
     } catch (e) {

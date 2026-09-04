@@ -15,6 +15,7 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_OPUS};
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
+use webrtc::ice::network_type::NetworkType;
 use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
 use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -53,6 +54,7 @@ impl WebrtcEngine {
     pub async fn new(
         bind_ip: IpAddr,
         requested_port: u16,
+        advertise_ip: IpAddr,
         radio_mgr: Arc<RadioManager>,
         sessions: Arc<SessionStore>,
     ) -> Result<(Arc<Self>, u16)> {
@@ -67,6 +69,13 @@ impl WebrtcEngine {
         let mux = UDPMuxDefault::new(UDPMuxParams::new(socket));
         let mut setting_engine = SettingEngine::default();
         setting_engine.set_udp_network(UDPNetwork::Muxed(mux));
+        // Same-LAN only: IPv4 host candidates, and (when we have a concrete
+        // LAN address) just that one — a wall of IPv6/other-interface
+        // candidates only makes the browser's ICE checks time out.
+        setting_engine.set_network_types(vec![NetworkType::Udp4]);
+        if matches!(advertise_ip, IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified()) {
+            setting_engine.set_ip_filter(Box::new(move |ip: IpAddr| ip == advertise_ip));
+        }
 
         let api = APIBuilder::new()
             .with_media_engine(media_engine)

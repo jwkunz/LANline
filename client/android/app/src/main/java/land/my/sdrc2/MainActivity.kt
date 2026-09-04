@@ -33,11 +33,15 @@ class MainActivity : AppCompatActivity() {
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            // The web app has an explicit "Play" button, so keep the gesture
-            // requirement (autoplay policy) rather than disabling it.
-            mediaPlaybackRequiresUserGesture = true
+            // The wrapper auto-starts playback on connect, so autoplay must be
+            // allowed without a gesture.
+            mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             cacheMode = WebSettings.LOAD_DEFAULT
+            // The web app is a single local file that calls the plain-HTTP C2
+            // server on the LAN; allow cross-origin XHR/fetch from file://.
+            @Suppress("DEPRECATION")
+            allowUniversalAccessFromFileURLs = true
         }
         WebView.setWebContentsDebuggingEnabled(true)
 
@@ -62,6 +66,8 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        // Single-file bundle → loads fine straight from assets; `file://` →
+        // `http://<lan>` API calls are not treated as mixed content.
         val url = BuildConfig.DEV_SERVER_URL.ifEmpty { "file:///android_asset/web/index.html" }
         webView.loadUrl(url)
     }

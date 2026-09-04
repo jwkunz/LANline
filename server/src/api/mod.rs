@@ -103,6 +103,7 @@ mod tests {
         let (webrtc, audio_out) = WebrtcEngine::new(
             Ipv4Addr::LOCALHOST.into(),
             0,
+            Ipv4Addr::LOCALHOST.into(),
             radio_mgr.clone(),
             sessions.clone(),
         )
