@@ -3,6 +3,7 @@ import { ApiError, Client, normalizeBase } from "./api";
 import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { parseLatLon, type Located } from "./geo";
+import { altLabel, offsetNm, type AdsbSnapshot } from "./adsb";
 import { loadNwrStations, nearestNwr, type NwrStation } from "./nwr";
 import {
   FM_MAX_HZ,
@@ -55,6 +56,14 @@ const MODE_META: Record<string, ModeMeta> = {
     loOffsetHz: 250_000,
     wantSampleRateHz: 4_000_000,
   },
+  adsb: {
+    label: "ADS-B",
+    icon: "✈️",
+    band: "1090 MHz",
+    defaultFreqHz: 1_090_000_000,
+    loOffsetHz: 0,
+    wantSampleRateHz: 2_000_000,
+  },
   debug_tone: {
     label: "Debug Tone",
     icon: "🔊",
@@ -90,6 +99,9 @@ interface State {
   fmNearby: NearFm[];
   fmTab: "nearby" | "manual";
   seeking: boolean;
+  adsb: AdsbSnapshot | null;
+  adsbSel: string | null;
+  adsbRangeNm: number | "auto";
   log: string[];
 }
 
@@ -115,6 +127,9 @@ const state: State = {
   fmNearby: [],
   fmTab: "nearby",
   seeking: false,
+  adsb: null,
+  adsbSel: null,
+  adsbRangeNm: "auto",
   log: [],
 };
 
@@ -338,6 +353,7 @@ async function autoListen(): Promise<void> {
   } catch (e) {
     logLine(`auto start-radio failed — ${(e as ApiError).message}`);
   }
+  if (state.radio?.mode === "adsb") return; // no audio in ADS-B mode
   try {
     if (state.audioState === "idle") await state.audio.start();
   } catch (e) {
@@ -438,22 +454,38 @@ async function switchMode(id: string): Promise<void> {
   const patch: Record<string, unknown> = { mode: id };
   if (id !== "debug_tone") {
     const last = Number(localStorage.getItem(freqKey(id)));
-    patch.frequency_hz = Number.isFinite(last) && last > 0 ? last : meta?.defaultFreqHz;
+    patch.frequency_hz =
+      id === "adsb"
+        ? meta!.defaultFreqHz
+        : Number.isFinite(last) && last > 0
+          ? last
+          : meta?.defaultFreqHz;
     const sr = pickSampleRate(meta?.wantSampleRateHz ?? 2_000_000);
     const tuner: Record<string, unknown> = { lo_offset_hz: meta?.loOffsetHz ?? 250_000 };
     if (sr) tuner.sample_rate_hz = sr;
     patch.tuner = tuner;
   }
+  if (id === "adsb") {
+    patch.mode_params = {
+      reference_lat: state.loc?.lat ?? 0,
+      reference_lon: state.loc?.lon ?? 0,
+      max_range_nm: 250,
+      trail_seconds: 120,
+      forget_seconds: 60,
+      fix_errors: 1,
+    };
+  }
 
   try {
     let radio = await state.client.patchRadio(patch);
-    setState({ radio });
+    setState({ radio, adsb: null, adsbSel: null });
     logLine(`mode → ${meta?.label ?? id}`);
     void refreshStations();
     if (radio.running || NATIVE) {
       if (!radio.running) radio = await state.client.startRadio();
       setState({ radio });
-      if (state.audio && state.audioState === "idle") void state.audio.start();
+      if (id !== "adsb" && state.audio && state.audioState === "idle")
+        void state.audio.start();
     }
   } catch (e) {
     const err = e as ApiError;
@@ -624,12 +656,16 @@ async function poll(): Promise<void> {
     ]);
     pollFails = 0;
     let audioStats = state.audioStats;
-    if (state.session && state.audio && state.audioState !== "idle") {
+    if (radio.mode !== "adsb" && state.session && state.audio && state.audioState !== "idle") {
       audioStats = await state.client
         .audioState(state.session.session_id)
         .catch(() => state.audioStats);
     }
-    setState({ server, radio, status, audioStats });
+    let adsb = state.adsb;
+    if (radio.mode === "adsb") {
+      adsb = await state.client.adsbAircraft().catch(() => state.adsb);
+    }
+    setState({ server, radio, status, audioStats, adsb });
   } catch (e) {
     pollFails += 1;
     if (pollFails >= 3) loopFailed(e as ApiError, "poll");
@@ -676,6 +712,8 @@ function structKey(): string {
     state.loc ? 1 : 0,
     state.locNote ?? "",
     state.audioStats ? 1 : 0,
+    state.adsb ? 1 : 0,
+    state.adsbRangeNm,
   ].join("|");
 }
 
@@ -722,6 +760,11 @@ function patchLive(): void {
   setHTML("#telemetry", telemetryInner());
   setHTML("#log", state.log.map(esc).join("\n") || "—");
 
+  if (state.radio.mode === "adsb") {
+    setHTML("#adsb-list", adsbListInner());
+    drawScope();
+  }
+
   const freq = state.radio.frequency_hz;
   panels.querySelectorAll<HTMLButtonElement>(".station").forEach((b) => {
     b.classList.toggle("tuned", Number(b.dataset.hz) === freq);
@@ -743,6 +786,14 @@ function installDelegates(): void {
     if (hit("#loc-me")) return useMyLocation();
     if (hit("#seek-down")) return void seek(-1);
     if (hit("#seek-up")) return void seek(1);
+    if (hit("#adsb-recenter")) return setState({ adsbSel: null });
+    if (t.id === "scope") return onScopeClick(e as MouseEvent);
+
+    const acRow = t.closest<HTMLButtonElement>(".ac-row");
+    if (acRow) {
+      const icao = acRow.dataset.icao ?? null;
+      return setState({ adsbSel: icao === state.adsbSel ? null : icao });
+    }
     if (hit("#fm-down")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, -1));
     if (hit("#fm-up")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, 1));
     if (hit("#fm-go")) return fmManualGo();
@@ -758,7 +809,12 @@ function installDelegates(): void {
   });
 
   panels.addEventListener("change", (e) => {
-    if ((e.target as HTMLElement).id === "audio-mute") toggleMute();
+    const el = e.target as HTMLElement;
+    if (el.id === "audio-mute") toggleMute();
+    if (el.id === "adsb-range") {
+      const v = (el as HTMLSelectElement).value;
+      setState({ adsbRangeNm: v === "auto" ? "auto" : Number(v) });
+    }
   });
 
   panels.addEventListener("keydown", (e) => {
@@ -791,11 +847,12 @@ function idlePanelsHtml(): string {
 }
 
 function panelsHtml(): string {
+  const isAdsb = state.radio?.mode === "adsb";
   return `
     ${modeStripHtml()}
     ${wizardHtml()}
     <section class="card" id="now-playing">${nowPlayingInner()}</section>
-    <section class="card" id="audio-card">${audioInner()}</section>
+    ${isAdsb ? "" : `<section class="card" id="audio-card">${audioInner()}</section>`}
     <section class="card" id="telemetry">${telemetryInner()}</section>
     ${serverHtml()}
     <section class="card"><h2>Event log</h2><div id="log">${state.log.map(esc).join("\n") || "—"}</div></section>
@@ -850,6 +907,8 @@ function wizardHtml(): string {
       return nwrWizardHtml();
     case "wbfm":
       return fmWizardHtml();
+    case "adsb":
+      return adsbWizardHtml();
     case "debug_tone":
       return toneWizardHtml();
     default:
@@ -930,6 +989,250 @@ function fmWizardHtml(): string {
     </section>`;
 }
 
+// --- ADS-B radar scope ---------------------------------------------------
+
+const ADSB_RANGES: (number | "auto")[] = ["auto", 20, 40, 80, 160, 320];
+/** Screen positions from the last scope draw, for click hit-testing. */
+let scopePlot: { icao: string; x: number; y: number }[] = [];
+
+function adsbWizardHtml(): string {
+  const rangeOpts = ADSB_RANGES.map(
+    (r) =>
+      `<option value="${r}"${r === state.adsbRangeNm ? " selected" : ""}>${
+        r === "auto" ? "Auto range" : `${r} NM`
+      }</option>`,
+  ).join("");
+  const haveLoc = !!state.loc;
+  return `
+    <section class="card">
+      <h2>ADS-B — 1090 MHz aircraft</h2>
+      ${
+        haveLoc
+          ? ""
+          : `<p class="note" style="margin:0 0 10px">Set a location so the scope can
+             centre on you and show range/bearing. Global position decode still works without it.</p>
+             ${locRowHtml()}`
+      }
+      <div class="scope-wrap">
+        <canvas id="scope" class="scope"></canvas>
+      </div>
+      <div class="connect-row" style="margin-top:10px">
+        <select id="adsb-range" class="dial-select">${rangeOpts}</select>
+        <button id="adsb-recenter" class="secondary">Recenter</button>
+      </div>
+      <div id="adsb-list" class="ac-list">${adsbListInner()}</div>
+    </section>`;
+}
+
+function adsbListInner(): string {
+  const a = state.adsb;
+  if (!a || a.aircraft.length === 0) {
+    return `<p class="note" style="margin:10px 0 0">${
+      state.radio?.running ? "Listening for aircraft…" : "Start the receiver to track aircraft."
+    }</p>`;
+  }
+  const sel = state.adsbSel;
+  const rows = a.aircraft
+    .map((ac) => {
+      const id = ac.callsign || ac.icao.toUpperCase();
+      const dist = ac.distance_nm != null ? `${ac.distance_nm.toFixed(0)} NM` : "—";
+      const brg = ac.bearing_deg != null ? `${ac.bearing_deg.toFixed(0)}°` : "";
+      const gs = ac.ground_speed_kt != null ? `${ac.ground_speed_kt.toFixed(0)} kt` : "—";
+      const vr =
+        ac.vertical_rate_fpm != null && Math.abs(ac.vertical_rate_fpm) >= 200
+          ? ac.vertical_rate_fpm > 0
+            ? " ↑"
+            : " ↓"
+          : "";
+      return `<button class="ac-row${ac.icao === sel ? " tuned" : ""}${ac.lat == null ? " noloc" : ""}" data-icao="${esc(ac.icao)}">
+        <span class="s-call">${esc(id)}</span>
+        <span class="s-site">${esc(altLabel(ac.altitude_ft))}${vr} · ${esc(gs)}</span>
+        <span class="s-meta">${esc(dist)} ${esc(brg)}</span>
+      </button>`;
+    })
+    .join("");
+  return `<div class="stations ac-table">${rows}</div>`;
+}
+
+/** Centre + NM-per-pixel for the current scope, or null if nothing to show. */
+function scopeGeometry(cw: number): {
+  lat0: number;
+  lon0: number;
+  rangeNm: number;
+  pxPerNm: number;
+} | null {
+  const a = state.adsb;
+  if (!a) return null;
+  const withPos = a.aircraft.filter((ac) => ac.lat != null && ac.lon != null);
+  let lat0: number, lon0: number;
+  if (a.receiver) {
+    [lat0, lon0] = a.receiver;
+  } else if (state.loc) {
+    lat0 = state.loc.lat;
+    lon0 = state.loc.lon;
+  } else if (withPos.length) {
+    lat0 = withPos.reduce((s, ac) => s + ac.lat!, 0) / withPos.length;
+    lon0 = withPos.reduce((s, ac) => s + ac.lon!, 0) / withPos.length;
+  } else {
+    return null;
+  }
+
+  let rangeNm: number;
+  if (state.adsbRangeNm === "auto") {
+    let max = 10;
+    for (const ac of withPos) {
+      const { north, east } = offsetNm(lat0, lon0, ac.lat!, ac.lon!);
+      max = Math.max(max, Math.hypot(north, east));
+    }
+    rangeNm = Math.ceil((max * 1.15) / 10) * 10;
+  } else {
+    rangeNm = state.adsbRangeNm;
+  }
+  const pxPerNm = (cw / 2 - 12) / rangeNm;
+  return { lat0, lon0, rangeNm, pxPerNm };
+}
+
+function drawScope(): void {
+  const canvas = panels.querySelector<HTMLCanvasElement>("#scope");
+  if (!canvas) return;
+  const cssW = canvas.clientWidth || 320;
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.round(cssW * dpr);
+  if (canvas.width !== size) {
+    canvas.width = size;
+    canvas.height = size;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  const cw = cssW;
+  const cx = cw / 2;
+  const cy = cw / 2;
+
+  const css = getComputedStyle(document.body);
+  const ink = css.getPropertyValue("--ink").trim() || "#e8eaed";
+  const muted = css.getPropertyValue("--muted").trim() || "#9aa3af";
+  const accent = css.getPropertyValue("--accent").trim() || "#60a5fa";
+
+  ctx.clearRect(0, 0, cw, cw);
+  ctx.fillStyle = "rgba(10, 20, 12, 0.92)";
+  ctx.fillRect(0, 0, cw, cw);
+
+  const geo = scopeGeometry(cw);
+  ctx.strokeStyle = "rgba(120,160,130,0.35)";
+  ctx.fillStyle = muted;
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.lineWidth = 1;
+
+  // range rings
+  const rings = 4;
+  for (let i = 1; i <= rings; i++) {
+    const rr = ((cw / 2 - 12) * i) / rings;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+    ctx.stroke();
+    if (geo) {
+      ctx.fillText(`${((geo.rangeNm * i) / rings).toFixed(0)}`, cx + 3, cy - rr + 11);
+    }
+  }
+  // cross-hairs + N
+  ctx.beginPath();
+  ctx.moveTo(cx, 8);
+  ctx.lineTo(cx, cw - 8);
+  ctx.moveTo(8, cy);
+  ctx.lineTo(cw - 8, cy);
+  ctx.stroke();
+  ctx.fillStyle = muted;
+  ctx.fillText("N", cx + 4, 12);
+
+  // receiver
+  ctx.fillStyle = accent;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  scopePlot = [];
+  const a = state.adsb;
+  if (!geo || !a) {
+    ctx.fillStyle = muted;
+    ctx.fillText(
+      a ? "waiting for positions…" : "start the receiver",
+      cx - 44,
+      cy + cw / 4,
+    );
+    ctx.restore();
+    return;
+  }
+
+  for (const ac of a.aircraft) {
+    if (ac.lat == null || ac.lon == null) continue;
+    const { north, east } = offsetNm(geo.lat0, geo.lon0, ac.lat, ac.lon);
+    const x = cx + east * geo.pxPerNm;
+    const y = cy - north * geo.pxPerNm;
+    if (x < 0 || x > cw || y < 0 || y > cw) continue;
+    const selected = ac.icao === state.adsbSel;
+    scopePlot.push({ icao: ac.icao, x, y });
+
+    // trail
+    if (ac.trail.length > 1) {
+      ctx.strokeStyle = selected ? accent : "rgba(140,180,150,0.5)";
+      ctx.beginPath();
+      ac.trail.forEach(([tlat, tlon], k) => {
+        const o = offsetNm(geo.lat0, geo.lon0, tlat, tlon);
+        const tx = cx + o.east * geo.pxPerNm;
+        const ty = cy - o.north * geo.pxPerNm;
+        if (k === 0) ctx.moveTo(tx, ty);
+        else ctx.lineTo(tx, ty);
+      });
+      ctx.stroke();
+    }
+
+    // marker: chevron rotated to track (N-up)
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(((ac.track_deg ?? 0) * Math.PI) / 180);
+    ctx.fillStyle = selected ? accent : "#8fe0a0";
+    if (ac.track_deg != null) {
+      ctx.beginPath();
+      ctx.moveTo(0, -6);
+      ctx.lineTo(4, 5);
+      ctx.lineTo(0, 2);
+      ctx.lineTo(-4, 5);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.arc(0, 0, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // label
+    ctx.fillStyle = selected ? accent : ink;
+    ctx.font = selected ? "bold 10px ui-monospace, monospace" : "10px ui-monospace, monospace";
+    const label = ac.callsign || ac.icao.toUpperCase();
+    ctx.fillText(label, x + 7, y - 1);
+    ctx.fillStyle = muted;
+    ctx.fillText(altLabel(ac.altitude_ft), x + 7, y + 9);
+  }
+  ctx.restore();
+}
+
+function onScopeClick(ev: MouseEvent): void {
+  const canvas = panels.querySelector<HTMLCanvasElement>("#scope");
+  if (!canvas || scopePlot.length === 0) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = ev.clientX - rect.left;
+  const py = ev.clientY - rect.top;
+  let best: { icao: string; d: number } | null = null;
+  for (const p of scopePlot) {
+    const d = Math.hypot(p.x - px, p.y - py);
+    if (d < 16 && (!best || d < best.d)) best = { icao: p.icao, d };
+  }
+  setState({ adsbSel: best ? (best.icao === state.adsbSel ? null : best.icao) : null });
+}
+
 function toneWizardHtml(): string {
   const p = state.radio?.mode_params ?? {};
   return `
@@ -944,6 +1247,31 @@ function nowPlayingInner(): string {
   const r = state.radio!;
   const st = state.status;
   const meta = MODE_META[r.mode];
+
+  if (r.mode === "adsb") {
+    const a = state.adsb;
+    return `
+      <h2>Now tracking</h2>
+      <div class="mode-line">
+        <span class="mode">${esc(meta?.label ?? "ADS-B")}</span>
+        <span class="freq">1090 MHz</span>
+        <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "receiving" : "stopped"}</span>
+      </div>
+      <div class="grid">
+        ${kv("Aircraft", a ? String(a.aircraft_count) : "—")}
+        ${kv("With position", a ? String(a.with_position) : "—")}
+        ${kv("Messages", a ? a.messages.toLocaleString() : "—")}
+        ${kv("Message rate", a ? `${a.message_rate.toFixed(0)}/s` : "—")}
+        ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
+        ${kv("Reference", a?.receiver ? `${a.receiver[0].toFixed(3)}, ${a.receiver[1].toFixed(3)}` : "not set")}
+      </div>
+      <div style="margin-top:14px">
+        <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
+          ${r.running ? "Stop receiver" : "Start receiver"}
+        </button>
+      </div>`;
+  }
+
   const digits = r.mode === "wbfm" ? 1 : 4;
   const ident = tunedStationLabel();
   const canSeek = r.mode === "wbfm" || r.mode === "nbfm";

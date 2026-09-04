@@ -11,6 +11,8 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
   `http://<host>:8730/` (or `http://lanline.local:8730/`) and it connects with
   nothing to type,
 - a **WebRTC Opus audio stream** of the demodulated RF (receive path),
+- an **ADS-B tracker** (1090 MHz): decoded aircraft over REST + a Beast TCP feed,
+  plotted on a self-contained radar scope in the web client,
 - a reserved port for the future transmit path (modulated Opus in),
 - **discovery** so clients find it unaided: an **mDNS** responder
   (`lanline.local` + `_lanline._tcp`) for browsers, and a **UDP beacon** for the
@@ -30,10 +32,12 @@ wrapper (`client/android`).
 | 2a | Android WebView wrapper + native UDP beacon discovery (`window.LanlineNative`) | ✅ |
 | 2b | Mode-selection wizard, wideband FM broadcast, nearest-station finders, seek | ✅ |
 | 2c | Server serves the web client + fixed C2 port + mDNS (`lanline.local`) — zero-config browser | ✅ |
-| 2d | Transmit / modulate path (the reserved `audio_in` port + `radio/tx*` endpoints) | |
+| 2d | ADS-B tracker mode (1090 MHz Mode S decode), radar scope, Beast feed | ✅ |
+| 2e | Transmit / modulate path (the reserved `audio_in` port + `radio/tx*` endpoints) | |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR)
-service. More modes are added through the REST API over time.
+service; **wideband FM** and an **ADS-B** aircraft tracker followed. More modes
+are added through the REST API over time.
 
 ## Layout
 
@@ -88,6 +92,15 @@ npm run dev        # http://localhost:5173 — enter the server host manually
 
 The dev server still talks to a running `lanline-server` over its REST API; a
 typed/saved host is only needed in this mode (and inside the Android wrapper).
+
+### ADS-B
+
+Pick **ADS-B** in the mode strip. Set your location (for range/bearing and a
+centred scope) and start the receiver — decoded aircraft appear on the radar
+scope (range rings in NM, heading vectors, position trails; click a target for
+detail) and in the list below it. The server also exposes the tracks at
+`GET /api/v1/adsb/aircraft` and streams a **Beast** feed on TCP `30005`
+(`--beast-port 0` to disable) for `readsb` / `tar1090` / Virtual Radar Server.
 
 ## Building the Android client
 
