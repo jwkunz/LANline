@@ -106,7 +106,7 @@ Server identity and current capability summary.
   "hostname": "bench-linux",
   "time": "2026-09-03T17:04:11Z",
   "ports": { "c2": 51847, "audio_out": 49213, "audio_in": 60731 },
-  "capabilities": ["rx", "webrtc", "nbfm", "debug_tone"],
+  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "debug_tone"],
   "selected_device": {
     "id": "hackrf/0000000000000000457863c8...",
     "driver": "hackrf",
@@ -252,6 +252,19 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "wbfm",
+    "name": "Wideband FM (broadcast)",
+    "tx_capable": false,
+    "params": {
+      "deviation_hz":  { "type": "number", "default": 75000,  "min": 50000,  "max": 100000, "unit": "Hz" },
+      "channel_bw_hz": { "type": "number", "default": 200000, "min": 120000, "max": 256000, "unit": "Hz" },
+      "deemphasis_us": { "type": "number", "default": 75, "enum": [0, 50, 75], "unit": "us" },
+      "audio_lpf_hz":  { "type": "number", "default": 15000, "min": 5000, "max": 17000, "unit": "Hz" },
+      "squelch_db":    { "type": "number", "default": -120, "min": -120, "max": 0, "unit": "dBFS" },
+      "noise_squelch": { "type": "number", "default": 2.0, "min": 0.02, "max": 2.0, "unit": "ratio" }
+    }
+  },
+  {
     "id": "debug_tone",
     "name": "Debug Tone (A4 440 Hz)",
     "tx_capable": false,
@@ -262,6 +275,12 @@ the client uses to render controls and the server uses to validate
   }
 ]
 ```
+
+`nbfm` and `wbfm` share one DSP chain (LO-offset NCO → FIR decimation → polar
+discriminator → de-emphasis → audio LPF → resample); the parameters scale it
+between ~16 kHz voice channels and ~200 kHz broadcast channels. `wbfm` is mono
+and notches the 19 kHz stereo pilot; it wants a wider `tuner.sample_rate_hz`
+(e.g. 4 MHz on a HackRF).
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end

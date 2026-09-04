@@ -1,20 +1,19 @@
-//! Narrowband-FM receive DSP: IQ at the device sample rate → mono audio at
-//! 48 kHz.
+//! FM receive DSP: IQ at the device sample rate → mono audio at 48 kHz.
+//! Handles both narrowband (NWR voice, ~16 kHz channel) and wideband
+//! (broadcast, ~200 kHz channel) FM — the chain is the same, only the
+//! constants scale with `channel_bw_hz`.
 //!
 //! Chain: digital LO offset (dodge the ZIF DC spike) → windowed-sinc FIR
-//! decimation to a ~50 kHz channel rate → polar FM discriminator →
-//! de-emphasis → audio low-pass → power squelch → linear resample to 48 kHz.
+//! decimation to the channel rate → polar FM discriminator → de-emphasis →
+//! audio low-pass → noise squelch → linear resample to 48 kHz.
 
 use num_complex::Complex32;
 use std::f64::consts::PI;
 
 const AUDIO_RATE: f64 = 48_000.0;
-/// Target intermediate rate after decimation (Hz). The real rate is
-/// `device_rate / decim` with `decim` chosen to land near this.
-const TARGET_CHANNEL_RATE: f64 = 50_000.0;
 
 #[derive(Clone, Copy, Debug)]
-pub struct NbfmParams {
+pub struct FmParams {
     pub deviation_hz: f64,
     pub channel_bw_hz: f64,
     pub deemphasis_us: f64,
@@ -23,13 +22,13 @@ pub struct NbfmParams {
     pub squelch_dbfs: f64,
     /// Noise-squelch threshold: HF-noise energy in the discriminator output
     /// above which the channel is treated as unoccupied. Amplitude-normalized,
-    /// so it is independent of RF gain and deviation. ~0.02 (tight) .. ~1.0
+    /// so it is independent of RF gain and deviation. ~0.02 (tight) .. ~2.0
     /// (open).
     pub noise_squelch: f64,
     pub lo_offset_hz: f64,
 }
 
-impl Default for NbfmParams {
+impl Default for FmParams {
     fn default() -> Self {
         Self {
             deviation_hz: 5_000.0,
@@ -51,7 +50,7 @@ pub struct ChainMetrics {
     pub audio_dbfs: f32,
 }
 
-pub struct NbfmChain {
+pub struct FmChain {
     nco: Nco,
     decim: FirDecimator,
     channel_rate: f64,
@@ -59,6 +58,7 @@ pub struct NbfmChain {
     disc_gain: f32,
     deemph: OnePole,
     audio_lp: Biquad,
+    pilot_notch: Option<Biquad>,
     noise_hp: Biquad,
     noise_env: f32,
     noise_gate: f32,
@@ -71,13 +71,16 @@ pub struct NbfmChain {
     scratch_audio: Vec<f32>,
 }
 
-impl NbfmChain {
-    pub fn new(device_rate: f64, p: NbfmParams) -> Self {
-        let decim = ((device_rate / TARGET_CHANNEL_RATE).round() as usize).max(1);
+impl FmChain {
+    pub fn new(device_rate: f64, p: FmParams) -> Self {
+        // Decimate to a channel rate comfortably above the occupied bandwidth:
+        // ~48 kHz for NWR voice, ~300+ kHz for broadcast FM.
+        let target = (p.channel_bw_hz * 1.6).max(48_000.0);
+        let decim = ((device_rate / target).floor() as usize).max(1);
         let channel_rate = device_rate / decim as f64;
 
         // Channel filter: pass the Carson bandwidth with margin, reject the
-        // adjacent 25 kHz channel.
+        // adjacent channel.
         let cutoff = (p.channel_bw_hz * 0.6).clamp(6_000.0, channel_rate / 2.0 * 0.9);
         let num_taps = (16 * decim + 1).min(1023);
 
@@ -88,10 +91,19 @@ impl NbfmChain {
             OnePole::passthrough()
         };
         let audio_lp = Biquad::lowpass(channel_rate, p.audio_lpf_hz.min(channel_rate / 2.5), 0.707);
-        // Noise squelch: energy well above the voice band in the raw
+        // Broadcast FM: notch the 19 kHz stereo pilot out of the mono sum so it
+        // isn't audible as a whistle (the audio LPF alone doesn't kill it).
+        let pilot_notch = (p.channel_bw_hz > 50_000.0 && channel_rate > 45_000.0)
+            .then(|| Biquad::notch(channel_rate, 19_000.0, 12.0));
+        // Noise squelch: energy just above the audio band in the raw
         // discriminator output. Amplitude-normalized (it works on `arg`), so
-        // the threshold is independent of RF gain and deviation.
-        let noise_hp = Biquad::highpass(channel_rate, (channel_rate * 0.4).min(9_000.0), 0.707);
+        // the threshold is independent of RF gain and deviation. Kept above the
+        // audio LPF so program content never trips it.
+        let noise_hp = Biquad::highpass(
+            channel_rate,
+            (p.audio_lpf_hz * 1.3).clamp(4_000.0, channel_rate * 0.45),
+            0.707,
+        );
 
         Self {
             nco: Nco::new(-p.lo_offset_hz / device_rate),
@@ -101,6 +113,7 @@ impl NbfmChain {
             disc_gain,
             deemph,
             audio_lp,
+            pilot_notch,
             noise_hp,
             noise_env: 1.0,
             noise_gate: (p.noise_squelch as f32).clamp(0.01, 2.0),
@@ -163,6 +176,9 @@ impl NbfmChain {
             self.noise_env += (hf.abs() - self.noise_env) * nk;
 
             let mut a = raw * self.disc_gain;
+            if let Some(notch) = &mut self.pilot_notch {
+                a = notch.process(a);
+            }
             a = self.deemph.process(a);
             a = self.audio_lp.process(a);
             // pre-gate voice-band envelope, for the SNR estimate
@@ -329,6 +345,11 @@ impl Biquad {
         Self::normalize(b0, -(1.0 + cs), b0, 1.0 + alpha, -2.0 * cs, 1.0 - alpha)
     }
 
+    pub fn notch(fs: f64, fc: f64, q: f64) -> Self {
+        let (cs, alpha) = Self::prewarp(fs, fc, q);
+        Self::normalize(1.0, -2.0 * cs, 1.0, 1.0 + alpha, -2.0 * cs, 1.0 - alpha)
+    }
+
     fn prewarp(fs: f64, fc: f64, q: f64) -> (f64, f64) {
         let w0 = 2.0 * PI * (fc / fs);
         let (sn, cs) = w0.sin_cos();
@@ -444,9 +465,9 @@ mod tests {
     fn recovers_modulating_tone() {
         let fs = 2_000_000.0;
         let tone = 1_200.0;
-        let params = NbfmParams { deemphasis_us: 0.0, ..NbfmParams::default() };
+        let params = FmParams { deemphasis_us: 0.0, ..FmParams::default() };
         let iq = fm_modulate(fs, 800_000, tone, params.deviation_hz, params.lo_offset_hz);
-        let mut chain = NbfmChain::new(fs, params);
+        let mut chain = FmChain::new(fs, params);
         let mut audio = Vec::new();
         for block in iq.chunks(8192) {
             chain.process(block, &mut audio);
@@ -462,9 +483,36 @@ mod tests {
     }
 
     #[test]
+    fn recovers_wideband_tone() {
+        // Broadcast-FM-shaped: 4 Msps, ±75 kHz deviation, 6 kHz tone.
+        let fs = 4_000_000.0;
+        let tone = 6_000.0;
+        let params = FmParams {
+            deviation_hz: 75_000.0,
+            channel_bw_hz: 200_000.0,
+            audio_lpf_hz: 15_000.0,
+            deemphasis_us: 0.0,
+            noise_squelch: 2.0,
+            squelch_dbfs: -120.0,
+            ..FmParams::default()
+        };
+        let iq = fm_modulate(fs, 1_600_000, tone, params.deviation_hz, params.lo_offset_hz);
+        let mut chain = FmChain::new(fs, params);
+        let mut audio = Vec::new();
+        for block in iq.chunks(16384) {
+            chain.process(block, &mut audio);
+        }
+        let tail = &audio[audio.len() / 2..];
+        let at_tone = goertzel(tail, AUDIO_RATE, tone as f64);
+        let off_tone = goertzel(tail, AUDIO_RATE, 1_000.0);
+        assert!(at_tone > 0.1, "wideband tone amplitude {at_tone}");
+        assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");
+    }
+
+    #[test]
     fn squelch_stays_closed_on_noise() {
         let fs = 2_000_000.0;
-        let params = NbfmParams { squelch_dbfs: -40.0, ..NbfmParams::default() };
+        let params = FmParams { squelch_dbfs: -40.0, ..FmParams::default() };
         let mut state = 12345u64;
         let noise: Vec<Complex32> = (0..400_000)
             .map(|_| {
@@ -475,7 +523,7 @@ mod tests {
                 Complex32::new(r, i)
             })
             .collect();
-        let mut chain = NbfmChain::new(fs, params);
+        let mut chain = FmChain::new(fs, params);
         let mut audio = Vec::new();
         for block in noise.chunks(8192) {
             chain.process(block, &mut audio);

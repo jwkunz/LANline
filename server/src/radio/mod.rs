@@ -1,7 +1,7 @@
 //! The receive pipeline and its lifecycle.
 //!
-//! `debug_tone` mode synthesizes a 440 Hz A4; `nbfm` mode opens the selected
-//! SoapySDR device and runs the [`dsp`] NBFM chain; any other mode emits
+//! `debug_tone` mode synthesizes a 440 Hz A4; `nbfm` and `wbfm` modes open the
+//! selected SoapySDR device and run the [`dsp`] FM chain; any other mode emits
 //! digital silence. Every path produces 20 ms Opus frames on a broadcast
 //! channel that each WebRTC session subscribes to.
 
@@ -15,7 +15,7 @@ use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate};
 use bytes::Bytes;
 #[cfg(feature = "soapy")]
-use dsp::{NbfmChain, NbfmParams};
+use dsp::{FmChain, FmParams};
 use crate::audio::wav::WavDump;
 #[cfg(feature = "soapy")]
 use crate::model::GainMode;
@@ -67,7 +67,7 @@ struct RunState {
 enum PipelineCmd {
     Retune(f64),
     Gain { agc: bool, overall: Option<f64>, elements: Vec<(String, f64)> },
-    Nbfm(dsp::NbfmParams),
+    Fm(dsp::FmParams),
 }
 
 impl RadioManager {
@@ -184,7 +184,7 @@ impl RadioManager {
             || old.audio.frame_ms != new.audio.frame_ms
             || old.audio.sample_rate_hz != new.audio.sample_rate_hz
             || old.audio.opus_bitrate_bps != new.audio.opus_bitrate_bps
-            || (new.mode != "nbfm" && old.mode_params != new.mode_params);
+            || (!matches!(new.mode.as_str(), "nbfm" | "wbfm") && old.mode_params != new.mode_params);
 
         if needs_restart {
             self.reconfigure();
@@ -212,8 +212,8 @@ impl RadioManager {
                         .collect(),
                 });
             }
-            if new.mode == "nbfm" && old.mode_params != new.mode_params {
-                cmds.push(PipelineCmd::Nbfm(nbfm_params(new)));
+            if matches!(new.mode.as_str(), "nbfm" | "wbfm") && old.mode_params != new.mode_params {
+                cmds.push(PipelineCmd::Fm(fm_params(new)));
             }
             if !cmds.is_empty() {
                 if let Some(tx) = &self.run.lock().unwrap().cmd_tx {
@@ -232,9 +232,9 @@ impl RadioManager {
 
 /// Build the DSP chain parameters from the current radio config.
 #[cfg(feature = "soapy")]
-fn nbfm_params(cfg: &RadioConfig) -> dsp::NbfmParams {
+fn fm_params(cfg: &RadioConfig) -> dsp::FmParams {
     let p = |key: &str, default: f64| cfg.mode_params.get(key).and_then(|v| v.as_f64()).unwrap_or(default);
-    dsp::NbfmParams {
+    dsp::FmParams {
         deviation_hz: p("deviation_hz", 5_000.0),
         channel_bw_hz: p("channel_bw_hz", 16_000.0),
         deemphasis_us: p("deemphasis_us", 75.0),
@@ -278,7 +278,7 @@ struct SdrParams {
     gain_elements_db: Vec<(String, f64)>,
     dc_offset: bool,
     settings: Vec<(String, String)>,
-    nbfm: NbfmParams,
+    fm: FmParams,
 }
 
 impl PipelineParams {
@@ -298,7 +298,7 @@ impl PipelineParams {
                 let level_dbfs = param("level_dbfs", -12.0).clamp(-60.0, -1.0);
                 SourceKind::Tone { hz, amp: 10f64.powf(level_dbfs / 20.0) as f32 }
             }
-            "nbfm" => {
+            "nbfm" | "wbfm" => {
                 #[cfg(not(feature = "soapy"))]
                 {
                     let _ = device;
@@ -327,7 +327,7 @@ impl PipelineParams {
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect(),
-                    nbfm: nbfm_params(cfg),
+                    fm: fm_params(cfg),
                 })),
                 None => SourceKind::Silence,
                 }
@@ -488,18 +488,18 @@ fn run_sdr(
     let dev = match Device::new(sp.soapy_args.as_str()) {
         Ok(d) => d,
         Err(e) => {
-            tracing::error!("nbfm: cannot open device: {e}");
+            tracing::error!("fm: cannot open device: {e}");
             return;
         }
     };
 
     let log_set = |what: &str, r: Result<(), soapysdr::Error>| {
         if let Err(e) = r {
-            tracing::warn!("nbfm: set {what}: {e}");
+            tracing::warn!("fm: set {what}: {e}");
         }
     };
     log_set("sample_rate", dev.set_sample_rate(dir, ch, sp.device_rate));
-    let lo = sp.freq_hz - sp.nbfm.lo_offset_hz;
+    let lo = sp.freq_hz - sp.fm.lo_offset_hz;
     log_set("frequency", dev.set_frequency(dir, ch, lo, ""));
     if let Some(ant) = &sp.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
@@ -525,18 +525,18 @@ fn run_sdr(
     let mut stream = match dev.rx_stream::<Complex32>(&[ch]) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("nbfm: rx_stream: {e}");
+            tracing::error!("fm: rx_stream: {e}");
             return;
         }
     };
     if let Err(e) = stream.activate(None) {
-        tracing::error!("nbfm: stream activate: {e}");
+        tracing::error!("fm: stream activate: {e}");
         return;
     }
 
     let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
     let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
-    let mut chain = NbfmChain::new(sp.device_rate, sp.nbfm);
+    let mut chain = FmChain::new(sp.device_rate, sp.fm);
     let encoder = match new_encoder(fc.bitrate_bps) {
         Some(e) => e,
         None => {
@@ -544,9 +544,9 @@ fn run_sdr(
             return;
         }
     };
-    telemetry.lock().unwrap().source = "nbfm";
+    telemetry.lock().unwrap().source = "fm";
     tracing::info!(
-        "nbfm: {} @ {:.4} MHz (LO {:.3} MHz), {:.3} Msps, channel rate {:.0} Hz",
+        "fm: {} @ {:.4} MHz (LO {:.3} MHz), {:.3} Msps, channel rate {:.0} Hz",
         sp.soapy_args,
         sp.freq_hz / 1e6,
         lo / 1e6,
@@ -562,10 +562,10 @@ fn run_sdr(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 PipelineCmd::Retune(hz) => {
-                    let new_lo = hz - sp.nbfm.lo_offset_hz;
+                    let new_lo = hz - sp.fm.lo_offset_hz;
                     log_set("frequency", dev.set_frequency(dir, ch, new_lo, ""));
                     chain.on_retune();
-                    tracing::info!("nbfm: retuned to {:.4} MHz (live)", hz / 1e6);
+                    tracing::info!("fm: retuned to {:.4} MHz (live)", hz / 1e6);
                 }
                 PipelineCmd::Gain { agc, overall, elements } => {
                     log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
@@ -581,8 +581,8 @@ fn run_sdr(
                         }
                     }
                 }
-                PipelineCmd::Nbfm(params) => {
-                    chain = NbfmChain::new(sp.device_rate, params);
+                PipelineCmd::Fm(params) => {
+                    chain = FmChain::new(sp.device_rate, params);
                 }
             }
         }
@@ -594,7 +594,7 @@ fn run_sdr(
                     ErrorCode::Timeout => {}
                     ErrorCode::Overflow => overruns += 1,
                     _ => {
-                        tracing::warn!("nbfm: stream read: {e}");
+                        tracing::warn!("fm: stream read: {e}");
                         std::thread::sleep(Duration::from_millis(5));
                     }
                 }

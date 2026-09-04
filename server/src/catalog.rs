@@ -36,6 +36,19 @@ pub fn modes() -> Vec<ModeInfo> {
             ]),
         },
         ModeInfo {
+            id: "wbfm",
+            name: "Wideband FM (broadcast)",
+            tx_capable: false,
+            params: BTreeMap::from([
+                ("deviation_hz", num(75000.0, 50000.0, 100000.0, "Hz")),
+                ("channel_bw_hz", num(200000.0, 120000.0, 256000.0, "Hz")),
+                ("deemphasis_us", num_enum(75.0, &[0.0, 50.0, 75.0], "us")),
+                ("audio_lpf_hz", num(15000.0, 5000.0, 17000.0, "Hz")),
+                ("squelch_db", num(-120.0, -120.0, 0.0, "dBFS")),
+                ("noise_squelch", num(2.0, 0.02, 2.0, "ratio")),
+            ]),
+        },
+        ModeInfo {
             id: "debug_tone",
             name: "Debug Tone (A4 440 Hz)",
             tx_capable: false,
@@ -89,5 +102,5 @@ pub fn presets() -> Vec<Preset> {
 /// Capability strings for `GET /api/v1/server` and the beacon. `tx` is added
 /// by the caller when the selected device supports it.
 pub fn base_capabilities() -> Vec<String> {
-    ["rx", "webrtc", "nbfm", "debug_tone"].iter().map(|s| s.to_string()).collect()
+    ["rx", "webrtc", "nbfm", "wbfm", "debug_tone"].iter().map(|s| s.to_string()).collect()
 }
