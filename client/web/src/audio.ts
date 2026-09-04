@@ -55,12 +55,12 @@ export class AudioSession {
       await gatheringComplete(pc);
       const offerSdp = pc.localDescription!.sdp;
       console.info(
-        "sdrc2: offer candidates " +
+        "lanline: offer candidates " +
           JSON.stringify(offerSdp.split("\n").filter((l) => l.includes("candidate")).map((l) => l.trim())),
       );
       const answer = await this.client.audioOffer(this.sessionId, offerSdp);
       console.info(
-        "sdrc2: answer candidates " +
+        "lanline: answer candidates " +
           JSON.stringify(answer.sdp.split("\n").filter((l) => l.includes("candidate")).map((l) => l.trim())),
       );
       await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });

@@ -1,4 +1,4 @@
-package land.my.sdrc2
+package land.lanline
 
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -15,7 +15,7 @@ import java.net.InetSocketAddress
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Listens for the SDR C2 UDP discovery beacon (see docs/beacon-protocol.md) and
+ * Listens for the LANline UDP discovery beacon (see docs/beacon-protocol.md) and
  * keeps a short-TTL map of the servers currently announcing on the LAN.
  */
 class BeaconListener(private val port: Int = 50055) {
@@ -77,7 +77,7 @@ class BeaconListener(private val port: Int = 50055) {
     private fun parse(text: String) {
         try {
             val o = JSONObject(text)
-            if (o.optString("magic") != "SDR-C2-BEACON") return
+            if (o.optString("magic") != "LANLINE-BEACON") return
             if (o.optInt("protocol_version") != 1) return
             val ports = o.getJSONObject("ports")
             val id = o.getString("server_id")

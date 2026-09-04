@@ -95,7 +95,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn app() -> axum::Router {
-        let config = Config::parse_from(["sdr-c2-server", "--no-beacon"]);
+        let config = Config::parse_from(["lanline-server", "--no-beacon"]);
         let registry = Arc::new(DeviceRegistry::new()); // no device selected
         let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
         let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None);

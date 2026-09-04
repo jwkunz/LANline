@@ -1,9 +1,10 @@
 {
-  "name": "sdr-c2-web",
+  "name": "lanline-web",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
-  "description": "Web client for the SDR command & control server",
+  "description": "LANline web client",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

@@ -1,9 +1,9 @@
-package land.my.sdrc2
+package land.lanline
 
 import android.webkit.JavascriptInterface
 
 /**
- * Exposed to the web app as `window.SdrNative`. The web client feature-detects
+ * Exposed to the web app as `window.LanlineNative`. The web client feature-detects
  * this object; on a plain browser it is absent and the app falls back to manual
  * host entry.
  */

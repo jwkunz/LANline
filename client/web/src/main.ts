@@ -12,7 +12,7 @@ import type {
   ServerInfo,
 } from "./types";
 
-const HOST_KEY = "sdrc2.host";
+const HOST_KEY = "lanline.host";
 
 type Phase = "disconnected" | "connecting" | "connected" | "error";
 
@@ -35,7 +35,7 @@ interface State {
   log: string[];
 }
 
-const LOC_KEY = "sdrc2.loc";
+const LOC_KEY = "lanline.loc";
 
 const state: State = {
   phase: "disconnected",
@@ -64,7 +64,7 @@ let pollFails = 0;
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
-  <h1>SDR&nbsp;C2 <span class="sub">web client</span></h1>
+  <h1>LANline <span class="sub">SDR on your LAN</span></h1>
   <p class="tagline">Discover a radio server on the LAN and watch the receive session.</p>
   <section class="card">
     <h2>Connection</h2>
@@ -223,7 +223,7 @@ async function connect(hostRaw: string): Promise<void> {
     if (NATIVE) void autoListen();
   } catch (e) {
     const err = e as ApiError;
-    console.warn(`sdrc2: connect failed — ${err.code}: ${err.message}`);
+    console.warn(`lanline: connect failed — ${err.code}: ${err.message}`);
     state.client = null;
     state.session = null;
     setState({ phase: "error", error: `${err.code}: ${err.message}` });

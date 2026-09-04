@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "SDR C2"
+rootProject.name = "LANline"
 include(":app")

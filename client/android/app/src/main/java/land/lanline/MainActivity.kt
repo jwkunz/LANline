@@ -1,4 +1,4 @@
-package land.my.sdrc2
+package land.lanline
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -83,7 +83,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.addJavascriptInterface(NativeBridge(beacon), "SdrNative")
+        webView.addJavascriptInterface(NativeBridge(beacon), "LanlineNative")
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        multicastLock = wifi.createMulticastLock("sdrc2-beacon").apply {
+        multicastLock = wifi.createMulticastLock("lanline-beacon").apply {
             setReferenceCounted(false)
             acquire()
         }

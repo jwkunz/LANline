@@ -1,4 +1,4 @@
-# SDR C2 — web client
+# LANline — web client
 
 Vanilla TypeScript + Vite. LAN server connection, REST session with heartbeat,
 live radio/telemetry display, and received-audio playback over WebRTC/Opus
@@ -22,7 +22,7 @@ Enter the server host from the server's startup log (e.g.
 | `src/types.ts` | TS mirrors of `server/src/model.rs` DTOs |
 | `src/api.ts` | typed `fetch` wrapper + `ApiError` + host normalization |
 | `src/audio.ts` | `AudioSession`: recvonly `RTCPeerConnection`, non-trickle offer |
-| `src/discovery.ts` | `window.SdrNative` bridge (Android beacon discovery) |
+| `src/discovery.ts` | `window.LanlineNative` bridge (Android beacon discovery) |
 | `src/nwr.ts` + `src/nwr-stations.json` | bundled NOAA Weather Radio transmitter directory + nearest-station search |
 | `src/main.ts` | app: connect flow, heartbeat + 1 Hz poll loops, station finder, rendering |
 | `src/style.css` | light/dark styling |

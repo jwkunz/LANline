@@ -2,7 +2,7 @@
 # Source this before building or running the server:
 #
 #     source scripts/dev-env.sh
-#     cargo run -p sdr-c2-server
+#     cargo run -p lanline-server
 #
 # It points the build and the resulting binary at the SoapySDR install that
 # ships with radioconda, and at a libclang for soapysdr-sys' bindgen step.

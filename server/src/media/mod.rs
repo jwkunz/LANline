@@ -114,7 +114,7 @@ impl WebrtcEngine {
                 rtcp_feedback: vec![],
             },
             "audio".to_owned(),
-            "sdr-c2".to_owned(),
+            "lanline".to_owned(),
         ));
         let rtp_sender = pc
             .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)

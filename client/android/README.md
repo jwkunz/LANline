@@ -1,8 +1,8 @@
-# SDR C2 — Android client
+# LANline — Android client
 
 A thin native wrapper around the web client (`client/web`): a full-screen
 `WebView` plus a Kotlin UDP **beacon listener** that feeds discovered servers to
-the web app through `window.SdrNative`.
+the web app through `window.LanlineNative`.
 
 ## Build
 
@@ -24,7 +24,7 @@ Or just open `client/android/` in Android Studio and Run.
 
 ### Loading the live dev server instead of bundled assets
 
-Set `sdrc2.devServerUrl=http://<your-lan-ip>:5173` in `local.properties` (start
+Set `lanline.devServerUrl=http://<your-lan-ip>:5173` in `local.properties` (start
 Vite with `npm run dev` — it already binds `0.0.0.0`). Handy for iterating on
 the web UI without repackaging.
 
@@ -33,8 +33,8 @@ the web UI without repackaging.
 | Piece | Role |
 |-------|------|
 | `MainActivity` | Hosts the `WebView`; JS + DOM storage on; grants no capture perms (receive-only WebRTC); holds a Wi-Fi `MulticastLock` while visible |
-| `BeaconListener` | Binds UDP `:50055`, parses `SDR-C2-BEACON` datagrams, keeps a 5 s-TTL server map |
-| `NativeBridge` | `window.SdrNative.discoveredServers()` / `.platform()` — the web app feature-detects this |
+| `BeaconListener` | Binds UDP `:50055`, parses `LANLINE-BEACON` datagrams, keeps a 5 s-TTL server map |
+| `NativeBridge` | `window.LanlineNative.discoveredServers()` / `.platform()` — the web app feature-detects this |
 | `network_security_config.xml` | Permits cleartext HTTP (the C2 server is plain HTTP on the LAN) |
 
 Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`,

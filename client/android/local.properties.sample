@@ -4,4 +4,4 @@ sdk.dir=/home/jwkunz/Android/Sdk
 
 # Optional: load the live Vite dev server instead of the bundled web assets.
 # Leave unset (or empty) for a normal offline build.
-#sdrc2.devServerUrl=http://192.168.1.50:5173
+#lanline.devServerUrl=http://192.168.1.50:5173

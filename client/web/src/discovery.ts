@@ -1,5 +1,5 @@
 // LAN discovery. Browsers cannot receive the UDP beacon, so this only does
-// anything inside the Android wrapper, which injects `window.SdrNative`.
+// anything inside the Android wrapper, which injects `window.LanlineNative`.
 
 export interface DiscoveredServer {
   server_id: string;
@@ -12,7 +12,7 @@ export interface DiscoveredServer {
 
 declare global {
   interface Window {
-    SdrNative?: {
+    LanlineNative?: {
       platform(): string;
       discoveredServers(): string;
     };
@@ -22,7 +22,7 @@ declare global {
 /** Returns a poll function when running inside a host that provides discovery,
  *  otherwise `null`. */
 export function nativeDiscovery(): (() => DiscoveredServer[]) | null {
-  const n = window.SdrNative;
+  const n = window.LanlineNative;
   if (!n || typeof n.discoveredServers !== "function") return null;
   return () => {
     try {

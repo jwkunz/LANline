@@ -26,7 +26,7 @@ packet):
 
 ```json
 {
-  "magic": "SDR-C2-BEACON",
+  "magic": "LANLINE-BEACON",
   "protocol_version": 1,
   "server_id": "5f2b8b0e-2c1a-4d7e-9a3e-1b6d9c0a77aa",
   "version": "0.1.0",
@@ -48,7 +48,7 @@ packet):
 
 | Field | Notes |
 |-------|-------|
-| `magic` | Always `"SDR-C2-BEACON"`; receivers must drop datagrams that lack it |
+| `magic` | Always `"LANLINE-BEACON"`; receivers must drop datagrams that lack it |
 | `protocol_version` | Bump on any breaking change to this payload or the REST contract |
 | `server_id` | Stable for the lifetime of a server process (UUID v4) |
 | `advertised_host` | The IPv4 address the server believes clients should dial; per-interface datagrams carry that interface's address |
@@ -63,7 +63,7 @@ packet):
 ## Client guidance
 
 1. Bind `0.0.0.0:50055` UDP, enable address reuse.
-2. For each datagram: parse JSON, require `magic == "SDR-C2-BEACON"` and
+2. For each datagram: parse JSON, require `magic == "LANLINE-BEACON"` and
    `protocol_version == 1`.
 3. Key servers by `server_id`; treat a server as gone after ~5 s (5 missed
    beacons) with no datagram.

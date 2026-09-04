@@ -4,7 +4,7 @@
 
 ```
                                           ┌─────────────────────────────────────────────┐
-   USB / IP                               │ sdr-c2-server (Rust, tokio)                  │
+   USB / IP                               │ lanline-server (Rust, tokio)                  │
  ┌──────────┐   IQ samples   ┌───────────┐│  ┌───────────┐   audio f32 48k   ┌─────────┐ │
  │  SDR     │───────────────▶│  Soapy    ││  │  DSP      │──────────────────▶│  Opus   │ │
  │ (HackRF/ │  Complex<i16>/ │  RX source│├─▶│  chain    │                   │ encoder │ │

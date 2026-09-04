@@ -5,27 +5,27 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Optional dev-server URL: set `sdrc2.devServerUrl=http://192.168.1.50:5173`
-// in local.properties (or `-Psdrc2.devServerUrl=...`) to load the live Vite
+// Optional dev-server URL: set `lanline.devServerUrl=http://192.168.1.50:5173`
+// in local.properties (or `-Planline.devServerUrl=...`) to load the live Vite
 // server instead of the bundled assets.
 val devServerUrl: String = run {
-    val fromProp = (project.findProperty("sdrc2.devServerUrl") as String?)?.trim()
+    val fromProp = (project.findProperty("lanline.devServerUrl") as String?)?.trim()
     if (!fromProp.isNullOrEmpty()) return@run fromProp
     val lp = rootProject.file("local.properties")
     if (lp.exists()) {
         Properties().apply { lp.inputStream().use { load(it) } }
-            .getProperty("sdrc2.devServerUrl", "").trim()
+            .getProperty("lanline.devServerUrl", "").trim()
     } else {
         ""
     }
 }
 
 android {
-    namespace = "land.my.sdrc2"
+    namespace = "land.lanline"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "land.my.sdrc2"
+        applicationId = "land.lanline"
         minSdk = 26
         targetSdk = 35
         versionCode = 1

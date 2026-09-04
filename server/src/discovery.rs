@@ -78,7 +78,7 @@ impl Beacon {
         });
 
         let obj = json!({
-            "magic": "SDR-C2-BEACON",
+            "magic": "LANLINE-BEACON",
             "protocol_version": PROTOCOL_VERSION,
             "server_id": self.state.server_id,
             "version": SERVER_VERSION,

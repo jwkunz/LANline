@@ -1,4 +1,4 @@
-# SDR C2 REST API
+# LANline REST API
 
 Version: `v1` · Protocol version: `1`
 

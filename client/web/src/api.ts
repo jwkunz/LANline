@@ -1,4 +1,4 @@
-// Thin typed REST client for the SDR C2 server.
+// Thin typed REST client for the LANline server.
 
 import type {
   ApiErrorBody,

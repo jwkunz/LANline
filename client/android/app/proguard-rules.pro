@@ -1,4 +1,4 @@
 # Keep the JS bridge methods reachable from the WebView.
--keepclassmembers class land.my.sdrc2.NativeBridge {
+-keepclassmembers class land.lanline.NativeBridge {
     @android.webkit.JavascriptInterface <methods>;
 }
