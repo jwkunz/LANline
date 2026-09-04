@@ -89,6 +89,7 @@ interface State {
   nwrNearby: NearNwr[];
   fmNearby: NearFm[];
   fmTab: "nearby" | "manual";
+  seeking: boolean;
   log: string[];
 }
 
@@ -113,8 +114,11 @@ const state: State = {
   nwrNearby: [],
   fmNearby: [],
   fmTab: "nearby",
+  seeking: false,
   log: [],
 };
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let heartbeatTimer: number | undefined;
 let pollTimer: number | undefined;
@@ -445,6 +449,50 @@ async function tuneFrequency(hz: number, label?: string): Promise<void> {
   }
 }
 
+/** Scan up/down for the next occupied channel. Client-driven: step, wait, read
+ *  status, stop on signal. */
+async function seek(dir: 1 | -1): Promise<void> {
+  if (!state.client || !state.radio || state.seeking) return;
+  const mode = state.radio.mode;
+  if (mode !== "wbfm" && mode !== "nbfm") return;
+
+  // Scan the actual FM broadcast band (not the wider manual-tune range).
+  const step = mode === "wbfm" ? 200_000 : 25_000;
+  const lo = mode === "wbfm" ? 87_700_000 : 162_400_000;
+  const hi = mode === "wbfm" ? 108_100_000 : 162_550_000;
+  const rssiGate = mode === "wbfm" ? -48 : -75;
+  const settleMs = mode === "wbfm" ? 220 : 200;
+  const steps = Math.round((hi - lo) / step) + 1;
+
+  setState({ seeking: true });
+  logLine(`seek ${dir > 0 ? "up" : "down"}…`);
+  const start = state.radio.frequency_hz;
+  let f = start;
+  try {
+    for (let i = 0; i < steps; i++) {
+      f += dir * step;
+      if (f > hi) f = lo;
+      if (f < lo) f = hi;
+      if (f === start) break; // wrapped all the way around
+      await state.client.patchRadio({ frequency_hz: f });
+      await sleep(settleMs);
+      const s = await state.client.radioStatus().catch(() => null);
+      const rssi = s?.dsp.rssi_dbfs ?? -200;
+      const open = mode === "nbfm" ? (s?.dsp.squelch_open ?? false) && rssi > rssiGate : rssi > rssiGate;
+      if (open) break;
+    }
+    localStorage.setItem(freqKey(mode), String(f));
+    const radio = await state.client.radio();
+    setState({ radio });
+    logLine(`seek → ${(radio.frequency_hz / 1e6).toFixed(mode === "wbfm" ? 1 : 4)} MHz`);
+    void refreshStations();
+  } catch (e) {
+    logLine(`seek failed — ${(e as ApiError).message}`);
+  } finally {
+    setState({ seeking: false });
+  }
+}
+
 // --- station finders --------------------------------------------------
 
 function setLocation(loc: Located, note?: string): void {
@@ -581,6 +629,26 @@ function logLine(msg: string): void {
   render();
 }
 
+// --- render (structure vs. live values) ------------------------------
+
+let builtKey = "";
+
+function structKey(): string {
+  return [
+    state.phase,
+    state.radio?.mode ?? "",
+    state.fmTab,
+    state.switching,
+    state.seeking,
+    state.modes.length,
+    state.nwrNearby.length,
+    state.fmNearby.length,
+    state.loc ? 1 : 0,
+    state.locNote ?? "",
+    state.audioStats ? 1 : 0,
+  ].join("|");
+}
+
 function render(): void {
   const connected = state.phase === "connected";
   const connecting = state.phase === "connecting";
@@ -593,62 +661,91 @@ function render(): void {
   actionBtn.disabled = connecting;
   actionBtn.classList.toggle("secondary", connected);
   hostInput.disabled = connected || connecting;
-
   connStatus.innerHTML = connStatusHtml();
-  panels.innerHTML = connected ? panelsHtml() : idlePanelsHtml();
-  if (connected) wirePanels();
+
+  if (!connected) {
+    panels.innerHTML = idlePanelsHtml();
+    builtKey = "";
+    return;
+  }
+
+  const key = structKey();
+  if (key !== builtKey) {
+    panels.innerHTML = panelsHtml();
+    builtKey = key;
+  }
+  patchLive();
 }
 
-function wirePanels(): void {
-  panels.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((b) =>
-    b.addEventListener("click", () => void switchMode(b.dataset.mode!)),
-  );
-  panels
-    .querySelector<HTMLButtonElement>("#radio-toggle")
-    ?.addEventListener("click", () => void toggleRadio());
-  panels
-    .querySelector<HTMLButtonElement>("#audio-toggle")
-    ?.addEventListener("click", () => void toggleAudio());
-  panels
-    .querySelector<HTMLInputElement>("#audio-mute")
-    ?.addEventListener("change", () => toggleMute());
+const q = <T extends Element>(sel: string) => panels.querySelector<T>(sel);
+const setHTML = (sel: string, html: string) => {
+  const el = q(sel);
+  if (el && el.innerHTML !== html) el.innerHTML = html;
+};
 
-  panels.querySelector<HTMLButtonElement>("#loc-find")?.addEventListener("click", findFromInput);
-  panels.querySelector<HTMLButtonElement>("#loc-me")?.addEventListener("click", useMyLocation);
-  panels.querySelector<HTMLInputElement>("#loc")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") findFromInput();
+/** Update the values that change every poll without touching the DOM
+ *  structure (so the station list keeps its scroll position). */
+function patchLive(): void {
+  if (!state.radio) return;
+  setHTML("#now-playing", nowPlayingInner());
+  setHTML("#audio-card", audioInner());
+  setHTML("#telemetry", telemetryInner());
+  setHTML("#log", state.log.map(esc).join("\n") || "—");
+
+  const freq = state.radio.frequency_hz;
+  panels.querySelectorAll<HTMLButtonElement>(".station").forEach((b) => {
+    b.classList.toggle("tuned", Number(b.dataset.hz) === freq);
+  });
+}
+
+// --- delegated events (wired once) ----------------------------------
+
+function installDelegates(): void {
+  panels.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    const hit = (sel: string) => t.closest(sel);
+
+    const mode = t.closest<HTMLButtonElement>(".mode-btn");
+    if (mode) return void switchMode(mode.dataset.mode!);
+    if (hit("#radio-toggle")) return void toggleRadio();
+    if (hit("#audio-toggle")) return void toggleAudio();
+    if (hit("#loc-find")) return findFromInput();
+    if (hit("#loc-me")) return useMyLocation();
+    if (hit("#seek-down")) return void seek(-1);
+    if (hit("#seek-up")) return void seek(1);
+    if (hit("#fm-down")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, -1));
+    if (hit("#fm-up")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, 1));
+    if (hit("#fm-go")) return fmManualGo();
+
+    const tab = t.closest<HTMLButtonElement>("[data-fmtab]");
+    if (tab) return setState({ fmTab: tab.dataset.fmtab as "nearby" | "manual" });
+
+    const station = t.closest<HTMLButtonElement>(".station");
+    if (station) {
+      const hz = Number(station.dataset.hz);
+      if (hz) void tuneFrequency(hz, station.dataset.label);
+    }
   });
 
-  panels.querySelectorAll<HTMLButtonElement>(".station").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const hz = Number(btn.dataset.hz);
-      if (hz) void tuneFrequency(hz, btn.dataset.label ?? undefined);
-    });
+  panels.addEventListener("change", (e) => {
+    if ((e.target as HTMLElement).id === "audio-mute") toggleMute();
   });
 
-  panels.querySelectorAll<HTMLButtonElement>("[data-fmtab]").forEach((b) =>
-    b.addEventListener("click", () => setState({ fmTab: b.dataset.fmtab as "nearby" | "manual" })),
-  );
-  panels.querySelector<HTMLButtonElement>("#fm-down")?.addEventListener("click", () =>
-    tuneFrequency(stepFm(state.radio!.frequency_hz, -1)),
-  );
-  panels.querySelector<HTMLButtonElement>("#fm-up")?.addEventListener("click", () =>
-    tuneFrequency(stepFm(state.radio!.frequency_hz, +1)),
-  );
-  panels.querySelector<HTMLButtonElement>("#fm-go")?.addEventListener("click", fmManualGo);
-  panels.querySelector<HTMLInputElement>("#fm-freq")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") fmManualGo();
+  panels.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key !== "Enter") return;
+    const id = (e.target as HTMLElement).id;
+    if (id === "loc") findFromInput();
+    else if (id === "fm-freq") fmManualGo();
   });
 }
 
 function fmManualGo(): void {
   const raw = panels.querySelector<HTMLInputElement>("#fm-freq")?.value ?? "";
   const mhz = parseFloat(raw);
-  if (!Number.isFinite(mhz)) return;
-  void tuneFrequency(snapFm(mhz * 1e6));
+  if (Number.isFinite(mhz)) void tuneFrequency(snapFm(mhz * 1e6));
 }
 
-// --- panels ----------------------------------------------------------
+// --- panel HTML ----------------------------------------------------
 
 function idlePanelsHtml(): string {
   return `
@@ -657,7 +754,7 @@ function idlePanelsHtml(): string {
       <p class="note">Enter the server host shown in its startup log (or from the
       discovery beacon) and connect.</p>
     </section>
-    ${logCardHtml()}
+    <section class="card"><h2>Event log</h2><div id="log">${state.log.map(esc).join("\n") || "—"}</div></section>
   `;
 }
 
@@ -665,28 +762,25 @@ function panelsHtml(): string {
   return `
     ${modeStripHtml()}
     ${wizardHtml()}
-    ${nowPlayingHtml()}
-    ${audioCardHtml()}
-    ${telemetryHtml()}
+    <section class="card" id="now-playing">${nowPlayingInner()}</section>
+    <section class="card" id="audio-card">${audioInner()}</section>
+    <section class="card" id="telemetry">${telemetryInner()}</section>
     ${serverHtml()}
-    ${logCardHtml()}
+    <section class="card"><h2>Event log</h2><div id="log">${state.log.map(esc).join("\n") || "—"}</div></section>
   `;
 }
 
 function modeStripHtml(): string {
   const cur = state.radio?.mode;
-  const known = state.modes.length
-    ? state.modes.map((m) => m.id)
-    : Object.keys(MODE_META);
+  const ids = state.modes.length ? state.modes.map((m) => m.id) : Object.keys(MODE_META);
   return `
     <section class="card">
       <h2>Mode</h2>
       <div class="mode-strip">
-        ${known
+        ${ids
           .map((id) => {
             const meta = MODE_META[id] ?? { label: id, icon: "•", band: "" };
-            const on = id === cur;
-            return `<button class="mode-btn${on ? " on" : ""}" data-mode="${esc(id)}" ${state.switching ? "disabled" : ""}>
+            return `<button class="mode-btn${id === cur ? " on" : ""}" data-mode="${esc(id)}" ${state.switching ? "disabled" : ""}>
               <span class="m-icon">${meta.icon}</span>
               <span class="m-label">${esc(meta.label)}</span>
               <span class="m-band">${esc(meta.band)}</span>
@@ -712,18 +806,23 @@ function locRowHtml(): string {
 
 function stationRow(hz: number, freqLabel: string, name: string, meta: string, tuned: boolean, label: string): string {
   return `<button class="station${tuned ? " tuned" : ""}" data-hz="${hz}" data-label="${esc(label)}">
-    <span class="s-call">${esc(freqLabel)}${tuned ? " ✓" : ""}</span>
+    <span class="s-call">${esc(freqLabel)}</span>
     <span class="s-site">${esc(name)}</span>
     <span class="s-meta">${esc(meta)}</span>
   </button>`;
 }
 
 function wizardHtml(): string {
-  const mode = state.radio?.mode;
-  if (mode === "nbfm") return nwrWizardHtml();
-  if (mode === "wbfm") return fmWizardHtml();
-  if (mode === "debug_tone") return toneWizardHtml();
-  return "";
+  switch (state.radio?.mode) {
+    case "nbfm":
+      return nwrWizardHtml();
+    case "wbfm":
+      return fmWizardHtml();
+    case "debug_tone":
+      return toneWizardHtml();
+    default:
+      return "";
+  }
 }
 
 function nwrWizardHtml(): string {
@@ -750,9 +849,13 @@ function nwrWizardHtml(): string {
     <section class="card">
       <h2>NOAA Weather — pick a transmitter</h2>
       ${locRowHtml()}
-      ${rows ? `<div class="stations">${rows}</div>
-        <p class="note" style="margin:8px 0 0">Tuning picks the channel; the radio receives
-        the strongest transmitter on it.</p>` : `<p class="note" style="margin:10px 0 0">Set your location to list nearby transmitters.</p>`}
+      ${
+        rows
+          ? `<div class="stations">${rows}</div>
+             <p class="note" style="margin:8px 0 0">Tuning picks the channel; the radio
+             receives the strongest transmitter on it.</p>`
+          : `<p class="note" style="margin:10px 0 0">Set your location to list nearby transmitters.</p>`
+      }
     </section>`;
 }
 
@@ -790,59 +893,61 @@ function fmWizardHtml(): string {
                <button id="fm-up" class="secondary">+</button>
                <button id="fm-go">Tune</button>
              </div>
-             <p class="note" style="margin:8px 0 0">${FM_MIN_HZ / 1e6}–${FM_MAX_HZ / 1e6} MHz, 0.2 MHz steps.</p>`
+             <p class="note" style="margin:8px 0 0">${FM_MIN_HZ / 1e6}–${FM_MAX_HZ / 1e6} MHz · 0.2 MHz steps · use Seek in “Now playing”.</p>`
       }
     </section>`;
 }
 
 function toneWizardHtml(): string {
   const p = state.radio?.mode_params ?? {};
-  const tone = Number(p.tone_hz ?? 440);
-  const level = Number(p.level_dbfs ?? -12);
   return `
     <section class="card">
       <h2>Debug Tone</h2>
-      <p class="note">A synthesized ${tone.toFixed(0)} Hz tone at ${level.toFixed(0)} dBFS —
-      no SDR needed. Use it to verify the audio path.</p>
+      <p class="note">A synthesized ${Number(p.tone_hz ?? 440).toFixed(0)} Hz tone at
+      ${Number(p.level_dbfs ?? -12).toFixed(0)} dBFS — no SDR needed. Use it to verify the audio path.</p>
     </section>`;
 }
 
-function nowPlayingHtml(): string {
+function nowPlayingInner(): string {
   const r = state.radio!;
   const st = state.status;
   const meta = MODE_META[r.mode];
   const digits = r.mode === "wbfm" ? 1 : 4;
   const ident = tunedStationLabel();
-  const runDot = r.running ? "ok live" : "";
+  const canSeek = r.mode === "wbfm" || r.mode === "nbfm";
   return `
-    <section class="card">
-      <h2>Now playing</h2>
-      <div class="mode-line">
-        <span class="mode">${esc(meta?.label ?? r.mode)}</span>
-        <span class="freq">${(r.frequency_hz / 1e6).toFixed(digits)} MHz</span>
-        <span class="badge"><span class="dot ${runDot}"></span>${r.running ? "running" : "stopped"}</span>
-      </div>
-      ${ident ? `<p class="note" style="margin:0 0 12px">${esc(ident)}</p>` : ""}
-      <div class="grid">
-        ${kv("Device", st?.device_status ?? "—")}
-        ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
-        ${kv("Squelch", st ? (st.dsp.squelch_open ? "open" : "closed") : "—")}
-        ${kv("Audio", `${r.audio.sample_rate_hz / 1000} kHz · ${r.audio.channels === 1 ? "mono" : `${r.audio.channels}ch`} · ${r.audio.opus_bitrate_bps / 1000} kbps`)}
-      </div>
-      <div style="margin-top:14px">
-        <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
-          ${r.running ? "Stop radio" : "Start radio"}
-        </button>
-      </div>
-    </section>`;
+    <h2>Now playing</h2>
+    <div class="mode-line">
+      <span class="mode">${esc(meta?.label ?? r.mode)}</span>
+      <span class="freq">${(r.frequency_hz / 1e6).toFixed(digits)} MHz</span>
+      <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "running" : "stopped"}</span>
+    </div>
+    ${ident ? `<p class="note" style="margin:0 0 12px">${esc(ident)}</p>` : ""}
+    <div class="grid">
+      ${kv("Device", st?.device_status ?? "—")}
+      ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
+      ${kv("Squelch", st ? (st.dsp.squelch_open ? "open" : "closed") : "—")}
+      ${kv("Audio", `${r.audio.sample_rate_hz / 1000} kHz · ${r.audio.channels === 1 ? "mono" : `${r.audio.channels}ch`} · ${r.audio.opus_bitrate_bps / 1000} kbps`)}
+    </div>
+    <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap">
+      <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
+        ${r.running ? "Stop radio" : "Start radio"}
+      </button>
+      ${
+        canSeek
+          ? `<button id="seek-down" class="secondary" ${state.seeking ? "disabled" : ""}>◀◀ Seek</button>
+             <button id="seek-up" class="secondary" ${state.seeking ? "disabled" : ""}>Seek ▶▶</button>`
+          : ""
+      }
+      ${state.seeking ? `<span class="note" style="align-self:center">seeking…</span>` : ""}
+    </div>`;
 }
 
-function audioCardHtml(): string {
+function audioInner(): string {
   const s = state.audioState;
   const playing = s === "playing";
   const busy = s === "connecting";
-  const dotClass =
-    playing ? "ok live" : s === "failed" ? "bad" : busy ? "warn live" : "";
+  const dotClass = playing ? "ok live" : s === "failed" ? "bad" : busy ? "warn live" : "";
   const label =
     s === "playing"
       ? "playing"
@@ -853,45 +958,40 @@ function audioCardHtml(): string {
           : "stopped";
   const stats = state.audioStats;
   return `
-    <section class="card">
-      <h2>Received audio</h2>
-      <div class="mode-line">
-        <span class="badge"><span class="dot ${dotClass}"></span>${esc(label)}</span>
-      </div>
-      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
-        <button id="audio-toggle" class="${playing || busy ? "secondary" : ""}" ${busy ? "disabled" : ""}>
-          ${playing || busy ? "Stop" : "▶ Play"}
-        </button>
-        <label class="note" style="display:flex; gap:6px; align-items:center">
-          <input id="audio-mute" type="checkbox" ${state.audio?.muted ? "checked" : ""} /> mute
-        </label>
-      </div>
-      ${
-        stats
-          ? `<div class="grid" style="margin-top:14px">
-               ${kv("Server state", esc(stats.state))}
-               ${kv("ICE", esc(stats.ice_state))}
-               ${kv("Packets", String(stats.packets_sent))}
-             </div>`
-          : `<p class="note" style="margin-top:10px">Opus over WebRTC — press Play (a user
-             gesture starts audio).</p>`
-      }
-    </section>`;
+    <h2>Received audio</h2>
+    <div class="mode-line">
+      <span class="badge"><span class="dot ${dotClass}"></span>${esc(label)}</span>
+    </div>
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+      <button id="audio-toggle" class="${playing || busy ? "secondary" : ""}" ${busy ? "disabled" : ""}>
+        ${playing || busy ? "Stop" : "▶ Play"}
+      </button>
+      <label class="note" style="display:flex; gap:6px; align-items:center">
+        <input id="audio-mute" type="checkbox" ${state.audio?.muted ? "checked" : ""} /> mute
+      </label>
+    </div>
+    ${
+      stats
+        ? `<div class="grid" style="margin-top:14px">
+             ${kv("Server state", esc(stats.state))}
+             ${kv("ICE", esc(stats.ice_state))}
+             ${kv("Packets", String(stats.packets_sent))}
+           </div>`
+        : `<p class="note" style="margin-top:10px">Opus over WebRTC — press Play (a user gesture starts audio).</p>`
+    }`;
 }
 
-function telemetryHtml(): string {
+function telemetryInner(): string {
   const st = state.status;
   return `
-    <section class="card">
-      <h2>Telemetry</h2>
-      <div class="grid">
-        ${kv("Clients", String(st?.clients ?? "—"))}
-        ${kv("Frames sent", String(st?.audio.frames_sent ?? "—"))}
-        ${kv("SNR", st?.dsp.snr_db != null ? `${st.dsp.snr_db.toFixed(1)} dB` : "—")}
-        ${kv("Pipeline latency", st?.dsp.pipeline_latency_ms != null ? `${st.dsp.pipeline_latency_ms.toFixed(0)} ms` : "—")}
-        ${kv("Overruns", String(st?.dsp.sample_overruns ?? "—"))}
-      </div>
-    </section>`;
+    <h2>Telemetry</h2>
+    <div class="grid">
+      ${kv("Clients", String(st?.clients ?? "—"))}
+      ${kv("Frames sent", String(st?.audio.frames_sent ?? "—"))}
+      ${kv("SNR", st?.dsp.snr_db != null ? `${st.dsp.snr_db.toFixed(1)} dB` : "—")}
+      ${kv("Pipeline latency", st?.dsp.pipeline_latency_ms != null ? `${st.dsp.pipeline_latency_ms.toFixed(0)} ms` : "—")}
+      ${kv("Overruns", String(st?.dsp.sample_overruns ?? "—"))}
+    </div>`;
 }
 
 function serverHtml(): string {
@@ -926,14 +1026,6 @@ function connStatusHtml(): string {
   }
 }
 
-function logCardHtml(): string {
-  return `
-    <section class="card">
-      <h2>Event log</h2>
-      <div id="log">${state.log.map(esc).join("\n") || "—"}</div>
-    </section>`;
-}
-
 function kv(k: string, v: string): string {
   return `<div class="kv"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`;
 }
@@ -941,9 +1033,9 @@ function kv(k: string, v: string): string {
 function esc(s: string): string {
   return s.replace(
     /[&<>"']/g,
-    (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
   );
 }
 
+installDelegates();
 render();

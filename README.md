@@ -48,10 +48,13 @@ already carries the HackRF, PlutoSDR and RTL-SDR modules.
 ```sh
 source scripts/dev-env.sh      # sets PKG_CONFIG_PATH, RUSTFLAGS rpath,
                                # SOAPY_SDR_PLUGIN_PATH, LIBCLANG_PATH
-cargo run -p lanline-server                    # discovers the HackRF, serves the API
-cargo run -p lanline-server -- --debug-tone    # 440 Hz A4, no SDR needed
-cargo run -p lanline-server -- --dump-wav /tmp/rx.wav   # also save pre-Opus audio
+cargo run --release -p lanline-server                  # discovers the HackRF, serves the API
+cargo run --release -p lanline-server -- --debug-tone  # 440 Hz A4, no SDR needed
+cargo run --release -p lanline-server -- --dump-wav /tmp/rx.wav   # also save pre-Opus audio
 ```
+
+Use `--release` for real listening — the debug build's DSP is ~5× slower and
+wideband FM at 4 Msps can starve the WebRTC threads (audio drops).
 
 Sanity-check the radio independently with `SoapySDRUtil --find` from inside the
 same shell.

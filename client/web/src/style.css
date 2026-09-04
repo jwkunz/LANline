@@ -242,8 +242,10 @@ button:disabled {
   flex-direction: column;
   gap: 6px;
   margin-top: 12px;
-  max-height: 320px;
+  max-height: min(58vh, 460px);
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 .station {
   display: grid;
@@ -263,6 +265,7 @@ button:disabled {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .station .s-call { font-weight: 600; font-variant-numeric: tabular-nums; }
+.station.tuned .s-call::after { content: " ✓"; color: var(--accent); }
 .station .s-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .note {

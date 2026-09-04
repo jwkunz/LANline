@@ -23,16 +23,19 @@ export const nearestFm = (
   limit = 24,
 ) => nearest(lat, lon, list, limit);
 
-// US FM band: 88.1–107.9 MHz on odd tenths (200 kHz spacing).
-export const FM_MIN_HZ = 88_100_000;
-export const FM_MAX_HZ = 107_900_000;
+// Tunable range for the manual dial. The US channel plan is 88.1–107.9 MHz on
+// odd tenths, but allow a wider span for edge/other-region stations; the
+// 200 kHz grid stays anchored on 88.1 (…87.9, 87.7, … / …108.1, 108.3, …).
+export const FM_MIN_HZ = 80_000_000;
+export const FM_MAX_HZ = 110_000_000;
 export const FM_STEP_HZ = 200_000;
+const FM_ANCHOR_HZ = 88_100_000;
 
-/** Snap a frequency (Hz) to the nearest valid FM channel. */
+/** Snap a frequency (Hz) to the 200 kHz grid, clamped to the tunable range. */
 export function snapFm(hz: number): number {
   const clamped = Math.min(FM_MAX_HZ, Math.max(FM_MIN_HZ, hz));
-  const n = Math.round((clamped - FM_MIN_HZ) / FM_STEP_HZ);
-  return FM_MIN_HZ + n * FM_STEP_HZ;
+  const n = Math.round((clamped - FM_ANCHOR_HZ) / FM_STEP_HZ);
+  return Math.min(FM_MAX_HZ, Math.max(FM_MIN_HZ, FM_ANCHOR_HZ + n * FM_STEP_HZ));
 }
 
 export function stepFm(hz: number, deltaChannels: number): number {

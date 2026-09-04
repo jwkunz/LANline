@@ -48,15 +48,27 @@ export function parseLatLon(text: string): Located | null {
   return { lat, lon };
 }
 
-let jsonCache = new Map<string, Promise<unknown>>();
+const jsonCache = new Map<string, Promise<unknown>>();
 
-/** Fetch + cache a JSON asset (bundled alongside the app). */
+/** Load + cache a JSON asset bundled alongside the app. Uses XHR, not fetch:
+ *  Android WebView's fetch() rejects `file://` URLs, XHR handles them. */
 export function loadJson<T>(url: string): Promise<T> {
   let p = jsonCache.get(url) as Promise<T> | undefined;
   if (!p) {
-    p = fetch(url).then((r) => {
-      if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
-      return r.json() as Promise<T>;
+    p = new Promise<T>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", url);
+      xhr.responseType = "json";
+      xhr.onload = () => {
+        // file:// responses report status 0 but still deliver the body.
+        if ((xhr.status === 0 || (xhr.status >= 200 && xhr.status < 300)) && xhr.response != null) {
+          resolve(xhr.response as T);
+        } else {
+          reject(new Error(`${url}: HTTP ${xhr.status}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error(`${url}: request failed`));
+      xhr.send();
     });
     jsonCache.set(url, p);
   }

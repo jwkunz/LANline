@@ -205,28 +205,37 @@ impl FmChain {
 // --- building blocks -----------------------------------------------------
 
 /// Numerically-controlled oscillator that mixes a block and immediately feeds
-/// the decimator, so we never materialize the full-rate mixed signal.
+/// the decimator, so we never materialize the full-rate mixed signal. The
+/// phasor advances by one complex multiply per sample (no per-sample trig),
+/// renormalized periodically to shed accumulated error.
 struct Nco {
-    phase: f64,
-    step: f64, // cycles per sample (may be negative)
+    rot: Complex32,
+    step: Complex32,
+    n: u32,
 }
 
 impl Nco {
     fn new(cycles_per_sample: f64) -> Self {
-        Self { phase: 0.0, step: cycles_per_sample }
+        let a = 2.0 * PI * cycles_per_sample;
+        Self {
+            rot: Complex32::new(1.0, 0.0),
+            step: Complex32::new(a.cos() as f32, a.sin() as f32),
+            n: 0,
+        }
     }
 
     fn mix_into(&mut self, input: &[Complex32], decim: &mut FirDecimator, out: &mut Vec<Complex32>) {
         for &x in input {
-            let ph = self.phase * 2.0 * PI;
-            let rot = Complex32::new(ph.cos() as f32, ph.sin() as f32);
-            self.phase += self.step;
-            if self.phase >= 1.0 {
-                self.phase -= 1.0;
-            } else if self.phase < 0.0 {
-                self.phase += 1.0;
+            decim.push(x * self.rot, out);
+            self.rot *= self.step;
+            self.n += 1;
+            if self.n >= 8192 {
+                self.n = 0;
+                let m = self.rot.norm();
+                if m > 1e-6 {
+                    self.rot /= m;
+                }
             }
-            decim.push(x * rot, out);
         }
     }
 }

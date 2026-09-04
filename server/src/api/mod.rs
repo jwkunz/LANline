@@ -63,7 +63,10 @@ fn build_cors(origins: &str) -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        // Let the browser cache the preflight so a burst of PATCHes (e.g. the
+        // client's seek scan) doesn't pay an OPTIONS round-trip each time.
+        .max_age(std::time::Duration::from_secs(3600));
 
     if origins.trim() == "*" {
         base.allow_origin(Any)
