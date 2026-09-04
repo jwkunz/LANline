@@ -20,7 +20,8 @@ Clients: a **web app** (`client/web`) and, later, an **Android** wrapper
 | 1b | Opus encoder + WebRTC; **Debug Mode** 440 Hz (A4) tone end-to-end in the browser | ✅ |
 | 1c | Real NBFM receive of NOAA weather radio **KHB29 on 162.550 MHz**; live retune + device-range validation over REST | ✅ |
 | 1d | Live retune/gain without an audio gap, `noise_squelch` param, SNR metric, graceful shutdown, API contract tests | ✅ |
-| 2  | Android WebView wrapper + native beacon listener; transmit / modulate path | |
+| 2a | Android WebView wrapper + native UDP beacon discovery (`window.SdrNative`) | ✅ |
+| 2b | Transmit / modulate path (the reserved `audio_in` port + `radio/tx*` endpoints) | |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR)
 service. More modes are added through the REST API over time.
@@ -31,7 +32,7 @@ service. More modes are added through the REST API over time.
 Cargo.toml            workspace root (only member: server/)
 server/               Rust SDR C2 + streaming server
 client/web/           Vite + TypeScript web client
-client/android/       Android wrapper (phase 2)
+client/android/       Android WebView wrapper + native beacon listener
 docs/                 rest-api.md, architecture.md, beacon-protocol.md
 scripts/dev-env.sh    points the build/runtime at radioconda's SoapySDR
 ```
@@ -63,6 +64,18 @@ npm run dev
 
 Then open the printed URL and enter the server host (shown in the server log,
 or from the beacon).
+
+## Building the Android client
+
+```sh
+cd client/web && npm run build          # bundle that the APK embeds
+cd ../android
+cp local.properties.sample local.properties   # set sdk.dir
+./gradlew assembleDebug                        # app/build/outputs/apk/debug/
+```
+
+or open `client/android/` in Android Studio and Run. See
+[`client/android/README.md`](client/android/README.md).
 
 ## Docs
 
