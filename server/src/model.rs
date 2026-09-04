@@ -32,6 +32,8 @@ pub struct Ports {
     pub audio_in: u16,
     /// Beast binary Mode S feed (ADS-B). 0 when disabled.
     pub beast: u16,
+    /// AIVDM (NMEA 0183) marine AIS feed. 0 when disabled.
+    pub ais_nmea: u16,
 }
 
 #[derive(Serialize, Clone, Debug)]

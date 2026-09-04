@@ -34,6 +34,7 @@ Three advertised ports:
 | `audio_out` | UDP | WebRTC media (ICE host candidate) for the receive stream |
 | `audio_in` | UDP | Reserved — inbound Opus to modulate (phase 2) |
 | `beast` | TCP | Beast binary Mode S feed (ADS-B); `0` when disabled |
+| `ais_nmea` | TCP | AIVDM (NMEA 0183) marine AIS feed; `0` when disabled |
 
 `c2` is **fixed** (default `8730`) so a bookmarked browser URL survives a
 restart; `audio_out`/`audio_in` are random, chosen at startup. Pass `--c2-port 0`
@@ -67,6 +68,7 @@ server/src/
     presets.rs         GET /presets, POST /presets/{id}/apply
     radio.rs           GET/PATCH /radio, start/stop, GET /radio/status
     adsb.rs            GET /adsb/aircraft, GET /adsb/messages
+    ais.rs             GET /ais/vessels, GET /ais/messages
     sessions.rs        session CRUD + heartbeat
     audio.rs           WebRTC signaling: offer/ice/state/close
     reserved.rs        phase-2 endpoints -> 501
@@ -80,6 +82,15 @@ server/src/
     cpr.rs             Compact Position Reporting: global (even/odd) + local decode
     tracker.rs         per-ICAO track table: CPR folding, trails, expiry, JSON snapshot
     beast.rs           Beast binary encoder + TCP fan-out server
+
+  ais/
+    mod.rs             AisShared: vessel tracker + sentence ring + AIVDM broadcast
+    demod.rs           per-channel GMSK: NCO -> decimating FIR -> FM discriminator ->
+                       Gardner timing -> NRZI -> HDLC de-stuff / FCS
+    message.rs         ITU-R M.1371 field decode (types 1/2/3/4/5/18/19/21/24), 6-bit
+                       ASCII, AIVDM armor codec, X.25 FCS, ship-type labels
+    tracker.rs         per-MMSI vessel table: position + static merge, trails, expiry
+    nmea.rs            AIVDM sentence builder + TCP fan-out server
 
   radio/
     mod.rs             RadioManager: owns config + pipeline task, hot-apply, telemetry;
@@ -108,9 +119,10 @@ server/src/
 
 - **One SDR, one DSP pipeline.** `RadioManager` runs the pipeline on a
   dedicated blocking task (SoapySDR reads are blocking). FM modes produce 20 ms
-  Opus frames onto a `broadcast::channel`; the `adsb` mode instead feeds the
-  Mode S decoder and writes an aircraft table read over REST + a Beast TCP feed
-  (no audio path).
+  Opus frames onto a `broadcast::channel`; the `adsb` and `ais` modes instead
+  feed their decoders and write a track table read over REST + a raw TCP feed
+  (Beast / AIVDM) — no audio path. `run_sdr`, `run_adsb` and `run_ais` are the
+  three pipeline bodies.
 - **N sessions, N WebRTC peers, shared audio.** Each peer task holds a
   `broadcast::Receiver` and writes samples into its `TrackLocalStaticSample`.
   Slow/backpressured receivers drop frames (lag), they never stall the
@@ -157,3 +169,6 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   CPR → per-ICAO track table), `GET /api/v1/adsb/{aircraft,messages}`, a Beast
   TCP feed (`--beast-port`, default 30005), and the web client's radar scope
   (canvas, range rings, trails — no tiles).
+- **2d** — `ais` mode: `ais/` (two-channel 9600-baud GMSK → HDLC → ITU-R
+  M.1371 → per-MMSI vessel table), `GET /api/v1/ais/{vessels,messages}`, an
+  AIVDM TCP feed (`--ais-nmea-port`, default 10110), sharing the radar scope.

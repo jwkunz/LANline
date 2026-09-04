@@ -89,6 +89,7 @@ impl Beacon {
                 "audio_out": ports.audio_out,
                 "audio_in": ports.audio_in,
                 "beast": ports.beast,
+                "ais_nmea": ports.ais_nmea,
             },
             "c2_base_url": format!("http://{host}:{}", ports.c2),
             "device": device,

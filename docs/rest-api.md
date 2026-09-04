@@ -28,6 +28,7 @@ same port also serves the bundled web client and is advertised over mDNS as
 - [Devices](#devices)
 - [Modes](#modes)
 - [ADS-B track export](#adsb-track-export)
+- [AIS vessel-track export](#ais-vessel-track-export)
 - [Presets](#presets)
 - [Radio configuration & control](#radio-configuration--control)
 - [Sessions](#sessions)
@@ -131,8 +132,8 @@ Server identity and current capability summary.
   "version": "0.1.0",
   "hostname": "bench-linux",
   "time": "2026-09-03T17:04:11Z",
-  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005 },
-  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "adsb", "debug_tone"],
+  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005, "ais_nmea": 10110 },
+  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "adsb", "ais", "debug_tone"],
   "selected_device": {
     "id": "hackrf/0000000000000000457863c8...",
     "driver": "hackrf",
@@ -145,7 +146,8 @@ Server identity and current capability summary.
 `capabilities` is dynamic: `"tx"` appears only when the selected device
 supports transmit. `selected_device` is `null` when none is selected.
 `ports.beast` is the TCP port of the [Beast Mode S feed](#adsb-track-export),
-`0` when disabled (`--beast-port 0`).
+`ports.ais_nmea` the TCP port of the [AIVDM feed](#ais-vessel-track-export);
+either is `0` when disabled (`--beast-port 0` / `--ais-nmea-port 0`).
 
 ---
 
@@ -306,6 +308,18 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "ais",
+    "name": "AIS (161.975 / 162.025 MHz vessels)",
+    "tx_capable": false,
+    "params": {
+      "reference_lat":  { "type": "number", "default": 0, "min": -90,  "max": 90,  "unit": "deg" },
+      "reference_lon":  { "type": "number", "default": 0, "min": -180, "max": 180, "unit": "deg" },
+      "max_range_nm":   { "type": "number", "default": 60,  "min": 5,  "max": 200,  "unit": "NM" },
+      "trail_seconds":  { "type": "number", "default": 600, "min": 30, "max": 3600, "unit": "s" },
+      "forget_seconds": { "type": "number", "default": 900, "min": 60, "max": 3600, "unit": "s" }
+    }
+  },
+  {
     "id": "debug_tone",
     "name": "Debug Tone (A4 440 Hz)",
     "tx_capable": false,
@@ -339,6 +353,13 @@ export](#adsb-track-export) (or the Beast TCP feed). Its `mode_params`:
 | `trail_seconds` | `120` | position-trail length kept per aircraft |
 | `forget_seconds` | `60` | drop an aircraft after this long with no message |
 | `fix_errors` | `1` | attempt single-bit CRC correction on DF17/18 frames |
+
+`ais` is likewise **non-audio**: it tunes 162.000 MHz at 2 Msps and runs two
+9600-baud GMSK channel decoders (161.975 / 162.025 MHz) → HDLC → ITU-R M.1371
+message decode → a per-MMSI vessel table. Read it from [AIS vessel-track
+export](#ais-vessel-track-export) or the AIVDM TCP feed. `mode_params`:
+`reference_lat`/`reference_lon` (receiver position, `0,0` = unset), `max_range_nm`
+(default 60), `trail_seconds` (default 600), `forget_seconds` (default 900).
 
 ---
 
@@ -403,6 +424,65 @@ A raw **Beast binary** stream of every CRC-valid frame:
 bytes in the payload doubled. `type` is `0x32` (7-byte) or `0x33` (14-byte).
 Point `readsb` / `tar1090` / Virtual Radar Server at it. Disable with
 `--beast-port 0`.
+
+---
+
+## AIS vessel-track export
+
+Populated only while the `ais` mode pipeline runs. Unauthenticated, read-only.
+
+### `GET /api/v1/ais/vessels`
+
+```json
+{
+  "time": "2026-09-04T12:52:10Z",
+  "mode": "ais",
+  "running": true,
+  "receiver": [32.8986, -80.0405],
+  "messages": 486,
+  "message_rate": 3.1,
+  "vessel_count": 9,
+  "with_position": 7,
+  "vessels": [
+    {
+      "mmsi": 366999712,
+      "name": "CHARLESTON PILOT",
+      "callsign": null,
+      "ship_type": 50, "ship_type_label": "Pilot",
+      "imo": null,
+      "nav_status": 0, "nav_status_label": "under way (engine)",
+      "class_b": false, "aid": false,
+      "lat": 32.751, "lon": -79.905,
+      "sog_kt": 11.4, "cog_deg": 118.0, "heading_deg": 120.0,
+      "length_m": 27, "beam_m": 7, "draught_m": 2.8,
+      "destination": "CHARLESTON",
+      "rssi_dbfs": -18.1,
+      "messages": 42,
+      "age_s": 1.2, "pos_age_s": 1.2,
+      "distance_nm": 8.4, "bearing_deg": 121.0,
+      "trail": [[32.76, -79.92], [32.755, -79.91]]
+    }
+  ]
+}
+```
+
+`vessels` is sorted by `distance_nm` (positioned first, then by recency).
+Position comes from message types 1/2/3 (Class A), 18/19 (Class B), 4 (base
+station) and 21 (aids to navigation); name / callsign / dimensions / draught /
+destination come from types 5 and 24 and are merged in as they arrive.
+
+### `GET /api/v1/ais/messages`
+
+Ring buffer of recent re-armored `!AIVDM` sentences (checksummed, newest last):
+
+```json
+{ "time": "…", "count": 512, "sentences": ["!AIVDM,1,1,,A,15N...,0*4B", "…"] }
+```
+
+### AIVDM feed (TCP `ports.ais_nmea`, default `10110`)
+
+A line stream of the same `!AIVDM` sentences (CRLF-terminated). Point OpenCPN,
+AIS-catcher, or `aisdispatcher` at it. Disable with `--ais-nmea-port 0`.
 
 ---
 

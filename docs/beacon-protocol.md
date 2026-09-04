@@ -35,7 +35,7 @@ packet):
   "version": "0.1.0",
   "hostname": "bench-linux",
   "advertised_host": "192.168.1.42",
-  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005 },
+  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005, "ais_nmea": 10110 },
   "c2_base_url": "http://192.168.1.42:8730",
   "device": {
     "driver": "hackrf",
@@ -44,7 +44,7 @@ packet):
     "tx_capable": true
   },
   "devices_available": 1,
-  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "adsb", "debug_tone"],
+  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "adsb", "ais", "debug_tone"],
   "timestamp": "2026-09-03T17:04:11Z"
 }
 ```
@@ -59,6 +59,7 @@ packet):
 | `ports.audio_out` | UDP port for the receive WebRTC media (ICE host candidate) |
 | `ports.audio_in` | UDP port reserved for the phase-2 transmit stream |
 | `ports.beast` | TCP port of the Beast Mode S feed (ADS-B); `0` when disabled |
+| `ports.ais_nmea` | TCP port of the AIVDM marine AIS feed; `0` when disabled |
 | `c2_base_url` | Convenience: `http://<advertised_host>:<c2>` |
 | `device` | `null` when no SDR is selected; `devices_available` still reports how many were enumerated |
 | `capabilities` | Mirrors `GET /api/v1/server.capabilities` |
