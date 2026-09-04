@@ -247,7 +247,8 @@ the client uses to render controls and the server uses to validate
       "channel_bw_hz": { "type": "number", "default": 16000, "min": 8000, "max": 25000, "unit": "Hz" },
       "deemphasis_us": { "type": "number", "default": 75, "enum": [0, 50, 75], "unit": "us" },
       "audio_lpf_hz":  { "type": "number", "default": 3400,  "min": 1000, "max": 8000, "unit": "Hz" },
-      "squelch_db":    { "type": "number", "default": -80, "min": -120, "max": 0, "unit": "dBFS" }
+      "squelch_db":    { "type": "number", "default": -80, "min": -120, "max": 0, "unit": "dBFS" },
+      "noise_squelch": { "type": "number", "default": 0.18, "min": 0.02, "max": 2.0, "unit": "ratio" }
     }
   },
   {
@@ -368,11 +369,12 @@ Partial, deep-merge update of any subset of the `GET` body (except read-only
   gain-element names, setting keys, and the active mode's parameter schema.
   Violations → `422 invalid_parameter` with the offending `field` and the
   allowed values in `details`. Nothing is applied if any field is invalid.
-- Valid changes are **hot-applied** to a running pipeline where the hardware
-  allows (frequency, gains, squelch, `lo_offset_hz`, `device_settings`).
-  Changing `mode`, `sample_rate_hz`, `channel`, or `antenna` on a running
-  pipeline briefly restarts the DSP chain (audio gap, WebRTC session
-  preserved).
+- Valid changes are **hot-applied** to a running pipeline without an audio
+  gap where possible: `frequency_hz`, the gains, and the NBFM filter
+  `mode_params` (deviation, bandwidth, de-emphasis, audio LPF, squelch) go
+  live. Changing `mode`, `sample_rate_hz`, `channel`, `antenna`,
+  `lo_offset_hz`, `frame_ms` or `opus_bitrate_bps` bounces the DSP chain
+  (brief audio gap; the WebRTC session is preserved).
 - Switching `mode` replaces `mode_params` with that mode's defaults unless the
   request also supplies `mode_params`.
 - `503 device_unavailable` if the change needs the SDR and none is ready

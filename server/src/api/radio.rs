@@ -28,7 +28,6 @@ pub async fn patch_radio(
 
     let new_mode = obj.get("mode").and_then(Value::as_str).map(str::to_string);
     let has_mode_params = obj.contains_key("mode_params");
-    let touches_pipeline = new_mode.is_some() || has_mode_params || obj.contains_key("audio");
 
     let new_cfg = {
         let radio = st.radio.lock().unwrap();
@@ -62,17 +61,16 @@ pub async fn patch_radio(
         cfg
     };
 
-    let response = {
+    let (old, response) = {
         let mut radio = st.radio.lock().unwrap();
+        let old = radio.clone();
         *radio = new_cfg;
-        radio.clone()
+        (old, radio.clone())
     };
 
-    // Hot-apply: bounce the pipeline if a pipeline-affecting field changed and
-    // it is running.
-    if touches_pipeline {
-        st.radio_mgr.reconfigure();
-    }
+    // Hot-apply to a running pipeline: live retune/gain/filter where possible,
+    // a pipeline bounce for rate/mode/antenna/LO changes.
+    st.radio_mgr.apply_patch(&old, &response);
 
     Ok(Json(response))
 }
@@ -139,7 +137,7 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
         device_status,
         dsp: DspStatus {
             rssi_dbfs: tele.rssi_dbfs.map(f64::from),
-            snr_db: None,
+            snr_db: tele.snr_db.map(f64::from),
             squelch_open: tele.squelch_open,
             audio_level_dbfs: tele.audio_level_dbfs.map(f64::from),
             sample_overruns: tele.overruns,

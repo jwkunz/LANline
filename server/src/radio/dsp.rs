@@ -19,7 +19,13 @@ pub struct NbfmParams {
     pub channel_bw_hz: f64,
     pub deemphasis_us: f64,
     pub audio_lpf_hz: f64,
+    /// RSSI floor (dBFS): gates "no antenna / dead band".
     pub squelch_dbfs: f64,
+    /// Noise-squelch threshold: HF-noise energy in the discriminator output
+    /// above which the channel is treated as unoccupied. Amplitude-normalized,
+    /// so it is independent of RF gain and deviation. ~0.02 (tight) .. ~1.0
+    /// (open).
+    pub noise_squelch: f64,
     pub lo_offset_hz: f64,
 }
 
@@ -31,6 +37,7 @@ impl Default for NbfmParams {
             deemphasis_us: 75.0,
             audio_lpf_hz: 3_400.0,
             squelch_dbfs: -80.0,
+            noise_squelch: 0.18,
             lo_offset_hz: 250_000.0,
         }
     }
@@ -39,6 +46,7 @@ impl Default for NbfmParams {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChainMetrics {
     pub rssi_dbfs: f32,
+    pub snr_db: f32,
     pub squelch_open: bool,
     pub audio_dbfs: f32,
 }
@@ -53,8 +61,10 @@ pub struct NbfmChain {
     audio_lp: Biquad,
     noise_hp: Biquad,
     noise_env: f32,
+    noise_gate: f32,
     squelch_thresh_dbfs: f32,
     squelch_gain: f32,
+    sig_env: f32,
     metrics: ChainMetrics,
     resamp: LinearResampler,
     scratch_iq: Vec<Complex32>,
@@ -93,8 +103,10 @@ impl NbfmChain {
             audio_lp,
             noise_hp,
             noise_env: 1.0,
+            noise_gate: (p.noise_squelch as f32).clamp(0.01, 2.0),
             squelch_thresh_dbfs: p.squelch_dbfs as f32,
             squelch_gain: 0.0,
+            sig_env: 0.0,
             metrics: ChainMetrics::default(),
             resamp: LinearResampler::new(channel_rate, AUDIO_RATE),
             scratch_iq: Vec::new(),
@@ -110,6 +122,13 @@ impl NbfmChain {
         self.metrics
     }
 
+    /// Retune-time housekeeping: drop the discriminator memory so the
+    /// frequency step doesn't produce a click.
+    pub fn on_retune(&mut self) {
+        self.prev_iq = Complex32::new(1.0, 0.0);
+        self.noise_env = 1.0;
+    }
+
     /// Consume a block of device-rate IQ, append 48 kHz mono audio to `out`.
     pub fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
         // 1. digital down-conversion by the LO offset
@@ -123,11 +142,10 @@ impl NbfmChain {
 
         // 2. block RSSI + squelch decision. RSSI gates "no antenna / dead
         //    band"; the noise metric (from the previous block) gates hiss.
-        const NOISE_GATE: f32 = 0.18;
         let power: f32 =
             chan.iter().map(|c| c.norm_sqr()).sum::<f32>() / chan.len() as f32;
         let rssi_dbfs = 10.0 * (power + 1e-12).log10();
-        let open = rssi_dbfs >= self.squelch_thresh_dbfs && self.noise_env < NOISE_GATE;
+        let open = rssi_dbfs >= self.squelch_thresh_dbfs && self.noise_env < self.noise_gate;
         let target = if open { 1.0 } else { 0.0 };
         // ~5 ms audio ramp, ~10 ms noise envelope
         let ramp = (1.0 / (0.005 * self.channel_rate as f32)).min(1.0);
@@ -147,6 +165,8 @@ impl NbfmChain {
             let mut a = raw * self.disc_gain;
             a = self.deemph.process(a);
             a = self.audio_lp.process(a);
+            // pre-gate voice-band envelope, for the SNR estimate
+            self.sig_env += (a.abs() - self.sig_env) * nk;
             self.squelch_gain += (target - self.squelch_gain) * ramp;
             a *= self.squelch_gain;
             peak = peak.max(a.abs());
@@ -156,8 +176,10 @@ impl NbfmChain {
         // 4. resample channel rate → 48 kHz
         self.resamp.process(&self.scratch_audio, out);
 
+        let snr_db = 20.0 * ((self.sig_env + 1e-6) / (self.noise_env + 1e-6)).log10();
         self.metrics = ChainMetrics {
             rssi_dbfs,
+            snr_db,
             squelch_open: open,
             audio_dbfs: 20.0 * (peak + 1e-6).log10(),
         };

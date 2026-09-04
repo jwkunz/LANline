@@ -129,7 +129,18 @@ async fn main() -> Result<()> {
     );
     tracing::info!("web client: enter server host `{advertised_host}` (port {})", ports.c2);
 
-    let app = api::router(state);
-    axum::serve(listener, app).await?;
+    let app = api::router(state.clone());
+    let shutdown = {
+        let state = state.clone();
+        async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutdown: stopping pipeline and closing peers");
+            state.webrtc.close_all().await;
+            state.radio_mgr.stop();
+        }
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }

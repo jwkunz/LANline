@@ -75,3 +75,211 @@ fn build_cors(origins: &str) -> CorsLayer {
         base.allow_origin(list)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::router;
+    use crate::config::Config;
+    use crate::media::WebrtcEngine;
+    use crate::model::{Ports, RadioConfig};
+    use crate::radio::RadioManager;
+    use crate::registry::DeviceRegistry;
+    use crate::sessions::SessionStore;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use clap::Parser;
+    use serde_json::{json, Value};
+    use std::net::Ipv4Addr;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+
+    async fn app() -> axum::Router {
+        let config = Config::parse_from(["sdr-c2-server", "--no-beacon"]);
+        let registry = Arc::new(DeviceRegistry::new()); // no device selected
+        let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
+        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None);
+        let sessions = Arc::new(SessionStore::new(15, 45, 8));
+        let (webrtc, audio_out) = WebrtcEngine::new(
+            Ipv4Addr::LOCALHOST.into(),
+            0,
+            radio_mgr.clone(),
+            sessions.clone(),
+        )
+        .await
+        .unwrap();
+        let state = AppState::new(
+            config,
+            Ports { c2: 0, audio_out, audio_in: 0 },
+            Ipv4Addr::LOCALHOST.into(),
+            registry,
+            sessions,
+            radio_cfg,
+            radio_mgr,
+            webrtc,
+        );
+        router(state)
+    }
+
+    async fn send(app: &axum::Router, req: Request<Body>) -> (StatusCode, Value) {
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, body)
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn json_req(method: &str, uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_and_server_info() {
+        let app = app().await;
+        let (s, b) = send(&app, get("/health")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "ok");
+
+        let (s, b) = send(&app, get("/api/v1/server")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["protocol_version"], 1);
+        assert!(b["capabilities"].as_array().unwrap().iter().any(|c| c == "nbfm"));
+    }
+
+    #[tokio::test]
+    async fn patch_radio_requires_auth() {
+        let app = app().await;
+        let (s, b) = send(
+            &app,
+            json_req("PATCH", "/api/v1/radio", None, json!({ "frequency_hz": 162_400_000 })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        assert_eq!(b["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn session_lifecycle_and_ownership() {
+        let app = app().await;
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "test" } })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let token = b["token"].as_str().unwrap().to_string();
+        let id = b["session_id"].as_str().unwrap().to_string();
+
+        let (s, _) = send(&app, {
+            let mut r = get(&format!("/api/v1/sessions/{id}"));
+            r.headers_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
+            r
+        })
+        .await;
+        assert_eq!(s, StatusCode::OK);
+
+        // someone else's session id -> 404
+        let other = uuid::Uuid::new_v4();
+        let (s, _) = send(&app, {
+            let mut r = get(&format!("/api/v1/sessions/{other}"));
+            r.headers_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
+            r
+        })
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+
+        let (s, _) = send(
+            &app,
+            json_req("DELETE", &format!("/api/v1/sessions/{id}"), Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn validation_and_stub_codes() {
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        // unknown mode -> 422
+        let (s, b) = send(
+            &app,
+            json_req("PATCH", "/api/v1/radio", Some(&token), json!({ "mode": "bogus" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["error"]["details"]["field"], "mode");
+
+        // nbfm start with no device -> 503
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/start", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(b["error"]["code"], "device_unavailable");
+
+        // reserved tx endpoint -> 501
+        let (s, _) = send(&app, {
+            let mut r = get("/api/v1/radio/tx");
+            r.headers_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
+            r
+        })
+        .await;
+        assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn debug_tone_start_stop() {
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        let (s, _) = send(
+            &app,
+            json_req("PATCH", "/api/v1/radio", Some(&token), json!({ "mode": "debug_tone" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/start", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["running"], true);
+
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/stop", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["running"], false);
+    }
+}

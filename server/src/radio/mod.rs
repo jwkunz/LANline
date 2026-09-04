@@ -17,9 +17,13 @@ use bytes::Bytes;
 #[cfg(feature = "soapy")]
 use dsp::{NbfmChain, NbfmParams};
 use crate::audio::wav::WavDump;
+#[cfg(feature = "soapy")]
+use crate::model::GainMode;
 use std::f64::consts::TAU;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "soapy")]
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -34,6 +38,7 @@ pub struct Telemetry {
     pub frames_sent: u64,
     pub audio_level_dbfs: Option<f32>,
     pub rssi_dbfs: Option<f32>,
+    pub snr_db: Option<f32>,
     pub squelch_open: bool,
     pub overruns: u64,
     pub source: &'static str,
@@ -53,6 +58,16 @@ struct RunState {
     running: bool,
     stop: Option<Arc<AtomicBool>>,
     handle: Option<JoinHandle<()>>,
+    #[cfg(feature = "soapy")]
+    cmd_tx: Option<mpsc::Sender<PipelineCmd>>,
+}
+
+/// Changes applied to a running SDR pipeline without restarting the stream.
+#[cfg(feature = "soapy")]
+enum PipelineCmd {
+    Retune(f64),
+    Gain { agc: bool, overall: Option<f64>, elements: Vec<(String, f64)> },
+    Nbfm(dsp::NbfmParams),
 }
 
 impl RadioManager {
@@ -101,13 +116,23 @@ impl RadioManager {
 
         let stop_thread = stop.clone();
         let dump = self.dump_wav.clone();
+
+        #[cfg(feature = "soapy")]
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PipelineCmd>();
+        #[cfg(not(feature = "soapy"))]
+        let cmd_rx = ();
+
         let handle = std::thread::Builder::new()
             .name("audio-pipeline".into())
-            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump))
+            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx))
             .expect("spawn audio-pipeline thread");
 
         run.stop = Some(stop);
         run.handle = Some(handle);
+        #[cfg(feature = "soapy")]
+        {
+            run.cmd_tx = Some(cmd_tx);
+        }
         run.running = true;
         tracing::info!("pipeline started");
     }
@@ -116,6 +141,10 @@ impl RadioManager {
         let (stop, handle) = {
             let mut run = self.run.lock().unwrap();
             run.running = false;
+            #[cfg(feature = "soapy")]
+            {
+                run.cmd_tx = None;
+            }
             (run.stop.take(), run.handle.take())
         };
         if let Some(stop) = stop {
@@ -134,6 +163,85 @@ impl RadioManager {
             self.stop();
             self.start();
         }
+    }
+
+    /// Apply a `PATCH /radio` change to a running pipeline: hardware retune and
+    /// gain, plus NBFM filter params, go live without an audio gap; anything
+    /// that changes the sample rate, mode, channel, antenna or LO offset
+    /// bounces the pipeline.
+    pub fn apply_patch(&self, old: &RadioConfig, new: &RadioConfig) {
+        if !self.is_running() {
+            return;
+        }
+
+        let f = |a: f64, b: f64| (a - b).abs() > 1.0;
+        let needs_restart = old.mode != new.mode
+            || old.enabled != new.enabled
+            || f(old.tuner.sample_rate_hz, new.tuner.sample_rate_hz)
+            || old.tuner.channel != new.tuner.channel
+            || old.tuner.antenna != new.tuner.antenna
+            || f(old.tuner.lo_offset_hz, new.tuner.lo_offset_hz)
+            || old.audio.frame_ms != new.audio.frame_ms
+            || old.audio.sample_rate_hz != new.audio.sample_rate_hz
+            || old.audio.opus_bitrate_bps != new.audio.opus_bitrate_bps
+            || (new.mode != "nbfm" && old.mode_params != new.mode_params);
+
+        if needs_restart {
+            self.reconfigure();
+            return;
+        }
+
+        #[cfg(feature = "soapy")]
+        {
+            let mut cmds = Vec::new();
+            if old.frequency_hz != new.frequency_hz {
+                cmds.push(PipelineCmd::Retune(new.frequency_hz as f64));
+            }
+            if old.tuner.gain_mode != new.tuner.gain_mode
+                || old.tuner.gain_db != new.tuner.gain_db
+                || old.tuner.gain_elements_db != new.tuner.gain_elements_db
+            {
+                cmds.push(PipelineCmd::Gain {
+                    agc: matches!(new.tuner.gain_mode, GainMode::Agc),
+                    overall: new.tuner.gain_db,
+                    elements: new
+                        .tuner
+                        .gain_elements_db
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect(),
+                });
+            }
+            if new.mode == "nbfm" && old.mode_params != new.mode_params {
+                cmds.push(PipelineCmd::Nbfm(nbfm_params(new)));
+            }
+            if !cmds.is_empty() {
+                if let Some(tx) = &self.run.lock().unwrap().cmd_tx {
+                    for c in cmds {
+                        let _ = tx.send(c);
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "soapy"))]
+        {
+            let _ = (old, new);
+        }
+    }
+}
+
+/// Build the DSP chain parameters from the current radio config.
+#[cfg(feature = "soapy")]
+fn nbfm_params(cfg: &RadioConfig) -> dsp::NbfmParams {
+    let p = |key: &str, default: f64| cfg.mode_params.get(key).and_then(|v| v.as_f64()).unwrap_or(default);
+    dsp::NbfmParams {
+        deviation_hz: p("deviation_hz", 5_000.0),
+        channel_bw_hz: p("channel_bw_hz", 16_000.0),
+        deemphasis_us: p("deemphasis_us", 75.0),
+        audio_lpf_hz: p("audio_lpf_hz", 3_400.0),
+        squelch_dbfs: p("squelch_db", -80.0),
+        noise_squelch: p("noise_squelch", 0.18),
+        lo_offset_hz: cfg.tuner.lo_offset_hz.abs().max(1.0),
     }
 }
 
@@ -219,14 +327,7 @@ impl PipelineParams {
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect(),
-                    nbfm: NbfmParams {
-                        deviation_hz: param("deviation_hz", 5_000.0),
-                        channel_bw_hz: param("channel_bw_hz", 16_000.0),
-                        deemphasis_us: param("deemphasis_us", 75.0),
-                        audio_lpf_hz: param("audio_lpf_hz", 3_400.0),
-                        squelch_dbfs: param("squelch_db", -80.0),
-                        lo_offset_hz: cfg.tuner.lo_offset_hz.abs().max(1.0),
-                    },
+                    nbfm: nbfm_params(cfg),
                 })),
                 None => SourceKind::Silence,
                 }
@@ -254,12 +355,18 @@ fn new_encoder(bitrate_bps: i32) -> Option<Encoder> {
     Some(enc)
 }
 
+#[cfg(feature = "soapy")]
+type CmdRx = mpsc::Receiver<PipelineCmd>;
+#[cfg(not(feature = "soapy"))]
+type CmdRx = ();
+
 fn run_pipeline(
     p: PipelineParams,
     tx: broadcast::Sender<AudioFrame>,
     telemetry: Arc<Mutex<Telemetry>>,
     stop: Arc<AtomicBool>,
     dump: Option<PathBuf>,
+    cmd_rx: CmdRx,
 ) {
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
@@ -274,13 +381,17 @@ fn run_pipeline(
     });
     match p.kind {
         SourceKind::Tone { hz, amp } => {
+            let _ = &cmd_rx;
             run_synth(Synth::Tone { hz, amp }, fc, &tx, &telemetry, &stop, wav.as_mut())
         }
         SourceKind::Silence => {
+            let _ = &cmd_rx;
             run_synth(Synth::Silence, fc, &tx, &telemetry, &stop, wav.as_mut())
         }
         #[cfg(feature = "soapy")]
-        SourceKind::Sdr(sdr) => run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut()),
+        SourceKind::Sdr(sdr) => {
+            run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut(), cmd_rx)
+        }
     }
 }
 
@@ -358,6 +469,7 @@ fn run_synth(
 }
 
 #[cfg(feature = "soapy")]
+#[allow(clippy::too_many_arguments)]
 fn run_sdr(
     sp: SdrParams,
     fc: FrameCfg,
@@ -365,6 +477,7 @@ fn run_sdr(
     telemetry: &Arc<Mutex<Telemetry>>,
     stop: &Arc<AtomicBool>,
     mut wav: Option<&mut WavDump>,
+    cmd_rx: mpsc::Receiver<PipelineCmd>,
 ) {
     use num_complex::Complex32;
     use soapysdr::{Device, Direction, ErrorCode};
@@ -446,6 +559,34 @@ fn run_sdr(
     let mut overruns: u64 = 0;
 
     while !stop.load(Ordering::SeqCst) {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                PipelineCmd::Retune(hz) => {
+                    let new_lo = hz - sp.nbfm.lo_offset_hz;
+                    log_set("frequency", dev.set_frequency(dir, ch, new_lo, ""));
+                    chain.on_retune();
+                    tracing::info!("nbfm: retuned to {:.4} MHz (live)", hz / 1e6);
+                }
+                PipelineCmd::Gain { agc, overall, elements } => {
+                    log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
+                    if !agc {
+                        if let Some(g) = overall {
+                            log_set("gain", dev.set_gain(dir, ch, g));
+                        }
+                        for (name, v) in &elements {
+                            log_set(
+                                "gain_element",
+                                dev.set_gain_element(dir, ch, name.as_str(), *v),
+                            );
+                        }
+                    }
+                }
+                PipelineCmd::Nbfm(params) => {
+                    chain = NbfmChain::new(sp.device_rate, params);
+                }
+            }
+        }
+
         let n = match stream.read(&mut [iq.as_mut_slice()], 200_000) {
             Ok(n) => n,
             Err(e) => {
@@ -481,6 +622,7 @@ fn run_sdr(
                 t.frames_sent = t.frames_sent.wrapping_add(1);
                 t.audio_level_dbfs = Some(m.audio_dbfs);
                 t.rssi_dbfs = Some(m.rssi_dbfs);
+                t.snr_db = Some(m.snr_db);
                 t.squelch_open = m.squelch_open;
                 t.overruns = overruns;
             }

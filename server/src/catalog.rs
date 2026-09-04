@@ -32,6 +32,7 @@ pub fn modes() -> Vec<ModeInfo> {
                 ("deemphasis_us", num_enum(75.0, &[0.0, 50.0, 75.0], "us")),
                 ("audio_lpf_hz", num(3400.0, 1000.0, 8000.0, "Hz")),
                 ("squelch_db", num(-80.0, -120.0, 0.0, "dBFS")),
+                ("noise_squelch", num(0.18, 0.02, 2.0, "ratio")),
             ]),
         },
         ModeInfo {

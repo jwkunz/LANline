@@ -231,6 +231,13 @@ impl WebrtcEngine {
     pub fn peer_count(&self) -> usize {
         self.peers.lock().unwrap().len()
     }
+
+    pub async fn close_all(&self) {
+        let ids: Vec<Uuid> = self.peers.lock().unwrap().keys().copied().collect();
+        for id in ids {
+            self.close(id).await;
+        }
+    }
 }
 
 fn map_conn(s: RTCPeerConnectionState) -> AudioConnState {

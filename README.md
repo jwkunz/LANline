@@ -19,7 +19,7 @@ Clients: a **web app** (`client/web`) and, later, an **Android** wrapper
 | 1a | Workspace, REST API + docs, discovery beacon, SoapySDR enumeration, web app shell | ✅ |
 | 1b | Opus encoder + WebRTC; **Debug Mode** 440 Hz (A4) tone end-to-end in the browser | ✅ |
 | 1c | Real NBFM receive of NOAA weather radio **KHB29 on 162.550 MHz**; live retune + device-range validation over REST | ✅ |
-| 1d | Live retune without an audio gap, noise-squelch tuning, SNR metric, more tests, polish | |
+| 1d | Live retune/gain without an audio gap, `noise_squelch` param, SNR metric, graceful shutdown, API contract tests | ✅ |
 | 2  | Android WebView wrapper + native beacon listener; transmit / modulate path | |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR)
