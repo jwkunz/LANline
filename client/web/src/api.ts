@@ -2,11 +2,13 @@
 
 import type {
   ApiErrorBody,
+  AudioStateResponse,
   CreateSessionResponse,
   HealthResponse,
   ModeInfo,
   RadioConfig,
   RadioStatus,
+  SdpMessage,
   ServerInfo,
 } from "./types";
 
@@ -108,4 +110,18 @@ export class Client {
 
   stopRadio = () =>
     this.request<RadioConfig>("POST", "/api/v1/radio/stop", { auth: true });
+
+  audioOffer = (id: string, sdp: string) =>
+    this.request<SdpMessage>("POST", `/api/v1/sessions/${id}/audio/offer`, {
+      auth: true,
+      body: { sdp, type: "offer" },
+    });
+
+  audioClose = (id: string) =>
+    this.request<null>("DELETE", `/api/v1/sessions/${id}/audio`, { auth: true });
+
+  audioState = (id: string) =>
+    this.request<AudioStateResponse>("GET", `/api/v1/sessions/${id}/audio`, {
+      auth: true,
+    });
 }

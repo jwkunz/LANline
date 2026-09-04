@@ -1,6 +1,8 @@
 import "./style.css";
 import { ApiError, Client, normalizeBase } from "./api";
+import { AudioSession, type AudioState } from "./audio";
 import type {
+  AudioStateResponse,
   CreateSessionResponse,
   ModeInfo,
   RadioConfig,
@@ -22,6 +24,10 @@ interface State {
   radio: RadioConfig | null;
   status: RadioStatus | null;
   modeNames: Record<string, string>;
+  audio: AudioSession | null;
+  audioState: AudioState;
+  audioDetail: string | null;
+  audioStats: AudioStateResponse | null;
   log: string[];
 }
 
@@ -35,6 +41,10 @@ const state: State = {
   radio: null,
   status: null,
   modeNames: {},
+  audio: null,
+  audioState: "idle",
+  audioDetail: null,
+  audioStats: null,
   log: [],
 };
 
@@ -109,6 +119,21 @@ async function connect(hostRaw: string): Promise<void> {
     state.client = client;
     state.session = session;
     state.modeNames = Object.fromEntries(modes.map((m) => [m.id, m.name]));
+
+    const audio = new AudioSession(client, session.session_id);
+    audio.element.setAttribute("hidden", "");
+    document.body.appendChild(audio.element);
+    audio.onstate = (s, detail) => {
+      state.audioState = s;
+      state.audioDetail = detail ?? null;
+      if (s === "playing") logLine("audio playing");
+      else if (s === "failed") logLine(`audio failed — ${detail ?? "unknown"}`);
+      render();
+    };
+    state.audio = audio;
+    state.audioState = "idle";
+    state.audioStats = null;
+
     setState({ phase: "connected", server, radio, status, error: null });
     logLine(
       `connected to ${server.hostname} · server ${server.server_id.slice(0, 8)} · session ${session.session_id.slice(0, 8)}`,
@@ -125,6 +150,7 @@ async function connect(hostRaw: string): Promise<void> {
 
 async function disconnect(): Promise<void> {
   stopTimers();
+  await teardownAudio();
   const client = state.client;
   const session = state.session;
   state.client = null;
@@ -144,6 +170,41 @@ async function disconnect(): Promise<void> {
     error: null,
   });
   logLine("disconnected");
+}
+
+async function teardownAudio(): Promise<void> {
+  const audio = state.audio;
+  state.audio = null;
+  state.audioState = "idle";
+  state.audioDetail = null;
+  state.audioStats = null;
+  if (audio) {
+    await audio.stop().catch(() => {});
+    audio.element.remove();
+  }
+}
+
+async function toggleAudio(): Promise<void> {
+  const audio = state.audio;
+  if (!audio) return;
+  if (audio.state === "playing" || audio.state === "connecting") {
+    await audio.stop().catch(() => {});
+    state.audioStats = null;
+    render();
+  } else {
+    try {
+      await audio.start();
+    } catch (e) {
+      logLine(`audio start failed — ${(e as Error).message}`);
+    }
+  }
+}
+
+function toggleMute(): void {
+  if (state.audio) {
+    state.audio.setMuted(!state.audio.muted);
+    render();
+  }
 }
 
 function startTimers(): void {
@@ -178,7 +239,14 @@ async function poll(): Promise<void> {
       state.client.radioStatus(),
     ]);
     pollFails = 0;
-    setState({ server, radio, status });
+
+    let audioStats = state.audioStats;
+    if (state.session && state.audio && state.audioState !== "idle") {
+      audioStats = await state.client
+        .audioState(state.session.session_id)
+        .catch(() => state.audioStats);
+    }
+    setState({ server, radio, status, audioStats });
   } catch (e) {
     pollFails += 1;
     if (pollFails >= 3) loopFailed(e as ApiError, "poll");
@@ -187,6 +255,7 @@ async function poll(): Promise<void> {
 
 function loopFailed(err: ApiError, where: string): void {
   stopTimers();
+  void teardownAudio();
   state.client = null;
   state.session = null;
   setState({ phase: "error", error: `lost connection (${where}: ${err.message})` });
@@ -237,8 +306,62 @@ function render(): void {
   connStatus.innerHTML = connStatusHtml();
   panels.innerHTML = connected ? panelsHtml() : idlePanelsHtml();
 
-  const toggle = panels.querySelector<HTMLButtonElement>("#radio-toggle");
-  if (toggle) toggle.addEventListener("click", () => void toggleRadio());
+  panels
+    .querySelector<HTMLButtonElement>("#radio-toggle")
+    ?.addEventListener("click", () => void toggleRadio());
+  panels
+    .querySelector<HTMLButtonElement>("#audio-toggle")
+    ?.addEventListener("click", () => void toggleAudio());
+  panels
+    .querySelector<HTMLInputElement>("#audio-mute")
+    ?.addEventListener("change", () => toggleMute());
+}
+
+function audioCardHtml(): string {
+  const s = state.audioState;
+  const playing = s === "playing";
+  const busy = s === "connecting";
+  const dotClass =
+    playing ? "ok live" : s === "failed" ? "bad" : busy ? "warn live" : "";
+  const label =
+    s === "idle"
+      ? "stopped"
+      : s === "connecting"
+        ? "connecting…"
+        : s === "playing"
+          ? "playing"
+          : s === "failed"
+            ? `failed${state.audioDetail ? ` — ${state.audioDetail}` : ""}`
+            : "stopped";
+  const stats = state.audioStats;
+
+  return `
+    <section class="card">
+      <h2>Received audio</h2>
+      <div class="mode-line">
+        <span class="badge"><span class="dot ${dotClass}"></span>${esc(label)}</span>
+      </div>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+        <button id="audio-toggle" class="${playing || busy ? "secondary" : ""}" ${busy ? "disabled" : ""}>
+          ${playing || busy ? "Stop" : "▶ Play"}
+        </button>
+        <label class="note" style="display:flex; gap:6px; align-items:center">
+          <input id="audio-mute" type="checkbox" ${state.audio?.muted ? "checked" : ""} />
+          mute
+        </label>
+      </div>
+      ${
+        stats
+          ? `<div class="grid" style="margin-top:14px">
+               ${kv("Server state", esc(stats.state))}
+               ${kv("ICE", esc(stats.ice_state))}
+               ${kv("Packets sent", String(stats.packets_sent))}
+               ${kv("Bytes sent", String(stats.bytes_sent))}
+             </div>`
+          : `<p class="note" style="margin-top:10px">Opus over WebRTC. Press Play (a
+             user gesture is required to start audio).</p>`
+      }
+    </section>`;
 }
 
 function connStatusHtml(): string {
@@ -302,11 +425,7 @@ function panelsHtml(): string {
       </div>
     </section>
 
-    <section class="card">
-      <h2>Received audio</h2>
-      <p class="note">Streaming (WebRTC / Opus) arrives in phase 1b. This build
-      exercises discovery, the REST session and telemetry only.</p>
-    </section>
+    ${audioCardHtml()}
 
     <section class="card">
       <h2>Telemetry</h2>

@@ -88,6 +88,19 @@ export interface ModeInfo {
   params: Record<string, unknown>;
 }
 
+export interface AudioStateResponse {
+  state: string;
+  ice_state: string;
+  dtls_state: string;
+  packets_sent: number;
+  bytes_sent: number;
+}
+
+export interface SdpMessage {
+  sdp: string;
+  type: string;
+}
+
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };
 }

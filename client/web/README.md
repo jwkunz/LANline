@@ -1,8 +1,8 @@
 # SDR C2 — web client
 
-Vanilla TypeScript + Vite. Phase 1a: LAN server connection, REST session with
-heartbeat, and live radio/telemetry display. Received-audio streaming (WebRTC /
-Opus) lands in phase 1b.
+Vanilla TypeScript + Vite. LAN server connection, REST session with heartbeat,
+live radio/telemetry display, and received-audio playback over WebRTC/Opus
+(Play button — a user gesture is required to start audio).
 
 ```sh
 npm install
@@ -21,5 +21,6 @@ Enter the server host from the server's startup log (e.g.
 |------|------|
 | `src/types.ts` | TS mirrors of `server/src/model.rs` DTOs |
 | `src/api.ts` | typed `fetch` wrapper + `ApiError` + host normalization |
+| `src/audio.ts` | `AudioSession`: recvonly `RTCPeerConnection`, non-trickle offer |
 | `src/main.ts` | app: connect flow, heartbeat + 1 Hz poll loops, rendering |
 | `src/style.css` | light/dark styling |

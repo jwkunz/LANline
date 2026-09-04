@@ -115,8 +115,14 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
 
 ## Phase status
 
-Phase 1a implements: `model.rs`, `error.rs`, `state.rs`, the full `api/`
-router with real `devices`/`device`/`modes`/`presets`/`sessions` and in-memory
-`radio` config + stub `radio/status`; `discovery.rs`; `radio/soapy.rs`
-enumeration + capability probe. The pipeline, `dsp/`, `audio/`, `webrtc/` and
-the `debug_tone` source arrive in 1b–1c.
+- **1a** — `model`/`error`/`state`, the full `api/` router, `discovery.rs`,
+  `registry` (SoapySDR enumeration + capability probe), in-memory `radio`
+  config.
+- **1b** — `audio/` (Opus frame type), `radio/` (`RadioManager`: synth source
+  → Opus → broadcast fan-out, on a dedicated thread), `media/` (`WebrtcEngine`:
+  UDP-muxed `audio_out`, one peer per session, send-only Opus track). `debug_tone`
+  = 440 Hz A4; other modes emit silence until 1c. `radio/start|stop|status` and
+  `sessions/{id}/audio/*` are live.
+- **1c** — real SoapySDR RX + `radio/dsp/` (decimation, FM discriminator,
+  de-emphasis, squelch, rational resampler) replacing the synth source;
+  device-range validation on `PATCH /radio`.
