@@ -12,6 +12,7 @@ import type {
   SdpMessage,
   ServerInfo,
 } from "./types";
+import { parseAptImage, type AptImage, type AptStatus } from "./apt";
 
 export class ApiError extends Error {
   constructor(
@@ -116,6 +117,41 @@ export class Client {
     this.request<RadioStatus>("GET", "/api/v1/radio/status", { signal });
   adsbAircraft = () => this.request<import("./adsb").AdsbSnapshot>("GET", "/api/v1/adsb/aircraft");
   aisVessels = () => this.request<import("./ais").AisSnapshot>("GET", "/api/v1/ais/vessels");
+  aptStatus = () => this.request<AptStatus>("GET", "/api/v1/apt/status");
+
+  /** Binary raster, not JSON — fetched and parsed separately from `request()`.
+   *  Can grow to a couple MB once a pass has been running a while, so it
+   *  gets its own (longer) timeout rather than the default 10s. */
+  async aptImage(signal?: AbortSignal, timeoutMs = 10_000): Promise<AptImage> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    signal?.addEventListener("abort", onExternalAbort);
+
+    let res: Response;
+    try {
+      res = await fetch(this.base + "/api/v1/apt/image", { signal: controller.signal });
+    } catch (e) {
+      if (timedOut) {
+        throw new ApiError(0, "timeout", `apt/image timed out after ${timeoutMs}ms`);
+      }
+      if (signal?.aborted) {
+        throw new ApiError(0, "cancelled", "apt/image cancelled");
+      }
+      throw new ApiError(0, "network", `cannot reach ${this.base} (${(e as Error).message})`);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onExternalAbort);
+    }
+    if (!res.ok) {
+      throw new ApiError(res.status, "http_error", `${res.status} ${res.statusText}`);
+    }
+    return parseAptImage(await res.arrayBuffer());
+  }
 
   createSession = (
     client: { name: string; user_agent: string; capabilities: string[] },

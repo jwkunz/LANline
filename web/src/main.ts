@@ -24,6 +24,7 @@ import {
   stepAm,
   type AmStation,
 } from "./am";
+import { APT_MAX_HZ, APT_MIN_HZ, APT_SATELLITES, type AptImage, type AptStatus } from "./apt";
 import type {
   AudioStateResponse,
   CreateSessionResponse,
@@ -90,6 +91,14 @@ const MODE_META: Record<string, ModeMeta> = {
     loOffsetHz: 0,
     wantSampleRateHz: 2_000_000,
   },
+  apt: {
+    label: "NOAA APT",
+    icon: "🛰️",
+    band: "137 MHz",
+    defaultFreqHz: 137_100_000,
+    loOffsetHz: 25_000,
+    wantSampleRateHz: 2_000_000,
+  },
   debug_tone: {
     label: "Debug Tone",
     icon: "🔊",
@@ -129,6 +138,7 @@ interface State {
   seeking: boolean;
   adsb: AdsbSnapshot | null;
   ais: AisSnapshot | null;
+  apt: AptStatus | null;
   scopeSel: string | null;
   scopeRangeNm: number | "auto";
   log: string[];
@@ -159,6 +169,7 @@ const state: State = {
   seeking: false,
   adsb: null,
   ais: null,
+  apt: null,
   scopeSel: null,
   scopeRangeNm: "auto",
   log: [],
@@ -169,6 +180,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let heartbeatTimer: number | undefined;
 let pollTimer: number | undefined;
 let pollFails = 0;
+
+/** Last decoded APT raster (rendering cache, not reactive state — see
+ *  `refreshAptImage`/`drawAptImage`, mirroring `scopePlot` below). */
+let aptImg: AptImage | null = null;
+let aptImageFetchedAt = 0;
 
 function readSavedLoc(): Located | null {
   return parseLatLon(localStorage.getItem(LOC_KEY) ?? "");
@@ -408,7 +424,7 @@ async function autoListen(): Promise<void> {
     logLine(`auto start-radio failed — ${(e as ApiError).message}`);
   }
   const m = state.radio?.mode;
-  if (m === "adsb" || m === "ais") return; // data-only modes, no audio
+  if (m === "adsb" || m === "ais" || m === "apt") return; // data-only modes, no audio
   try {
     if (state.audioState === "idle") await state.audio.start();
   } catch (e) {
@@ -542,9 +558,11 @@ async function switchMode(id: string): Promise<void> {
     };
   }
 
+  aptImg = null;
+  aptImageFetchedAt = 0;
   try {
     let radio = await state.client.patchRadio(patch);
-    setState({ radio, adsb: null, ais: null, scopeSel: null });
+    setState({ radio, adsb: null, ais: null, apt: null, scopeSel: null });
     logLine(`mode → ${meta?.label ?? id}`);
     void refreshStations();
     if (radio.running || NATIVE) {
@@ -696,6 +714,10 @@ function tunedStationLabel(): string | null {
     const s = state.amNearby.find((x) => x.freq_hz === r.frequency_hz);
     return s ? `${s.call} · ${s.city}, ${s.state}` : null;
   }
+  if (r.mode === "apt") {
+    const s = APT_SATELLITES.find((x) => x.freq_hz === r.frequency_hz);
+    return s ? s.name : null;
+  }
   return null;
 }
 
@@ -733,7 +755,7 @@ async function poll(): Promise<void> {
       state.client.radioStatus(),
     ]);
     pollFails = 0;
-    const dataMode = radio.mode === "adsb" || radio.mode === "ais";
+    const dataMode = radio.mode === "adsb" || radio.mode === "ais" || radio.mode === "apt";
     let audioStats = state.audioStats;
     if (!dataMode && state.session && state.audio && state.audioState !== "idle") {
       audioStats = await state.client
@@ -742,12 +764,21 @@ async function poll(): Promise<void> {
     }
     let adsb = state.adsb;
     let ais = state.ais;
+    let apt = state.apt;
     if (radio.mode === "adsb") {
       adsb = await state.client.adsbAircraft().catch(() => state.adsb);
     } else if (radio.mode === "ais") {
       ais = await state.client.aisVessels().catch(() => state.ais);
+    } else if (radio.mode === "apt") {
+      apt = await state.client.aptStatus().catch(() => state.apt);
+      // The raster can grow to a couple MB; refetch it far less often than
+      // the 1s status/telemetry cadence.
+      if (Date.now() - aptImageFetchedAt > 3_000) {
+        aptImageFetchedAt = Date.now();
+        void refreshAptImage();
+      }
     }
-    setState({ server, radio, status, audioStats, adsb, ais });
+    setState({ server, radio, status, audioStats, adsb, ais, apt });
   } catch (e) {
     pollFails += 1;
     if (pollFails >= 3) loopFailed(e as ApiError, "poll");
@@ -796,6 +827,7 @@ function structKey(): string {
     state.locNote ?? "",
     state.audioStats ? 1 : 0,
     state.adsb || state.ais ? 1 : 0,
+    state.apt ? 1 : 0,
     state.scopeRangeNm,
   ].join("|");
 }
@@ -849,6 +881,9 @@ function patchLive(): void {
   if (state.radio.mode === "adsb" || state.radio.mode === "ais") {
     setHTML("#scope-list", scopeListInner());
     drawScope();
+  } else if (state.radio.mode === "apt") {
+    setHTML("#apt-status", aptStatusInner());
+    drawAptImage();
   }
 
   const freq = state.radio.frequency_hz;
@@ -886,6 +921,7 @@ function installDelegates(): void {
     if (hit("#am-down")) return void tuneFrequency(stepAm(state.radio!.frequency_hz, -1));
     if (hit("#am-up")) return void tuneFrequency(stepAm(state.radio!.frequency_hz, 1));
     if (hit("#am-go")) return amManualGo();
+    if (hit("#apt-go")) return aptManualGo();
 
     const tab = t.closest<HTMLButtonElement>("[data-bandtab]");
     if (tab) return setState({ bandTab: tab.dataset.bandtab as "nearby" | "manual" });
@@ -912,6 +948,7 @@ function installDelegates(): void {
     if (id === "loc") findFromInput();
     else if (id === "fm-freq") fmManualGo();
     else if (id === "am-freq") amManualGo();
+    else if (id === "apt-freq") aptManualGo();
   });
 }
 
@@ -925,6 +962,15 @@ function amManualGo(): void {
   const raw = panels.querySelector<HTMLInputElement>("#am-freq")?.value ?? "";
   const khz = parseFloat(raw);
   if (Number.isFinite(khz)) void tuneFrequency(snapAm(khz * 1e3));
+}
+
+function aptManualGo(): void {
+  const raw = panels.querySelector<HTMLInputElement>("#apt-freq")?.value ?? "";
+  const mhz = parseFloat(raw);
+  if (Number.isFinite(mhz)) {
+    const hz = Math.min(APT_MAX_HZ, Math.max(APT_MIN_HZ, Math.round(mhz * 1e6)));
+    void tuneFrequency(hz);
+  }
 }
 
 // --- panel HTML ----------------------------------------------------
@@ -943,7 +989,8 @@ function idlePanelsHtml(): string {
 }
 
 function panelsHtml(): string {
-  const dataMode = state.radio?.mode === "adsb" || state.radio?.mode === "ais";
+  const dataMode =
+    state.radio?.mode === "adsb" || state.radio?.mode === "ais" || state.radio?.mode === "apt";
   return `
     ${modeStripHtml()}
     ${wizardHtml()}
@@ -1005,6 +1052,8 @@ function wizardHtml(): string {
       return fmWizardHtml();
     case "am":
       return amWizardHtml();
+    case "apt":
+      return aptWizardHtml();
     case "adsb":
     case "ais":
       return scopeWizardHtml();
@@ -1125,6 +1174,84 @@ function amWizardHtml(): string {
              <p class="note" style="margin:8px 0 0">${AM_MIN_HZ / 1e3}–${AM_MAX_HZ / 1e3} kHz · 10 kHz steps · use Seek in “Now playing”.</p>`
       }
     </section>`;
+}
+
+function aptWizardHtml(): string {
+  const r = state.radio!;
+  const mhz = (r.frequency_hz / 1e6).toFixed(4);
+  const rows = APT_SATELLITES.map((s) =>
+    stationRow(s.freq_hz, (s.freq_hz / 1e6).toFixed(4), s.name, "NOAA POES", s.freq_hz === r.frequency_hz, s.name),
+  ).join("");
+  const tab = state.bandTab;
+  return `
+    <section class="card">
+      <h2>NOAA APT — weather satellite image</h2>
+      <p class="note" style="margin:0 0 10px">Unlike AM/FM/ADS-B/AIS, this is a
+      real-time downlink from one specific satellite — reception only works
+      during an actual overhead pass (a few minutes, several times a day).
+      Picking a satellite here just tunes its frequency; the image below
+      fills in once a pass is underway.</p>
+      <div class="tabs">
+        <button class="tab${tab === "nearby" ? " on" : ""}" data-bandtab="nearby">Satellites</button>
+        <button class="tab${tab === "manual" ? " on" : ""}" data-bandtab="manual">Manual</button>
+      </div>
+      ${
+        tab === "nearby"
+          ? `<div class="stations">${rows}</div>`
+          : `<div class="dial">
+               <input id="apt-freq" type="text" inputmode="decimal" value="${mhz}" />
+               <span class="dial-unit">MHz</span>
+               <button id="apt-go">Tune</button>
+             </div>
+             <p class="note" style="margin:8px 0 0">${APT_MIN_HZ / 1e6}–${APT_MAX_HZ / 1e6} MHz.</p>`
+      }
+      <div class="apt-wrap" style="margin-top:12px">
+        <canvas id="apt-canvas" class="apt-canvas"></canvas>
+      </div>
+      <p class="note" id="apt-status" style="margin:8px 0 0">${aptStatusInner()}</p>
+    </section>`;
+}
+
+function aptStatusInner(): string {
+  const a = state.apt;
+  if (!a || a.lines === 0) {
+    return state.radio?.running
+      ? "Listening — no scan lines decoded yet."
+      : "Start the receiver, then wait for a pass.";
+  }
+  return `${a.lines} line${a.lines === 1 ? "" : "s"} · ${a.width}×${a.height} px · sync quality ${a.sync_quality.toFixed(1)}${a.sync_quality > 5 ? " (locked)" : ""}`;
+}
+
+async function refreshAptImage(): Promise<void> {
+  if (!state.client) return;
+  try {
+    aptImg = await state.client.aptImage(undefined, 8_000);
+    drawAptImage();
+  } catch {
+    /* best effort — keep showing the last successfully decoded frame */
+  }
+}
+
+function drawAptImage(): void {
+  const canvas = panels.querySelector<HTMLCanvasElement>("#apt-canvas");
+  if (!canvas || !aptImg || aptImg.width === 0 || aptImg.height === 0) return;
+  const { width, height, pixels } = aptImg;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const img = ctx.createImageData(width, height);
+  for (let i = 0; i < pixels.length; i++) {
+    const v = pixels[i];
+    const o = i * 4;
+    img.data[o] = v;
+    img.data[o + 1] = v;
+    img.data[o + 2] = v;
+    img.data[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
 }
 
 // --- radar scope (shared by ADS-B + AIS) -------------------------------
@@ -1496,6 +1623,29 @@ function nowPlayingInner(): string {
         ${kv("Message rate", a ? `${a.message_rate.toFixed(1)}/s` : "—")}
         ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
         ${kv("Reference", a?.receiver ? `${a.receiver[0].toFixed(3)}, ${a.receiver[1].toFixed(3)}` : "not set")}
+      </div>
+      <div style="margin-top:14px">
+        <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
+          ${r.running ? "Stop receiver" : "Start receiver"}
+        </button>
+      </div>`;
+  }
+
+  if (r.mode === "apt") {
+    const a = state.apt;
+    const sat = APT_SATELLITES.find((s) => s.freq_hz === r.frequency_hz);
+    return `
+      <h2>Now receiving</h2>
+      <div class="mode-line">
+        <span class="mode">${esc(meta?.label ?? "NOAA APT")}</span>
+        <span class="freq">${freqLabel(r.mode, r.frequency_hz)}${sat ? ` · ${esc(sat.name)}` : ""}</span>
+        <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "receiving" : "stopped"}</span>
+      </div>
+      <div class="grid">
+        ${kv("Scan lines", a ? String(a.lines) : "—")}
+        ${kv("Image size", a && a.lines > 0 ? `${a.width}×${a.height} px` : "—")}
+        ${kv("Sync quality", a && a.lines > 0 ? a.sync_quality.toFixed(1) : "—")}
+        ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
       </div>
       <div style="margin-top:14px">
         <button id="radio-toggle" class="${r.running ? "secondary" : ""}">

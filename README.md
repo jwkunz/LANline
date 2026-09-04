@@ -15,6 +15,9 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
 - **traffic trackers** — **ADS-B** aircraft (1090 MHz) and **AIS** vessels
   (162 MHz): decoded tracks over REST + a raw TCP feed (Beast / AIVDM), plotted
   on a self-contained radar scope in the web client,
+- **NOAA APT** (137 MHz weather satellite): a real-time image downlink decoded
+  into a two-channel grayscale raster over REST and rendered to canvas in the
+  web client,
 - a reserved port for the future transmit path (modulated Opus in),
 - **discovery** so clients find it unaided: an **mDNS** responder
   (`lanline.local` + `_lanline._tcp`) for browsers, and a **UDP beacon** for the
@@ -37,11 +40,13 @@ wrapper (`client/android`).
 | 2d | ADS-B tracker mode (1090 MHz Mode S decode), radar scope, Beast feed | ✅ |
 | 2e | AIS tracker mode (162 MHz GMSK/ITU-R M.1371 decode), AIVDM feed, shared scope | ✅ |
 | 2f | AM receive mode (mediumwave/shortwave), station-picker wizard | ✅ |
-| 2g | Transmit / modulate path (the reserved `audio_in` port + `radio/tx*` endpoints) | |
+| 2g | NOAA APT receive mode (137 MHz weather satellite image), canvas rendering | ✅ |
+| 2h | Transmit / modulate path (the reserved `audio_in` port + `radio/tx*` endpoints) | |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
-**wideband FM**, **AM**, an **ADS-B** aircraft tracker and an **AIS** vessel
-tracker followed. More modes are added through the REST API over time.
+**wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
+tracker, and **NOAA APT** image reception followed. More modes are added
+through the REST API over time.
 
 ## Layout
 
@@ -122,6 +127,19 @@ The server also exports the tracks over REST and as a raw TCP feed:
 |------|------|----------|
 | ADS-B | `GET /api/v1/adsb/{aircraft,messages}` | **Beast** binary on `30005` (`--beast-port 0` to disable) → `readsb` / `tar1090` / VRS |
 | AIS | `GET /api/v1/ais/{vessels,messages}` | **AIVDM** NMEA on `10110` (`--ais-nmea-port 0` to disable) → OpenCPN / AIS-catcher |
+
+### NOAA APT (weather satellite)
+
+Pick **NOAA APT** in the mode strip — quick-picks for NOAA-15/18/19's 137 MHz
+downlinks, or a manual frequency, plus a canvas that fills in with the
+decoded image as scan lines arrive (`GET /api/v1/apt/{status,image}`, the
+latter a small binary raster, no image crate involved). Unlike every other
+mode here, this one has no ambient signal to fall back on: it's a real-time
+feed from one satellite, receivable only during an actual overhead pass (a
+few minutes, several times a day — predictable from a NORAD TLE via
+`gpredict` or similar). Outside of a pass, expect a low `sync_quality` and a
+noisy/empty image; that's the decoder correctly declining to claim a lock,
+not a bug.
 
 ## Building the Android client
 
