@@ -7,7 +7,7 @@
 //! plain browser can open `http://<name>.local:<c2-port>/` with nothing to
 //! type. Best-effort: any failure is logged and ignored.
 
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use std::net::{IpAddr, Ipv4Addr};
 use uuid::Uuid;
 
@@ -23,6 +23,10 @@ pub fn spawn(name: &str, ip: Ipv4Addr, c2_port: u16, server_id: Uuid) -> Option<
             return None;
         }
     };
+    // IPv4-only, to match the WebRTC transport. Without this the responder logs
+    // an error for every query that arrives on a v6 link-local interface (it has
+    // no AAAA record to answer with).
+    let _ = daemon.disable_interface(IfKind::IPv6);
 
     let host = format!("{name}.local.");
     let sid = server_id.to_string();
