@@ -62,16 +62,16 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
 
-// Copy the built web client (client/web/dist) into the APK assets before every
-// build, so `npm run build` + `./gradlew assembleDebug` stay in sync.
-val syncWebAssets by tasks.registering(Copy::class) {
+// Mirror the built web client (client/web/dist) into the APK assets before
+// every build (Sync deletes stale files), so `npm run build` +
+// `./gradlew assembleDebug` stay in step.
+val syncWebAssets by tasks.registering(Sync::class) {
     val dist = rootProject.file("../web/dist")
     from(dist)
     into(layout.projectDirectory.dir("src/main/assets/web"))
     doFirst {
         if (!dist.exists()) {
-            logger.warn("client/web/dist not found — run `npm run build` in client/web. " +
-                "Building with whatever is already in assets/web.")
+            logger.warn("client/web/dist not found — run `npm run build` in client/web.")
         }
     }
 }

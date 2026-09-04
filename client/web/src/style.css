@@ -176,6 +176,67 @@ button:disabled {
   color: var(--muted);
 }
 
+.mode-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mode-btn {
+  flex: 1 1 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-weight: 400;
+  padding: 10px 12px;
+}
+.mode-btn.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.mode-btn .m-icon { font-size: 18px; }
+.mode-btn .m-label { font-weight: 600; }
+.mode-btn .m-band { color: var(--muted); font-size: 12px; }
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.tab {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 500;
+  padding: 6px 14px;
+}
+.tab.on {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+.dial {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.dial input {
+  flex: 0 1 120px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 18px;
+}
+.dial-unit { color: var(--muted); }
+.dial button:not(#fm-go) {
+  min-width: 44px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
 .stations {
   display: flex;
   flex-direction: column;

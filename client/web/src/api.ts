@@ -4,6 +4,7 @@ import type {
   ApiErrorBody,
   AudioStateResponse,
   CreateSessionResponse,
+  DeviceInfo,
   HealthResponse,
   ModeInfo,
   RadioConfig,
@@ -82,6 +83,7 @@ export class Client {
 
   health = () => this.request<HealthResponse>("GET", "/health");
   server = () => this.request<ServerInfo>("GET", "/api/v1/server");
+  device = () => this.request<DeviceInfo>("GET", "/api/v1/device");
   modes = () => this.request<ModeInfo[]>("GET", "/api/v1/modes");
   radio = () => this.request<RadioConfig>("GET", "/api/v1/radio");
   radioStatus = () => this.request<RadioStatus>("GET", "/api/v1/radio/status");

@@ -81,6 +81,28 @@ export interface RadioStatus {
   time: string;
 }
 
+export interface Range {
+  min: number;
+  max: number;
+  step: number;
+}
+
+export interface DeviceInfo {
+  id: string;
+  driver: string;
+  label: string;
+  status: string;
+  tx_capable: boolean;
+  rx: {
+    channels: number;
+    antennas: string[];
+    frequency_ranges_hz: Range[];
+    sample_rate_ranges_hz: Range[];
+    gain_elements: { name: string; range_db: Range }[];
+    has_agc: boolean;
+  };
+}
+
 export interface ModeInfo {
   id: string;
   name: string;
