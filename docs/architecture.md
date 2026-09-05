@@ -217,14 +217,13 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   dial steps, since `structKey` only rebuilds the panel when the *band*
   changes). Every VHF/UHF FM band is open to all licence classes, so there's
   no privilege gating to enforce — the "privilege vs licence" hint is
-  informational. A second commit added **CTCSS tone squelch**
-  ([below](#ctcss-tone-squelch)). Still receive-only; repeater input/tone TX,
-  a fetched repeater DB (`scripts/fetch-repeaters.mjs` from RepeaterBook, the
-  same pre-fetch-and-bundle pattern as the FM/AM station DBs), manual
-  repeater entry, and DCS are planned follow-up commits. Part 97 allows
-  homebrew/experimental transmit gear under an amateur licence (the operator
-  holds Amateur Extra, KZ4AZ), so a `ham` TX path is on firmer regulatory
-  footing than `frs`'s.
+  informational. Follow-up commits added **CTCSS tone squelch**
+  ([below](#ctcss-tone-squelch)) and a **repeater directory + manual entry**
+  ([below](#repeater-directory)). Still receive-only; keying a repeater
+  through its input (offset + uplink tone encode) and DCS are the remaining
+  follow-ups. Part 97 allows homebrew/experimental transmit gear under an
+  amateur licence (the operator holds Amateur Extra, KZ4AZ), so a `ham` TX
+  path is on firmer regulatory footing than `frs`'s.
 
 ### CTCSS tone squelch
 
@@ -251,6 +250,29 @@ is as narrow as settling time allows. `Chain`'s `Fm`/`Am` variants are both
 `Box`ed now — `FmChain` grew past the point where an unboxed enum variant
 tripped `clippy::large_enum_variant`. DCS (23-bit Golay code, ~134 Hz
 sub-carrier) is a different problem and stays deferred.
+
+### Repeater directory
+
+A third `ham` commit added a repeater picker. It's entirely client-side and
+server-free (the server still only sees `mode: "ham"` + a `frequency_hz` +
+`mode_params`): a **Simplex / Repeaters** toggle in the wizard swaps the
+channel list for `web/src/ham.ts`'s `Repeater` records, filtered to the
+current band and distance-sorted when a location is set. Tapping a repeater
+tunes its **output** (the downlink — what you receive) and, if it transmits
+a tone (`tsq_hz`), sets that as RX tone squelch; the **input** (`output_hz +
+offset_hz`) and uplink `tone_hz` are stashed in `state.activeRepeater` for
+the future TX path and shown in "Now playing". Manual repeaters live in
+`localStorage` (`lanline.repeaters.manual`), merged ahead of the bundled
+list; the add form pre-fills the offset from `conventionalOffsetHz()`.
+
+The bundled list is `GET /repeaters.json` — `scripts/fetch-repeaters.mjs`
+pulls [hearham.com](https://hearham.com)'s open API (one ~9 MB global JSON,
+no key), filters to a region by the trailing state code in its free-form
+`city` string, keeps FM-analog + operational rows in our VHF/UHF bands, and
+writes a compact per-region file. RepeaterBook's export API now needs an
+account, hence hearham; its coverage is thinner, so `HAM_REPEATER_REGIONS`
+takes a comma list and the wizard leans on manual entry. `build.rs` +
+`webui.rs` embed the file the same way as the FM/AM/NWR station DBs.
 
 ### AM and HackRF MF/LF sensitivity
 

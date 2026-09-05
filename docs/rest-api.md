@@ -52,6 +52,7 @@ browser pointed at the server's own address connects with nothing to type
 | `GET /fm-stations.json` | `application/json` — bundled FCC FM broadcast station directory |
 | `GET /am-stations.json` | `application/json` — bundled FCC AM broadcast station directory |
 | `GET /apt-tle.json` | `application/json` — bundled NOAA-15/18/19 orbital elements (TLE), for the client-side pass predictor |
+| `GET /repeaters.json` | `application/json` — bundled regional amateur repeater directory (`scripts/fetch-repeaters.mjs` from hearham.com), for the `ham` mode repeater picker |
 
 These are unauthenticated and cached (`Cache-Control: public, max-age=86400`).
 The same bundle is what the Android APK embeds as local assets.
@@ -446,10 +447,14 @@ an audible rumble. `ctcss_squelch: 0` detects and reports the tone (see
 Live-editable via `PATCH /api/v1/radio` (`mode_params` is deep-merged), so
 changing the tone or toggling monitor mode takes effect without a restart.
 
-Still receive-only; repeater offsets, DCS, a fetched repeater database, and
-TX are planned follow-ups. Part 97 permits homebrew transmit equipment under
-an amateur licence, so a later TX build here is on firmer footing than
-`frs`'s.
+The repeater picker (a bundled regional directory at `GET /repeaters.json`
+plus browser-stored manual entries) is entirely client-side: selecting a
+repeater just issues a `PATCH /api/v1/radio` that sets `frequency_hz` to the
+repeater's output and `mode_params.ctcss_hz` to its transmitted tone, if
+any. The offset and uplink tone are held in the client for the future TX
+path. Still receive-only; keying a repeater through its input, and DCS, are
+planned follow-ups. Part 97 permits homebrew transmit equipment under an
+amateur licence, so a later TX build here is on firmer footing than `frs`'s.
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end

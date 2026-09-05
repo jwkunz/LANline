@@ -11,6 +11,7 @@ const ASSETS: &[&str] = &[
     "fm-stations.json",
     "am-stations.json",
     "apt-tle.json",
+    "repeaters.json",
 ];
 
 const PLACEHOLDER_HTML: &str = "<!doctype html><meta charset=utf-8><title>LANline</title>\

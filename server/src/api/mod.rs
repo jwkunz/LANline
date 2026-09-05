@@ -72,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/fm-stations.json", get(webui::fm_stations))
         .route("/am-stations.json", get(webui::am_stations))
         .route("/apt-tle.json", get(webui::apt_tle))
+        .route("/repeaters.json", get(webui::repeaters))
         .nest("/api/v1", v1)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
@@ -321,7 +322,9 @@ mod tests {
         let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("LANline"));
 
-        for path in ["/nwr-stations.json", "/fm-stations.json", "/am-stations.json", "/apt-tle.json"] {
+        for path in
+            ["/nwr-stations.json", "/fm-stations.json", "/am-stations.json", "/apt-tle.json", "/repeaters.json"]
+        {
             let res = app.clone().oneshot(get(path)).await.unwrap();
             assert_eq!(res.status(), StatusCode::OK, "{path}");
             assert!(

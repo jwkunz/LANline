@@ -53,7 +53,7 @@ wrapper (`client/android`).
 | 2h | FRS receive mode (462/467 MHz, 22-channel plan), channel-picker wizard | ✅ |
 | 2i | Push-to-talk transmit (FRS only; FM modulator, half-duplex device switching, live mic-audio uplink over WebRTC, PTT protocol) — off by default (`--enable-tx`), personal-use only per FCC Part 95 | ✅ |
 | 2j | Multi-radio device picker (HackRF / ADALM-Pluto), TLS with a self-signed cert, Receiver Analysis waterfall | ✅ |
-| 2k | Amateur NBFM receive mode — band-plan-organized channel picker (6 m – 23 cm), simplex/calling frequencies, voluntary ARRL band-plan hints, CTCSS tone squelch; repeater offsets + DCS + TX to follow | ✅ |
+| 2k | Amateur NBFM receive mode — band-plan-organized channel picker (6 m – 23 cm), simplex/calling frequencies, voluntary ARRL band-plan hints, CTCSS tone squelch, regional repeater directory + manual repeater entry (offset + tones); repeater TX + DCS to follow | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -344,9 +344,18 @@ while that tone is present (a "monitor only" checkbox detects and reports it
 without muting). It's a single-tone presence check keyed to your selection,
 not a full decoder bank.
 
-Still **receive-only** — repeater input/tone TX, DCS, a fetched repeater
-database, and manual repeater entry (offsets) come in later builds. The same
-UHF `freq_correction_ppm` note as FRS applies.
+A **Simplex / Repeaters** toggle switches the channel list to a regional
+repeater directory (bundled from [hearham.com](https://hearham.com); regenerate
+or widen with `node scripts/fetch-repeaters.mjs`, `HAM_REPEATER_REGIONS="FL,GA"`).
+Each row shows the output frequency, offset (−0.6 / +5 MHz …), uplink/output
+tones, town and distance. Tapping one tunes the repeater's output and, if it
+transmits a tone, sets that as your receive tone squelch; the offset and
+uplink tone are remembered for transmit. **+ Add repeater** stores your own
+(offset + tones) in the browser.
+
+Still **receive-only** — keying a repeater through its input with the uplink
+tone, and DCS, come in later builds. The same UHF `freq_correction_ppm` note
+as FRS applies.
 
 ### Receiver Analysis (waterfall)
 

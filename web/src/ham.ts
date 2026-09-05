@@ -1,3 +1,5 @@
+import { loadJson } from "./geo";
+
 // Amateur (ham) VHF/UHF NBFM band plans. Unlike FRS's fixed 22-channel table,
 // the ham bands are continuously tunable — what's fixed is the *convention*:
 // which slices are FM simplex, which are repeater sub-bands, the calling
@@ -259,4 +261,71 @@ export function hamSimplexChannels(band: HamBand): HamSpot[] {
 /** The band-plan segment a frequency falls in, if any. */
 export function hamSegmentAt(band: HamBand, hz: number): BandSegment | undefined {
   return band.segments.find((s) => hz >= s.loHz && hz < s.hiHz);
+}
+
+/** The band a raw frequency belongs to, or null if it's out of all of them. */
+export function hamBandOf(hz: number): HamBand | null {
+  return HAM_BANDS.find((b) => hz >= b.loHz && hz <= b.hiHz) ?? null;
+}
+
+// --- repeaters ------------------------------------------------------------
+
+/** One repeater. `output_hz` is what you receive (the downlink); the input
+ *  (uplink, for TX later) is `output_hz + offset_hz`. `tone_hz` is the CTCSS
+ *  the machine needs to hear you (uplink); `tsq_hz` is the tone it transmits
+ *  on its output, if any (0 = none) — the one worth using as RX tone squelch.
+ *  `manual` rows are the operator's own, kept in localStorage. */
+export interface Repeater {
+  id: string;
+  call: string;
+  output_hz: number;
+  offset_hz: number;
+  tone_hz: number;
+  tsq_hz: number;
+  lat: number;
+  lon: number;
+  place: string;
+  band: string;
+  open: boolean;
+  manual?: boolean;
+}
+
+/** Bundled regional list — regenerate with `node scripts/fetch-repeaters.mjs`. */
+export const loadRepeaters = () => loadJson<Repeater[]>("./repeaters.json");
+
+/** "−600 kHz" / "+5 MHz" / "simplex" — the split for a repeater's offset. */
+export function offsetLabel(offsetHz: number): string {
+  if (!offsetHz) return "simplex";
+  const sign = offsetHz < 0 ? "−" : "+";
+  const abs = Math.abs(offsetHz);
+  return abs >= 1_000_000
+    ? `${sign}${(abs / 1e6).toFixed(abs % 1e6 ? 2 : 0)} MHz`
+    : `${sign}${Math.round(abs / 1e3)} kHz`;
+}
+
+/** Conventional repeater offset for a 2 m / 70 cm / … output frequency —
+ *  used to pre-fill the "add repeater" form. Sign follows the usual sub-band
+ *  convention (e.g. 2 m outputs 145.2–145.5 are −600 kHz, 146.61–147.00 are
+ *  −600 kHz, 147.00–147.40 are +600 kHz). */
+export function conventionalOffsetHz(outputHz: number): number {
+  const b = hamBandOf(outputHz);
+  if (!b) return 0;
+  const mhz = outputHz / 1e6;
+  switch (b.id) {
+    case "6m":
+      return -1_000_000;
+    case "2m":
+      if (mhz >= 147.0) return 600_000;
+      return -600_000; // 145.2–145.5 and 146.0–147.0 outputs
+    case "1.25m":
+      return -1_600_000;
+    case "70cm":
+      return mhz < 445.0 ? 5_000_000 : -5_000_000;
+    case "33cm":
+      return -25_000_000;
+    case "23cm":
+      return -12_000_000;
+    default:
+      return 0;
+  }
 }

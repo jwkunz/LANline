@@ -4,7 +4,7 @@ import { openRadioOptions, radioOptionsOpen } from "./radio-options";
 import { AnalysisView } from "./analysis";
 import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
-import { parseLatLon, type Located } from "./geo";
+import { haversineMi, parseLatLon, type Located } from "./geo";
 import { altLabel, offsetNm, type AdsbSnapshot } from "./adsb";
 import { type AisSnapshot } from "./ais";
 import { loadNwrStations, nearestNwr, type NwrStation } from "./nwr";
@@ -41,9 +41,13 @@ import {
   CTCSS_TONES,
   HAM_BANDS,
   HAM_DEFAULT_BAND,
+  conventionalOffsetHz,
   hamBand,
   hamSegmentAt,
   hamSimplexChannels,
+  loadRepeaters,
+  offsetLabel,
+  type Repeater,
 } from "./ham";
 import type {
   AudioStateResponse,
@@ -157,6 +161,18 @@ const MODE_META: Record<string, ModeMeta> = {
 type NearNwr = NwrStation & { distance_mi: number };
 type NearFm = FmStation & { distance_mi: number };
 type NearAm = AmStation & { distance_mi: number };
+type NearRepeater = Repeater & { distance_mi: number | null };
+
+const RP_MANUAL_KEY = "lanline.repeaters.manual";
+
+function readManualRepeaters(): Repeater[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(RP_MANUAL_KEY) ?? "[]");
+    return Array.isArray(v) ? (v as Repeater[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 interface State {
   phase: Phase;
@@ -183,6 +199,11 @@ interface State {
   aptPasses: Record<string, AptPass[]> | null;
   bandTab: "nearby" | "manual";
   hamBand: string;
+  hamView: "simplex" | "repeater";
+  repeaters: NearRepeater[];
+  manualRepeaters: Repeater[];
+  activeRepeater: Repeater | null;
+  rpAddOpen: boolean;
   seeking: boolean;
   pttHeld: boolean;
   adsb: AdsbSnapshot | null;
@@ -218,6 +239,11 @@ const state: State = {
   aptPasses: null,
   bandTab: "nearby",
   hamBand: localStorage.getItem("lanline.hamBand") ?? HAM_DEFAULT_BAND,
+  hamView: localStorage.getItem("lanline.hamView") === "repeater" ? "repeater" : "simplex",
+  repeaters: [],
+  manualRepeaters: readManualRepeaters(),
+  activeRepeater: null,
+  rpAddOpen: false,
   seeking: false,
   pttHeld: false,
   adsb: null,
@@ -738,7 +764,7 @@ async function switchMode(id: string): Promise<void> {
   }
   try {
     let radio = await state.client.patchRadio(patch);
-    setState({ radio, adsb: null, ais: null, apt: null, scopeSel: null });
+    setState({ radio, adsb: null, ais: null, apt: null, scopeSel: null, activeRepeater: null });
     logLine(`mode → ${meta?.label ?? id}`);
     void refreshStations();
     if (radio.running || NATIVE) {
@@ -772,7 +798,11 @@ async function tuneFrequency(hz: number, label?: string): Promise<void> {
     let radio = await state.client.patchRadio({ frequency_hz: freq });
     localStorage.setItem(freqKey(radio.mode), String(freq));
     if (!radio.running) radio = await state.client.startRadio();
-    setState({ radio });
+    // Tuning by hand / to a simplex channel means we're no longer parked on
+    // the selected repeater.
+    const activeRepeater =
+      state.activeRepeater && state.activeRepeater.output_hz === freq ? state.activeRepeater : null;
+    setState({ radio, activeRepeater });
     if (state.audio && state.audioState === "idle") void startAudio();
     logLine(`tuned ${label ?? freqLabel(radio.mode, freq)}`);
   } catch (e) {
@@ -935,9 +965,42 @@ function useMyLocation(): void {
   );
 }
 
-async function refreshStations(): Promise<void> {
+let repeaterBook: Repeater[] | null = null;
+
+/** Rebuild `state.repeaters` for the current ham band: bundled + manual,
+ *  distance-sorted when a location is set (manual rows without coords sink to
+ *  the bottom). Loads the bundled list once, then filters from memory. */
+async function rebuildRepeaterList(bandId?: string): Promise<void> {
+  if (state.radio?.mode !== "ham") return;
+  if (!repeaterBook) {
+    try {
+      repeaterBook = await loadRepeaters();
+    } catch (e) {
+      repeaterBook = [];
+      setState({ locNote: `repeater list failed to load (${(e as Error).message})` });
+    }
+  }
+  const band = bandId ?? hamBandContaining(state.radio.frequency_hz)?.id ?? state.hamBand;
+  const all = [...state.manualRepeaters, ...repeaterBook].filter((r) => r.band === band);
   const loc = state.loc;
+  const withDist: NearRepeater[] = all.map((r) => ({
+    ...r,
+    distance_mi:
+      loc && r.lat && r.lon ? Math.round(haversineMi(loc.lat, loc.lon, r.lat, r.lon)) : null,
+  }));
+  withDist.sort((a, b) => {
+    if (a.distance_mi == null && b.distance_mi == null) return a.output_hz - b.output_hz;
+    if (a.distance_mi == null) return 1;
+    if (b.distance_mi == null) return -1;
+    return a.distance_mi - b.distance_mi;
+  });
+  setState({ repeaters: withDist });
+}
+
+async function refreshStations(): Promise<void> {
   const mode = state.radio?.mode;
+  if (mode === "ham") void rebuildRepeaterList();
+  const loc = state.loc;
   if (!loc) return;
   try {
     if (mode === "nbfm") {
@@ -1086,7 +1149,7 @@ function structKey(): string {
     state.radio?.mode === "ham"
       ? `${hamBandContaining(state.radio.frequency_hz)?.id ?? state.hamBand}:${
           Number(state.radio.mode_params.ctcss_hz ?? 0) > 0
-        }`
+        }:${state.hamView}:${state.rpAddOpen}:${state.repeaters.length}`
       : "",
     state.switching,
     state.seeking,
@@ -1265,12 +1328,37 @@ function installDelegates(): void {
     if (hit("#ham-down")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, -1));
     if (hit("#ham-up")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, 1));
     if (hit("#ham-go")) return hamManualGo();
+    if (hit("#rp-add-toggle")) return setState({ rpAddOpen: true });
+    if (hit("#rp-add-cancel")) return setState({ rpAddOpen: false });
+    if (hit("#rp-add-save")) return saveManualRepeater();
+
+    const rpDel = t.closest<HTMLElement>("[data-rpdel]");
+    if (rpDel) {
+      e.stopPropagation();
+      return deleteManualRepeater(rpDel.dataset.rpdel!);
+    }
+    const rpRow = t.closest<HTMLButtonElement>(".repeater");
+    if (rpRow) {
+      const rp = state.repeaters.find((x) => x.id === rpRow.dataset.rpid);
+      if (rp) void tuneRepeater(rp);
+      return;
+    }
+
+    const hamView = t.closest<HTMLButtonElement>("[data-hamview]");
+    if (hamView) {
+      const v = hamView.dataset.hamview === "repeater" ? "repeater" : "simplex";
+      localStorage.setItem("lanline.hamView", v);
+      setState({ hamView: v });
+      if (v === "repeater") void rebuildRepeaterList();
+      return;
+    }
 
     const hamTab = t.closest<HTMLButtonElement>("[data-hamband]");
     if (hamTab) {
       const b = hamBand(hamTab.dataset.hamband!);
       localStorage.setItem("lanline.hamBand", b.id);
       setState({ hamBand: b.id });
+      if (state.hamView === "repeater") void rebuildRepeaterList(b.id);
       return void tuneFrequency(b.defaultHz);
     }
 
@@ -1662,7 +1750,7 @@ function hamWizardHtml(): string {
 
   // Prefixed with "±" in the copy, so show the magnitude only.
   const offKHz = Math.abs(band.repeaterOffsetHz) / 1e3;
-  const offsetLabel =
+  const bandOffsetLabel =
     offKHz >= 1000 ? `${(offKHz / 1000).toFixed(offKHz % 1000 ? 1 : 0)} MHz` : `${offKHz} kHz`;
 
   const cfgTone = Number(r.mode_params.ctcss_hz ?? 0);
@@ -1682,7 +1770,7 @@ function hamWizardHtml(): string {
       <p class="note" style="margin:2px 0 10px">
         Open to <strong>all U.S. license classes</strong> (Technician and up) for FM
         voice — you hold Amateur Extra (KZ4AZ). Repeater offset on this band is
-        conventionally <strong>±${offsetLabel}</strong>. Receive-only for now:
+        conventionally <strong>±${bandOffsetLabel}</strong>. Receive-only for now:
         repeater input/tone TX comes in a later build. The band-plan slices
         below are the <strong>voluntary ARRL plan</strong>, not FCC sub-band
         rules — local coordinators refine them.
@@ -1694,8 +1782,13 @@ function hamWizardHtml(): string {
           : ""
       }
 
-      <h3 class="ham-sub">Simplex &amp; calling</h3>
-      <div class="stations">${simplexRows}</div>
+      <div class="tabs" style="margin:6px 0 0">
+        <button class="tab${state.hamView === "simplex" ? " on" : ""}" data-hamview="simplex">Simplex</button>
+        <button class="tab${state.hamView === "repeater" ? " on" : ""}" data-hamview="repeater">Repeaters</button>
+      </div>
+      ${state.hamView === "repeater" ? hamRepeaterSection(band.id) : `
+        <h3 class="ham-sub">Simplex &amp; calling</h3>
+        <div class="stations">${simplexRows}</div>`}
 
       <h3 class="ham-sub">Manual tune</h3>
       <div class="dial">
@@ -1725,6 +1818,157 @@ function hamWizardHtml(): string {
       <h3 class="ham-sub">Band plan (voluntary)</h3>
       <div class="ham-plan">${planRows}</div>
     </section>`;
+}
+
+const RP_OFFSETS: [string, number][] = [
+  ["−600 kHz", -600_000],
+  ["+600 kHz", 600_000],
+  ["−1 MHz", -1_000_000],
+  ["−1.6 MHz", -1_600_000],
+  ["−5 MHz", -5_000_000],
+  ["+5 MHz", 5_000_000],
+  ["−12 MHz", -12_000_000],
+  ["−25 MHz", -25_000_000],
+  ["simplex (0)", 0],
+];
+
+function toneSelect(id: string, sel: number): string {
+  const opts = [
+    `<option value="0"${sel === 0 ? " selected" : ""}>none</option>`,
+    ...CTCSS_TONES.map(
+      (t) => `<option value="${t}"${Math.abs(t - sel) < 0.05 ? " selected" : ""}>${t.toFixed(1)}</option>`,
+    ),
+  ].join("");
+  return `<select id="${id}">${opts}</select>`;
+}
+
+function repeaterRow(rp: NearRepeater, tunedHz: number): string {
+  const meta = [
+    offsetLabel(rp.offset_hz),
+    rp.tone_hz ? `T ${rp.tone_hz.toFixed(1)}` : null,
+    rp.tsq_hz ? `TSQ ${rp.tsq_hz.toFixed(1)}` : null,
+    rp.place || null,
+    rp.distance_mi != null ? `${rp.distance_mi} mi` : null,
+    rp.open ? null : "closed",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<button class="station repeater${rp.output_hz === tunedHz ? " tuned" : ""}"
+      data-rpid="${esc(rp.id)}" data-hz="${rp.output_hz}" data-label="${esc(rp.call)}">
+    <span class="s-call">${esc(rp.call)}${rp.manual ? " ✎" : ""}</span>
+    <span class="s-site">${(rp.output_hz / 1e6).toFixed(4)} MHz</span>
+    <span class="s-meta">${esc(meta)}</span>
+    ${rp.manual ? `<span class="rp-del" data-rpdel="${esc(rp.id)}" title="remove">✕</span>` : ""}
+  </button>`;
+}
+
+function hamRepeaterSection(bandId: string): string {
+  const list = state.repeaters;
+  const tunedHz = state.radio!.frequency_hz;
+  const rows = list.length
+    ? list.map((rp) => repeaterRow(rp, tunedHz)).join("")
+    : `<p class="note" style="margin:8px 0">No repeaters listed for this band.${
+        state.loc ? "" : " Set your location above to sort by distance."
+      } Add one below, or widen the bundled region with <code>scripts/fetch-repeaters.mjs</code>.</p>`;
+
+  const addForm = state.rpAddOpen
+    ? `<div class="rp-add">
+        <div class="rp-add-grid">
+          <label>Call <input id="rp-call" type="text" autocapitalize="characters" placeholder="W4XYZ" /></label>
+          <label>Output MHz <input id="rp-output" type="text" inputmode="decimal" placeholder="146.940" /></label>
+          <label>Offset <select id="rp-offset">${RP_OFFSETS.map(
+            ([lbl, v]) => `<option value="${v}">${lbl}</option>`,
+          ).join("")}</select></label>
+          <label>Uplink tone ${toneSelect("rp-tone", 0)}</label>
+          <label>Output tone ${toneSelect("rp-tsq", 0)}</label>
+          <label>Place <input id="rp-place" type="text" placeholder="Gainesville, FL" /></label>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:8px">
+          <button id="rp-add-save">Save repeater</button>
+          <button id="rp-add-cancel" class="secondary">Cancel</button>
+        </div>
+      </div>`
+    : `<button id="rp-add-toggle" class="secondary" style="margin-top:10px">+ Add repeater</button>`;
+
+  return `
+    <h3 class="ham-sub">Repeaters — ${esc(bandId)}</h3>
+    <p class="note" style="margin:4px 0 0">Tapping a repeater tunes its output and,
+    if it transmits a tone, sets that as your receive tone squelch. Offset and
+    uplink tone are stored for transmit (a later build).</p>
+    <div class="stations">${rows}</div>
+    ${addForm}`;
+}
+
+/** Tune a repeater's output frequency and apply its downlink tone (if any)
+ *  as RX tone squelch. Remembers the repeater so the future TX path has its
+ *  input frequency + uplink tone. */
+async function tuneRepeater(rp: Repeater): Promise<void> {
+  if (!state.client || !state.radio) return;
+  const band = hamBandContaining(rp.output_hz);
+  if (band && band.id !== state.hamBand) {
+    localStorage.setItem("lanline.hamBand", band.id);
+    setState({ hamBand: band.id });
+  }
+  try {
+    let radio = await state.client.patchRadio({
+      frequency_hz: rp.output_hz,
+      mode_params: { ctcss_hz: rp.tsq_hz || 0, ctcss_squelch: 1 },
+    });
+    localStorage.setItem(freqKey("ham"), String(rp.output_hz));
+    if (!radio.running) radio = await state.client.startRadio();
+    setState({ radio, activeRepeater: rp });
+    if (state.audio && state.audioState === "idle") void startAudio();
+    logLine(
+      `repeater ${rp.call} · ${(rp.output_hz / 1e6).toFixed(4)} ${offsetLabel(rp.offset_hz)}` +
+        (rp.tsq_hz ? ` · RX tone ${rp.tsq_hz.toFixed(1)}` : ""),
+    );
+  } catch (e) {
+    logLine(`repeater tune failed — ${(e as ApiError).message}`);
+  }
+}
+
+function saveManualRepeater(): void {
+  const g = <T extends HTMLElement>(id: string) => panels.querySelector<T>(id);
+  const call = (g<HTMLInputElement>("#rp-call")?.value ?? "").trim().toUpperCase();
+  const outMhz = parseFloat(g<HTMLInputElement>("#rp-output")?.value ?? "");
+  if (!call || !Number.isFinite(outMhz)) {
+    logLine("add repeater — need a call sign and output frequency");
+    return;
+  }
+  const output_hz = Math.round(outMhz * 1e6);
+  const band = hamBandContaining(output_hz);
+  if (!band) {
+    logLine("add repeater — output frequency isn't in an amateur band");
+    return;
+  }
+  const offRaw = g<HTMLSelectElement>("#rp-offset")?.value;
+  const offset_hz = offRaw != null && offRaw !== "" ? Number(offRaw) : conventionalOffsetHz(output_hz);
+  const rp: Repeater = {
+    id: `m-${call}-${output_hz}`,
+    call,
+    output_hz,
+    offset_hz,
+    tone_hz: Number(g<HTMLSelectElement>("#rp-tone")?.value ?? 0),
+    tsq_hz: Number(g<HTMLSelectElement>("#rp-tsq")?.value ?? 0),
+    lat: state.loc?.lat ?? 0,
+    lon: state.loc?.lon ?? 0,
+    place: (g<HTMLInputElement>("#rp-place")?.value ?? "").trim(),
+    band: band.id,
+    open: true,
+    manual: true,
+  };
+  const manualRepeaters = [...state.manualRepeaters.filter((x) => x.id !== rp.id), rp];
+  localStorage.setItem(RP_MANUAL_KEY, JSON.stringify(manualRepeaters));
+  setState({ manualRepeaters, rpAddOpen: false });
+  logLine(`saved repeater ${call} ${(output_hz / 1e6).toFixed(4)}`);
+  void rebuildRepeaterList();
+}
+
+function deleteManualRepeater(id: string): void {
+  const manualRepeaters = state.manualRepeaters.filter((x) => x.id !== id);
+  localStorage.setItem(RP_MANUAL_KEY, JSON.stringify(manualRepeaters));
+  setState({ manualRepeaters });
+  void rebuildRepeaterList();
 }
 
 async function applyHamCtcss(): Promise<void> {
@@ -1764,6 +2008,7 @@ function hamManualGo(): void {
   if (band.id !== state.hamBand) {
     localStorage.setItem("lanline.hamBand", band.id);
     setState({ hamBand: band.id });
+    if (state.hamView === "repeater") void rebuildRepeaterList(band.id);
   }
   void tuneFrequency(Math.min(band.hiHz, Math.max(band.loHz, want)));
 }
@@ -2273,6 +2518,12 @@ function nowPlayingInner(): string {
   }
 
   const ident = tunedStationLabel();
+  const rp = r.mode === "ham" && state.activeRepeater?.output_hz === r.frequency_hz ? state.activeRepeater : null;
+  const rpNote = rp
+    ? `via ${rp.call} · input ${((rp.output_hz + rp.offset_hz) / 1e6).toFixed(4)} (${offsetLabel(rp.offset_hz)})` +
+      (rp.tone_hz ? ` · uplink ${rp.tone_hz.toFixed(1)} Hz` : "") +
+      (rp.place ? ` · ${rp.place}` : "")
+    : null;
   const canSeek = r.mode === "wbfm" || r.mode === "nbfm" || r.mode === "am" || r.mode === "frs";
   return `
     <h2>Now playing</h2>
@@ -2281,7 +2532,7 @@ function nowPlayingInner(): string {
       <span class="freq">${freqLabel(r.mode, r.frequency_hz)}</span>
       <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "running" : "stopped"}</span>
     </div>
-    ${ident ? `<p class="note" style="margin:0 0 12px">${esc(ident)}</p>` : ""}
+    ${rpNote ? `<p class="note" style="margin:0 0 12px">${esc(rpNote)}</p>` : ident ? `<p class="note" style="margin:0 0 12px">${esc(ident)}</p>` : ""}
     <div class="grid">
       ${kv("Device", st?.device_status ?? "—")}
       ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}

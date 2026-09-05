@@ -14,6 +14,7 @@ const NWR_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/nwr-station
 const FM_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/fm-stations.json"));
 const AM_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/am-stations.json"));
 const APT_TLE_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/apt-tle.json"));
+const REPEATERS_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/repeaters.json"));
 
 /// `true` when a real bundle was embedded (vs. the build-time placeholder).
 pub fn bundled() -> bool {
@@ -38,6 +39,10 @@ pub async fn am_stations() -> Response {
 
 pub async fn apt_tle() -> Response {
     json(APT_TLE_JSON)
+}
+
+pub async fn repeaters() -> Response {
+    json(REPEATERS_JSON)
 }
 
 fn json(body: &'static str) -> Response {
