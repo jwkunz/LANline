@@ -1,6 +1,6 @@
 import "./style.css";
 import { ApiError, Client, normalizeBase } from "./api";
-import { openRadioOptions } from "./radio-options";
+import { openRadioOptions, radioOptionsOpen } from "./radio-options";
 import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { parseLatLon, type Located } from "./geo";
@@ -1139,6 +1139,36 @@ function installDelegates(): void {
   document.addEventListener("pointercancel", () => {
     if (state.pttHeld) void pttUp();
   });
+
+  // Spacebar mirrors the "Hold to talk" button — hold to key, release to
+  // stop. Ignored while typing in a field, while the Radio options modal is
+  // open, and unless FRS PTT is actually available.
+  const pttHotkeyOk = (t: EventTarget | null): boolean => {
+    if (
+      state.radio?.mode !== "frs" ||
+      !state.radio.running ||
+      !state.server?.capabilities.includes("ptt") ||
+      radioOptionsOpen()
+    ) {
+      return false;
+    }
+    const el = t as HTMLElement | null;
+    return !el || !(el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  };
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space" || e.repeat || !pttHotkeyOk(e.target)) return;
+    e.preventDefault();
+    void pttDown();
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.code !== "Space" || !state.pttHeld) return;
+    e.preventDefault();
+    void pttUp();
+  });
+  // Held space + tab-away would otherwise strand a keyed transmission.
+  window.addEventListener("blur", () => {
+    if (state.pttHeld) void pttUp();
+  });
 }
 
 function fmManualGo(): void {
@@ -1950,7 +1980,7 @@ function pttInner(st: RadioStatus | null): string {
           keyed
             ? "Server confirms: on the air."
             : hasMic
-              ? "Mic ready — hold the button to transmit."
+              ? "Mic ready — hold the button (or the spacebar) to transmit."
               : "No mic granted — holding will key up but transmit silence."
         }
       </p>
