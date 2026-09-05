@@ -1,5 +1,6 @@
 import "./style.css";
 import { ApiError, Client, normalizeBase } from "./api";
+import { openRadioOptions } from "./radio-options";
 import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { parseLatLon, type Located } from "./geo";
@@ -549,6 +550,14 @@ async function toggleRadio(): Promise<void> {
   }
 }
 
+async function openRadioOptionsPanel(): Promise<void> {
+  if (!state.client || !state.radio) return;
+  await openRadioOptions(state.client, state.radio, (updated) => {
+    setState({ radio: updated });
+    logLine("radio options applied");
+  });
+}
+
 async function toggleAudio(): Promise<void> {
   const audio = state.audio;
   if (!audio) return;
@@ -1063,6 +1072,7 @@ function installDelegates(): void {
     const mode = t.closest<HTMLButtonElement>(".mode-btn");
     if (mode) return void switchMode(mode.dataset.mode!);
     if (hit("#radio-toggle")) return void toggleRadio();
+    if (hit("#radio-options")) return void openRadioOptionsPanel();
     if (hit("#audio-toggle")) return void toggleAudio();
     if (hit("#loc-find")) return findFromInput();
     if (hit("#loc-me")) return useMyLocation();
@@ -1833,10 +1843,11 @@ function nowPlayingInner(): string {
         ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
         ${kv("Reference", a?.receiver ? `${a.receiver[0].toFixed(3)}, ${a.receiver[1].toFixed(3)}` : "not set")}
       </div>
-      <div style="margin-top:14px">
+      <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap">
         <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
           ${r.running ? "Stop receiver" : "Start receiver"}
         </button>
+        <button id="radio-options" class="secondary">⚙ Radio options</button>
       </div>`;
   }
 
@@ -1857,10 +1868,11 @@ function nowPlayingInner(): string {
         ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
         ${kv("Reference", a?.receiver ? `${a.receiver[0].toFixed(3)}, ${a.receiver[1].toFixed(3)}` : "not set")}
       </div>
-      <div style="margin-top:14px">
+      <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap">
         <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
           ${r.running ? "Stop receiver" : "Start receiver"}
         </button>
+        <button id="radio-options" class="secondary">⚙ Radio options</button>
       </div>`;
   }
 
@@ -1880,10 +1892,11 @@ function nowPlayingInner(): string {
         ${kv("Sync quality", a && a.lines > 0 ? a.sync_quality.toFixed(1) : "—")}
         ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
       </div>
-      <div style="margin-top:14px">
+      <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap">
         <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
           ${r.running ? "Stop receiver" : "Start receiver"}
         </button>
+        <button id="radio-options" class="secondary">⚙ Radio options</button>
       </div>`;
   }
 
@@ -1913,6 +1926,7 @@ function nowPlayingInner(): string {
              <button id="seek-up" class="secondary" ${state.seeking ? "disabled" : ""}>Seek ▶▶</button>`
           : ""
       }
+      <button id="radio-options" class="secondary">⚙ Radio options</button>
       ${state.seeking ? `<span class="note" style="align-self:center">seeking…</span>` : ""}
     </div>
     ${r.mode === "frs" && r.running && state.server?.capabilities.includes("ptt") ? pttInner(st) : ""}`;

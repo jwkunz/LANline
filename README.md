@@ -218,6 +218,13 @@ The server serves it. With `lanline-server` running, open **`http://lanline.loca
 origin automatically, no host to type. The Android app finds the server over the
 LAN on its own.
 
+**⚙ Radio options** (in the "Now playing" card) opens a panel over the raw
+SoapySDR knobs for the selected device — PPM correction, per-element gain
+(LNA / VGA / AMP on a HackRF), analog bandwidth, sample rate, antenna,
+DC-offset mode, and free-form `writeSetting` key/values. Ranges come from the
+device itself; frequency and gain apply live, the rest briefly restart the
+receiver.
+
 To iterate on the web client itself:
 
 ```sh

@@ -708,11 +708,15 @@ Partial, deep-merge update of any subset of the `GET` body (except read-only
   Violations → `422 invalid_parameter` with the offending `field` and the
   allowed values in `details`. Nothing is applied if any field is invalid.
 - Valid changes are **hot-applied** to a running pipeline without an audio
-  gap where possible: `frequency_hz`, the gains, and the NBFM filter
+  gap where possible: `frequency_hz`, the gains, and the NBFM/AM filter
   `mode_params` (deviation, bandwidth, de-emphasis, audio LPF, squelch) go
   live. Changing `mode`, `sample_rate_hz`, `channel`, `antenna`,
-  `lo_offset_hz`, `frame_ms` or `opus_bitrate_bps` bounces the DSP chain
-  (brief audio gap; the WebRTC session is preserved).
+  `lo_offset_hz`, `bandwidth_hz`, `freq_correction_ppm`,
+  `dc_offset_correction`, `iq_balance_correction`, `device_settings`,
+  `frame_ms` or `opus_bitrate_bps` bounces the DSP chain (brief audio gap;
+  the WebRTC session is preserved). The web client's **Radio options** panel
+  (⚙ in "Now playing") is a form over this: it reads
+  `GET /api/v1/device`'s ranges and PATCHes only the controls you touch.
 - Switching `mode` replaces `mode_params` with that mode's defaults unless the
   request also supplies `mode_params`.
 - `503 device_unavailable` if the change needs the SDR and none is ready

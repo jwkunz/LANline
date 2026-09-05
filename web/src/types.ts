@@ -99,9 +99,33 @@ export interface DeviceInfo {
     antennas: string[];
     frequency_ranges_hz: Range[];
     sample_rate_ranges_hz: Range[];
+    bandwidth_ranges_hz: Range[];
     gain_elements: { name: string; range_db: Range }[];
+    overall_gain_range_db: Range;
     has_agc: boolean;
+    has_dc_offset_mode: boolean;
+    has_iq_balance_mode: boolean;
+    has_frequency_correction: boolean;
+    sensors: string[];
+    setting_info: unknown[];
   };
+}
+
+/** `radio.tuner` — a loose bag the Radio Options panel reads and writes. */
+export interface TunerConfig {
+  device_id: string | null;
+  channel: number;
+  antenna: string | null;
+  sample_rate_hz: number;
+  bandwidth_hz: number | null;
+  lo_offset_hz: number;
+  gain_mode: "manual" | "agc";
+  gain_db: number | null;
+  gain_elements_db: Record<string, number>;
+  freq_correction_ppm: number;
+  dc_offset_correction: boolean;
+  iq_balance_correction: boolean;
+  device_settings: Record<string, string>;
 }
 
 export interface ModeInfo {

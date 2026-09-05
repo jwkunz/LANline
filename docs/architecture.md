@@ -417,6 +417,33 @@ host inherits the page's scheme. The Android WebView adds an
 address or a `*.local` name (the only things this app ever connects to),
 rejecting anything routable.
 
+### Radio options panel
+
+`web/src/radio-options.ts` is a modal (⚙ in "Now playing") over the raw
+SoapySDR tuner knobs — PPM correction, per-element gain sliders, analog
+bandwidth, sample rate, antenna, DC-offset mode, and free-form
+`device_settings` key/values. It reads the selected device's real ranges
+from `GET /api/v1/device` (`registry::probe` — `listGains` + each
+`getGainElementRange`, `getBandwidthRange`, `getSampleRateRange`,
+`listAntennas`, `hasDCOffsetMode`, …) and PATCHes `/api/v1/radio` with only
+the controls the user actually touched.
+
+Most of this already worked — `PATCH /radio` has always accepted the full
+`tuner` object and `apply_patch` hot-applied frequency and gain. Two gaps got
+filled for the panel to be honest: `run_sdr` now actually calls
+`setBandwidth` (and `setDCOffsetMode` in both states, not just "on"), and
+`apply_patch` bounces the pipeline for `bandwidth_hz` / `freq_correction_ppm`
+/ `dc_offset_correction` / `device_settings` changes — they're applied only
+at stream open, so a live edit needs a restart. The genuinely sweepable
+knobs (frequency, gain) still go live with no gap.
+
+Not done: `device.rx.setting_info` is still empty — enumerating a driver's
+settings with their types/ranges/descriptions needs a raw
+`SoapySDRDevice_getSettingInfo` call the `soapysdr` crate doesn't expose, so
+the panel offers `device_settings` as free-text key/value rows for now.
+IQ-balance mode is read (`has_iq_balance_mode`) but not written — the crate
+only exposes `setIQBalance(complex)`, not the automatic-mode toggle.
+
 ### HackRF frequency calibration
 
 `tuner.freq_correction_ppm` (in the radio config since phase 1, but never

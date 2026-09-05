@@ -359,3 +359,121 @@ canvas.apt-canvas {
   overflow-y: auto;
   white-space: pre-wrap;
 }
+
+/* --- Radio options modal ------------------------------------------- */
+.ro-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  z-index: 100;
+  overflow-y: auto;
+}
+.ro-modal {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 460px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.ro-modal-head {
+  padding: 16px 18px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.ro-modal-head h2 {
+  margin: 0 0 2px;
+  font-size: 16px;
+}
+.ro-modal-body {
+  padding: 6px 18px 14px;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+.ro-modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+}
+.ro-group {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.ro-group:last-child {
+  border-bottom: 0;
+}
+.ro-label {
+  display: block;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.ro-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ro-row input[type="number"] {
+  flex: 1;
+}
+.ro-unit {
+  color: var(--muted);
+  font-size: 13px;
+}
+.ro-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.ro-check input {
+  width: auto;
+}
+.ro-slider {
+  margin-bottom: 12px;
+}
+.ro-slider-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 2px;
+}
+.ro-slider input[type="range"] {
+  width: 100%;
+}
+.ro-slider-scale {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+}
+.ro-modal select,
+.ro-modal input[type="number"],
+.ro-modal input[type="text"] {
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  width: 100%;
+}
+.ro-kv {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.ro-kv .ro-kv-k {
+  flex: 0 0 40%;
+}
+.ro-kv .ro-kv-del {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}

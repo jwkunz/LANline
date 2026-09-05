@@ -414,6 +414,14 @@ impl RadioManager {
             || old.tuner.channel != new.tuner.channel
             || old.tuner.antenna != new.tuner.antenna
             || f(old.tuner.lo_offset_hz, new.tuner.lo_offset_hz)
+            // Applied only at pipeline open (see `run_sdr`), so a live change
+            // needs a bounce. These are set-and-leave knobs, not things you
+            // sweep — the sweepable ones (frequency, gain) hot-apply below.
+            || old.tuner.bandwidth_hz != new.tuner.bandwidth_hz
+            || (old.tuner.freq_correction_ppm - new.tuner.freq_correction_ppm).abs() > 1e-9
+            || old.tuner.dc_offset_correction != new.tuner.dc_offset_correction
+            || old.tuner.iq_balance_correction != new.tuner.iq_balance_correction
+            || old.tuner.device_settings != new.tuner.device_settings
             || old.audio.frame_ms != new.audio.frame_ms
             || old.audio.sample_rate_hz != new.audio.sample_rate_hz
             || old.audio.opus_bitrate_bps != new.audio.opus_bitrate_bps
@@ -581,6 +589,9 @@ struct SdrParams {
     freq_hz: f64,
     channel: usize,
     antenna: Option<String>,
+    /// Analog filter bandwidth (`SoapySDRDevice_setBandwidth`). `None` leaves
+    /// the driver default.
+    bandwidth_hz: Option<f64>,
     agc: bool,
     gain_overall_db: Option<f64>,
     gain_elements_db: Vec<(String, f64)>,
@@ -634,6 +645,7 @@ impl PipelineParams {
                     freq_hz: cfg.frequency_hz as f64,
                     channel: cfg.tuner.channel,
                     antenna: cfg.tuner.antenna.clone(),
+                    bandwidth_hz: cfg.tuner.bandwidth_hz,
                     agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
                     gain_overall_db: cfg.tuner.gain_db,
                     gain_elements_db: cfg
@@ -977,6 +989,9 @@ fn run_sdr(
     if let Some(ant) = &sp.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
     }
+    if let Some(bw) = sp.bandwidth_hz {
+        log_set("bandwidth", dev.set_bandwidth(dir, ch, bw));
+    }
     if sp.agc {
         log_set("agc", dev.set_gain_mode(dir, ch, true));
     } else {
@@ -988,9 +1003,7 @@ fn run_sdr(
             log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
         }
     }
-    if sp.dc_offset {
-        let _ = dev.set_dc_offset_mode(dir, ch, true);
-    }
+    log_set("dc_offset_mode", dev.set_dc_offset_mode(dir, ch, sp.dc_offset));
     for (k, v) in &sp.settings {
         log_set("setting", dev.write_setting(k.as_str(), v.as_str()));
     }
