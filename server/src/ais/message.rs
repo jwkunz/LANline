@@ -200,7 +200,7 @@ impl AisMessage {
         let mmsi = b.u(8, 30) as u32;
 
         match msg_type {
-            1 | 2 | 3 => {
+            1..=3 => {
                 if b.len() < 168 {
                     return None;
                 }

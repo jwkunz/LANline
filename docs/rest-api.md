@@ -311,10 +311,11 @@ the client uses to render controls and the server uses to validate
   {
     "id": "frs",
     "name": "FRS (Family Radio Service, 462/467 MHz)",
-    "tx_capable": false,
+    "tx_capable": true,
     "params": {
-      "deviation_hz":  { "type": "number", "default": 2500,  "min": 1000, "max": 5000,  "unit": "Hz" },
-      "channel_bw_hz": { "type": "number", "default": 12500, "min": 8000, "max": 16000, "unit": "Hz" },
+      "deviation_hz":  { "type": "number", "default": 4000,  "min": 1000, "max": 5000,  "unit": "Hz" },
+      "channel_bw_hz": { "type": "number", "default": 14000, "min": 8000, "max": 16000, "unit": "Hz" },
+      "tx_mic_gain":   { "type": "number", "default": 2.5, "min": 1.0, "max": 32.0, "unit": "x" },
       "deemphasis_us": { "type": "number", "default": 0, "enum": [0, 50, 75], "unit": "us" },
       "audio_lpf_hz":  { "type": "number", "default": 3000,  "min": 1000, "max": 4000,  "unit": "Hz" },
       "squelch_db":    { "type": "number", "default": -80, "min": -120, "max": 0, "unit": "dBFS" },
@@ -380,13 +381,16 @@ mediumwave/shortwave broadcast (~10 kHz channels). Whether the attached SDR
 can actually pull in AM depends on its LF/MF front end — see the note in
 [architecture.md](architecture.md#am-and-hackrf-mfLF-sensitivity).
 
-`frs` is the exact same `FmChain` as `nbfm`/`wbfm` — no new DSP, just
-narrower defaults (2.5 kHz deviation, 12.5 kHz channel filter) matching FRS's
-Part 95 emission mask, and a fixed 22-channel frequency table instead of a
-continuous tunable band (see
+`frs` receives on the exact same `FmChain` as `nbfm`/`wbfm` — no new DSP —
+plus a fixed 22-channel frequency table instead of a continuous tunable
+band. Deviation/channel-bandwidth defaults (4000/14000 Hz) are wider than
+FRS's Part 95 narrowband mask (2.5 kHz/12.5 kHz); live-tuned against a real
+handheld after the tighter, legally-narrowband defaults sounded
+under-modulated on receive. It also supports push-to-talk transmit — see
 [architecture.md](architecture.md#frs-and-the-transmit-question) for the
-channel plan and why this is receive-only for now — transmit needs FCC
-Part 95 type-accepted equipment, which a general-purpose SDR isn't).
+channel plan, the PTT endpoints (`/radio/tx/key`, `/radio/tx/unkey`), and
+the FCC Part 95 equipment-certification caveat that applies regardless of
+what this does or doesn't transmit.
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end
@@ -738,7 +742,8 @@ Live telemetry, safe to poll at ~1 Hz.
     "squelch_open": true,
     "audio_level_dbfs": -18.0,
     "sample_overruns": 0,
-    "pipeline_latency_ms": 62
+    "pipeline_latency_ms": 62,
+    "tx_keyed": false
   },
   "audio": {
     "encoder": "opus",
@@ -754,6 +759,46 @@ Live telemetry, safe to poll at ~1 Hz.
 
 In `debug_tone` mode the `dsp` block reports synthetic values
 (`rssi_dbfs: null`, `squelch_open: true`).
+
+### `POST /api/v1/radio/tx/key`
+
+Push-to-talk: begin transmitting live mic audio streamed up over the
+session's WebRTC connection (silence if none has arrived yet). Body
+optional: `{"gain_db": 10}` overrides the default of `0` (HackRF's TX chain
+runs 0–61 dB across its VGA + AMP elements; deliberately conservative — this
+is real RF, not a simulation).
+
+Audio conditioning comes from the current `frs` `mode_params`, read at
+key-up: `deviation_hz` sets the peak FM deviation, and `tx_mic_gain` (a
+linear multiplier, default `2.5`) boosts the decoded mic PCM before
+modulation — getUserMedia audio, especially from an Android WebView, arrives
+well below full scale, and without the lift the far radio is barely audible.
+The gained signal is hard-limited to full scale, so peak deviation stays
+capped at `deviation_hz` however hot `tx_mic_gain` is set. Change either with
+`PATCH /api/v1/radio` and it takes effect on the next key-up.
+
+Requires, in order: `--enable-tx` on the server (else `403 forbidden`
+regardless of anything else below), `mode: "frs"` (else `400 bad_request`),
+the radio already running (else `409 conflict`), and a tx-capable device
+(else `503 device_unavailable`).
+
+Response:
+```json
+{ "keyed": true, "gain_db": 10, "mic_gain": 2.5 }
+```
+
+Auto-unkeys after a hard 10s server-side cap regardless of whether
+`/radio/tx/unkey` is ever called — a lost `unkey` request (dropped
+connection, crashed client) can't leave the transmitter keyed indefinitely.
+
+### `POST /api/v1/radio/tx/unkey`
+
+Ends the current transmission early. A no-op (not an error) if nothing is
+currently keyed — always safe to call on PTT release.
+
+```json
+{ "keyed": false }
+```
 
 ---
 
@@ -891,17 +936,22 @@ Close the peer connection, keep the session. `204 No Content`.
 
 ## Reserved for phase 2
 
-Defined now so clients and docs are stable; each returns
-`501 not_implemented`.
+Push-to-talk transmit shipped (`frs` mode only) — see
+[`POST /api/v1/radio/tx/key`](#post-apiv1radiotxkey) above and
+[architecture.md](architecture.md#frs-and-the-transmit-question) — in a
+simpler shape than originally sketched here: no separate transmit-config
+resource (TX gain is passed directly to `/radio/tx/key`; deviation and mic
+gain are `frs` `mode_params`, live-editable via `PATCH /api/v1/radio` and
+read at key-up; frequency is shared with the same mode's receive config) and
+no separate inbound-stream endpoint (mic audio rides the *same* session
+`POST /sessions/{id}/audio/offer` connection bidirectionally — see
+[Audio — WebRTC signaling](#audio--webrtc-signaling) — rather than a second
+one on the reserved `audio_in` port, which remains genuinely unused).
 
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /api/v1/radio/tx` | Current transmit config |
-| `PATCH /api/v1/radio/tx` | Configure transmit (mode, `frequency_hz`, `deviation_hz`, power) |
-| `POST /api/v1/radio/tx/ptt` | `{ "key": true \| false }` — push-to-talk |
-| `POST /api/v1/sessions/{id}/broadcast/offer` | WebRTC offer for an **inbound** Opus stream to be modulated and transmitted (uses the `audio_in` port) |
-| `GET /api/v1/sessions/{id}/broadcast` | Inbound stream state |
-| `DELETE /api/v1/sessions/{id}/broadcast` | Tear down the inbound stream |
+Still open: transmit isn't available in any mode besides `frs`, and there's
+no per-session control over who's allowed to key up (any authenticated
+session can call `/radio/tx/key`) — fine for this project's single-operator,
+personal-use scope, but worth flagging if that ever changes.
 
 ---
 

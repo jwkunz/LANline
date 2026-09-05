@@ -258,17 +258,126 @@ non-matching traffic; they were never a privacy mechanism against a receiver
 built to listen to everything), but it does mean this won't yet mimic a
 consumer FRS handset's tone-based squelching if that's ever wanted.
 
-This mode is receive-only, deliberately. FRS is a **Part 95 certified-
-equipment service** — a general-purpose SDR like a HackRF is not type-
-accepted for FRS transmission, so keying up on an FRS frequency with one
-isn't compliant with FCC rules regardless of power level or intent. Actual
-push-to-talk transmit (the eventual goal here) is a separate, much larger
-piece of work besides — it needs an FM *modulator* (the inverse of
-`FmChain`), half-duplex RX/TX arbitration on the SDR (a HackRF can't do both
-at once), a live microphone-audio uplink over WebRTC (the reserved
-`audio_in` port exists but nothing uses it yet), and a PTT signaling
-protocol across both clients — tracked as phase 2i in the README roadmap,
-not started.
+**The regulatory reality, stated plainly and unconditionally:** FRS is a
+Part 95 certified-equipment service — a general-purpose SDR like a HackRF
+is not type-accepted for FRS transmission, so keying up on an FRS frequency
+with one isn't compliant with FCC rules regardless of power level or
+intent. That's true of everything below. It's built anyway, at the
+explicit, informed request of this project's owner for personal,
+non-distributed use on their own equipment — not something this codebase
+decides for anyone else. Transmit is off by default (`--enable-tx`) and
+requires deliberate opt-in.
+
+#### Push-to-talk transmit
+
+`frs` is the one mode with `tx_capable: true`. `POST /api/v1/radio/tx/key`
+(see [rest-api.md](rest-api.md#post-apiv1radiotxkey)) begins a
+transmission; `POST /api/v1/radio/tx/unkey` ends it early (a hard 10s
+server-side cap ends it regardless, so a lost `unkey` request can't leave
+the transmitter keyed indefinitely). Both are gated behind `--enable-tx` +
+`frs` mode + a tx-capable device + the radio already running, checked in
+that order so the server-policy gate always answers first regardless of
+anything else.
+
+**Half-duplex hand-off.** HackRF (like most low-cost SDRs) can't RX and TX
+at once — confirmed directly against this project's own unit
+(`SoapySDRUtil --probe`: "Full-duplex: NO" on both channels). `radio::key_tx`
+owns the full hand-off inside the same pipeline thread that already owns
+the device: deactivate the RX stream, retune straight to the TX frequency
+(no LO-offset digital mixing on the way out, unlike RX — there's no DC-spike
+concern to dodge when transmitting), open and activate a TX stream, run
+until unkeyed/timed out/stopped, deactivate TX, retune back and reactivate
+RX. The caller (`run_sdr`) handles the "resume RX" half; `key_tx` handles
+everything from "stop RX" through "stop TX".
+
+**Live mic audio.** The uplink rides the *same* WebRTC connection the
+receive audio already uses (see
+[Audio — WebRTC signaling](rest-api.md#audio--webrtc-signaling)) — when
+FRS's PTT wizard has a mic stream, `web/src/audio.ts` adds it as an
+outgoing track via `RTCPeerConnection.addTrack`, which negotiates the
+connection bidirectionally by default; nothing else has to know or care
+that direction was negotiated one way or the other. Server-side,
+`media::WebrtcEngine`'s `on_track` handler decodes the incoming Opus RTP
+packets (an RTP payload *is* one Opus frame — no NALU-style depacketization
+needed) into PCM and pushes it into `radio::TxAudioSource`, a small global
+ring buffer (only one physical radio exists, so only one transmission can
+be live regardless of how many sessions are connected). `key_tx` pulls from
+it every iteration, silence-padded on underrun so a network/decode hiccup
+never stalls the TX loop, and feeds a `dsp::TxModulator` — a persistent
+phase accumulator wrapped around the same `LinearResampler` the RX side
+uses (just upsampling 48kHz→device-rate instead of decimating the other
+way) — which frequency-modulates it onto a baseband carrier. `TxModulator`
+is unit-tested by round-tripping ragged, irregularly-sized audio chunks
+(mimicking live Opus frame arrival, not one tidy buffer) back through
+`FmChain` and confirming the recovered tone survives.
+
+**A real bug this surfaced, worth recording:** the first end-to-end test
+showed the RF path working (clean keying, correct deviation on receive) but
+no audio coming through — `micStream` was simply never `null`-checked into
+existence in some real usage flows. The mic is acquired lazily, inside
+`startAudio()`, which several call sites only invoke when
+`state.audioState === "idle"` — but `AudioSession.start()` silently no-ops
+if a peer connection already exists, and pressing "Start radio" (as
+opposed to "Play", or an automatic connect-time autostart) never calls
+`startAudio()` at all. So a real session could reach PTT with a
+`RadioConfig` in `frs` mode, running, connected — and still never have
+asked for a microphone. Fixed with `ensureMicAttached()`, called at the top
+of `pttDown()` itself: if there's no mic yet, acquire one, and if a
+(recvonly) peer connection is already up, tear it down and rebuild it with
+the mic attached — a brief RX audio blip, but only the first time PTT is
+used in a session. The lesson: a feature gated behind "was some *other*
+code path called first" needs to also make itself work when that path
+wasn't taken, not just document that it should have been.
+
+**Two more, found the same way — live, against real hardware, after the code
+"should have worked":**
+
+- *Transmit ignored channel changes.* `run_sdr` takes its `SdrParams` by
+  value and immutably; the live-retune command (`PipelineCmd::Retune`) moved
+  the hardware but nothing recorded the new frequency, so `key_tx` — and the
+  RX-restore after a key — both read the stale start-of-pipeline frequency.
+  PTT on channel 5 transmitted on channel 1, and keying anywhere snapped RX
+  back to channel 1. Fixed by tracking the live frequency in a mutable local
+  in `run_sdr`, updated on every `Retune` and passed explicitly into
+  `key_tx`. This was invisible before PTT existed (nothing read the value
+  back) and only bites a mode with both a channel picker and transmit.
+
+- *Android WebView needs `MODIFY_AUDIO_SETTINGS`, not just `RECORD_AUDIO`.*
+  Chromium's `AudioManagerAndroid` refuses to open a capture device without
+  *both* permissions ("Requires MODIFY_AUDIO_SETTINGS and RECORD_AUDIO. No
+  audio device will be available for recording"), so `getUserMedia` rejected,
+  `acquireMicIfNeeded()` returned `null`, and PTT keyed up transmitting
+  silence — with no user-visible error. It "worked" when tested in a
+  standalone browser because full Chrome ships that permission itself.
+  `MODIFY_AUDIO_SETTINGS` is a normal (install-time, no-prompt) permission;
+  it's now in `client/android`'s manifest alongside `RECORD_AUDIO`.
+
+**Deviation and mic gain, live-tuned.** The catalog ships `deviation_hz: 4000`
+/ `channel_bw_hz: 14000` for `frs` — wider than FRS's Part 95 narrowband mask
+(2.5 kHz / 12.5 kHz). The legally-narrowband defaults were the first thing
+tried; on receive, a real handheld's transmission sounded weak and
+under-modulated at 2500 Hz, and 4000/14000 sounded correct. This shifts
+FRS's occupied bandwidth slightly past its nominal 12.5 kHz channel
+spacing — a real, known tradeoff (adjacent-channel splatter in a dense RF
+environment), acceptable for a personal unit talking to one specific
+handheld in relative isolation, and easy to dial back down via
+`mode_params` if that ever matters.
+
+Deviation alone wasn't enough on transmit: getUserMedia PCM (especially from
+the Android WebView) comes in far below full scale, so even at 4000 Hz peak
+deviation the *actual* swing on quiet mic audio was a few hundred Hz and the
+far radio was barely audible. `tx_mic_gain` (a `frs` mode param, default
+`2.5`) is a plain linear multiplier applied to the decoded PCM in `key_tx`
+before it reaches `TxModulator`, then hard-clamped to ±1.0 so peak deviation
+stays capped at `deviation_hz` no matter how hot the gain. It was dialled in
+by ear against a handheld — 6× clipped and sounded harsh, 1× was the
+original "too quiet", 2.5× sat right. Both `deviation_hz` and `tx_mic_gain`
+are read fresh at each key-up, so `PATCH /api/v1/radio` retunes the transmit
+audio without restarting anything.
+
+No privacy-code (CTCSS/DCS) tone gets added to the transmitted audio
+either — same reasoning as the receive side above; not implemented, not
+currently planned.
 
 ### HackRF frequency calibration
 
@@ -292,7 +401,8 @@ a ±1.0 scale) the entire time, nowhere near the expected near-zero average
 for a real voice signal, with only a small ripple riding on top of that huge
 bias. A persistent, non-oscillating discriminator bias like that means the
 receiver's effective center frequency doesn't match the real carrier — at
-this device's `deviation_hz` setting (5000), `bias × deviation_hz` gives the
+the `deviation_hz` in use for this test (5000, widened from the shipped
+default to make the bias easy to read), `bias × deviation_hz` gives the
 actual offset: **≈‑4.1 kHz**, or ≈‑8.9 ppm at 462.5625 MHz. Retuning ‑4.1 kHz
 lower dropped that bias to ≈0.02 and the level immediately started showing
 real dynamic range (long quiet stretches, sharp louder excursions) — the

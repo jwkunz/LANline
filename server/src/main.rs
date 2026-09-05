@@ -70,8 +70,17 @@ async fn main() -> Result<()> {
         }
         radio.tuner.freq_correction_ppm = config.freq_correction_ppm;
     }
-    let radio_mgr =
-        radio::RadioManager::new(radio_cfg.clone(), registry.clone(), config.dump_wav.clone());
+    let radio_mgr = radio::RadioManager::new(
+        radio_cfg.clone(),
+        registry.clone(),
+        config.dump_wav.clone(),
+        config.enable_tx,
+    );
+    if config.enable_tx {
+        tracing::warn!(
+            "transmit ENABLED (--enable-tx) — this server will key a real transmitter on request"
+        );
+    }
 
     // --- sessions + media ------------------------------------------
     let sessions = Arc::new(sessions::SessionStore::new(

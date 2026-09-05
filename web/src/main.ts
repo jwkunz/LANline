@@ -155,6 +155,7 @@ interface State {
   aptPasses: Record<string, AptPass[]> | null;
   bandTab: "nearby" | "manual";
   seeking: boolean;
+  pttHeld: boolean;
   adsb: AdsbSnapshot | null;
   ais: AisSnapshot | null;
   apt: AptStatus | null;
@@ -187,6 +188,7 @@ const state: State = {
   aptPasses: null,
   bandTab: "nearby",
   seeking: false,
+  pttHeld: false,
   adsb: null,
   ais: null,
   apt: null,
@@ -354,6 +356,13 @@ function onAction(): void {
 let connectSeq = 0;
 let connectAbort: AbortController | null = null;
 
+/** The mic stream behind FRS's PTT, when granted — muted (`track.enabled =
+ *  false`) except while actually held (see `pttDown`/`pttUp`), released
+ *  whenever audio tears down. `null` in every other mode: only `frs` ever
+ *  requests it (see `acquireMicIfNeeded`), so nothing else prompts for mic
+ *  permission at all. */
+let micStream: MediaStream | null = null;
+
 async function connect(hostRaw: string): Promise<void> {
   if (!hostRaw.trim()) {
     setState({ phase: "error", error: "enter a server host first" });
@@ -446,10 +455,38 @@ async function autoListen(): Promise<void> {
   const m = state.radio?.mode;
   if (m === "adsb" || m === "ais" || m === "apt") return; // data-only modes, no audio
   try {
-    if (state.audioState === "idle") await state.audio.start();
+    if (state.audioState === "idle") await startAudio();
   } catch (e) {
     logLine(`auto play failed — ${(e as Error).message}`);
   }
+}
+
+/** Mic permission is requested only for `frs` (the one PTT-capable mode),
+ *  and only when the server actually offers `ptt` — no point prompting for
+ *  a mic that has nowhere to go. Failure (denied, no device) degrades to
+ *  receive-only, not a hard error: normal FRS listening still works, PTT
+ *  just won't have real audio behind it (silence — see `TxAudioSource`). */
+async function acquireMicIfNeeded(): Promise<MediaStream | null> {
+  if (state.radio?.mode !== "frs" || !state.server?.capabilities.includes("ptt")) return null;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+    const track = stream.getAudioTracks()[0];
+    logLine(`mic granted — track: ${track?.label || "(no label)"}, state: ${track?.readyState}`);
+    return stream;
+  } catch (e) {
+    logLine(`mic unavailable — PTT will transmit silence (${(e as Error).message})`);
+    return null;
+  }
+}
+
+/** The one place that actually starts playback — acquires (or reuses) the
+ *  PTT mic stream first so the offer negotiates bidirectional when it
+ *  should, muted until actually held. */
+async function startAudio(): Promise<void> {
+  if (!state.audio) return;
+  if (!micStream) micStream = await acquireMicIfNeeded();
+  if (micStream) micStream.getAudioTracks().forEach((t) => (t.enabled = false));
+  await state.audio.start(micStream);
 }
 
 async function disconnect(): Promise<void> {
@@ -490,6 +527,10 @@ async function teardownAudio(): Promise<void> {
     await audio.stop().catch(() => {});
     audio.element.remove();
   }
+  if (micStream) {
+    micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
 }
 
 // --- radio / mode / tuning -------------------------------------------
@@ -514,10 +555,14 @@ async function toggleAudio(): Promise<void> {
   if (audio.state === "playing" || audio.state === "connecting") {
     await audio.stop().catch(() => {});
     state.audioStats = null;
+    if (micStream) {
+      micStream.getTracks().forEach((t) => t.stop());
+      micStream = null;
+    }
     render();
   } else {
     try {
-      await audio.start();
+      await startAudio();
     } catch (e) {
       logLine(`audio start failed — ${(e as Error).message}`);
     }
@@ -580,6 +625,14 @@ async function switchMode(id: string): Promise<void> {
 
   aptImg = null;
   aptImageFetchedAt = 0;
+  // Release any PTT mic from the mode being left — startAudio() only
+  // re-acquires when the *new* mode actually needs one (frs), and a stale
+  // stream here would otherwise carry into a mode that has no business
+  // being bidirectional.
+  if (micStream) {
+    micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+  }
   try {
     let radio = await state.client.patchRadio(patch);
     setState({ radio, adsb: null, ais: null, apt: null, scopeSel: null });
@@ -588,8 +641,7 @@ async function switchMode(id: string): Promise<void> {
     if (radio.running || NATIVE) {
       if (!radio.running) radio = await state.client.startRadio();
       setState({ radio });
-      if (!fixedFreq && state.audio && state.audioState === "idle")
-        void state.audio.start();
+      if (!fixedFreq && state.audio && state.audioState === "idle") void startAudio();
     }
   } catch (e) {
     const err = e as ApiError;
@@ -617,7 +669,7 @@ async function tuneFrequency(hz: number, label?: string): Promise<void> {
     localStorage.setItem(freqKey(radio.mode), String(freq));
     if (!radio.running) radio = await state.client.startRadio();
     setState({ radio });
-    if (state.audio && state.audioState === "idle") void state.audio.start();
+    if (state.audio && state.audioState === "idle") void startAudio();
     logLine(`tuned ${label ?? freqLabel(radio.mode, freq)}`);
   } catch (e) {
     logLine(`tune failed — ${(e as ApiError).message}`);
@@ -671,6 +723,74 @@ async function seek(dir: 1 | -1): Promise<void> {
     logLine(`seek failed — ${(e as ApiError).message}`);
   } finally {
     setState({ seeking: false });
+  }
+}
+
+// --- push-to-talk (FRS transmit, live mic audio — see docs/architecture.md) -
+
+// Slightly under the server's own hard cap (10s) so the client always
+// releases first and shows an accurate "released" state rather than racing
+// the server's own auto-unkey.
+const PTT_MAX_HOLD_MS = 8_000;
+let pttTimer: number | undefined;
+
+/** PTT can be the very first thing to touch audio in a session — e.g. the
+ *  user pressed "Start radio" rather than "Play", which never calls
+ *  `startAudio()` at all, so no mic was ever requested. Make sure one
+ *  actually gets attached right here rather than assuming some earlier
+ *  code path already did it. A pre-existing (recvonly) connection can't
+ *  retroactively gain a track, so if one's already up, rebuild it with the
+ *  mic from the start — a brief RX audio blip, but only the first time PTT
+ *  is used in a session. */
+async function ensureMicAttached(): Promise<void> {
+  if (!state.audio || micStream) return;
+  const stream = await acquireMicIfNeeded();
+  if (!stream) return; // denied/unavailable — PTT will transmit silence
+  micStream = stream;
+  micStream.getAudioTracks().forEach((t) => (t.enabled = false));
+  await state.audio.stop().catch(() => {});
+  await state.audio.start(micStream);
+}
+
+async function pttDown(): Promise<void> {
+  if (!state.client || state.pttHeld) return;
+  await ensureMicAttached();
+  setState({ pttHeld: true });
+  // Unmute before (not after) keying so the first syllable isn't clipped
+  // waiting on the key round-trip.
+  micStream?.getAudioTracks().forEach((t) => (t.enabled = true));
+  try {
+    const r = await state.client.keyTx();
+    logLine(
+      micStream
+        ? `PTT keyed — mic live, ${r.gain_db} dB`
+        : `PTT keyed — no mic granted, transmitting silence (${r.gain_db} dB)`,
+    );
+    pttTimer = window.setTimeout(() => {
+      logLine("PTT auto-released (max hold time)");
+      void pttUp();
+    }, PTT_MAX_HOLD_MS);
+  } catch (e) {
+    micStream?.getAudioTracks().forEach((t) => (t.enabled = false));
+    setState({ pttHeld: false });
+    logLine(`PTT key failed — ${(e as ApiError).message}`);
+  }
+}
+
+async function pttUp(): Promise<void> {
+  if (pttTimer) {
+    window.clearTimeout(pttTimer);
+    pttTimer = undefined;
+  }
+  if (!state.pttHeld) return;
+  setState({ pttHeld: false });
+  micStream?.getAudioTracks().forEach((t) => (t.enabled = false));
+  if (!state.client) return;
+  try {
+    await state.client.unkeyTx();
+    logLine("PTT released");
+  } catch (e) {
+    logLine(`PTT unkey failed — ${(e as ApiError).message}`);
   }
 }
 
@@ -991,6 +1111,24 @@ function installDelegates(): void {
     else if (id === "am-freq") amManualGo();
     else if (id === "apt-freq") aptManualGo();
   });
+
+  // Press-and-hold, not click: pointerdown keys, pointerup/cancel unkeys.
+  // The release listeners are on `document` (not `panels`) so a drag off
+  // the button — or off the app entirely — still reliably releases PTT;
+  // the alternative (button-scoped only) can strand a "still transmitting"
+  // state if the pointer leaves the element before lifting.
+  panels.addEventListener("pointerdown", (e) => {
+    if ((e.target as HTMLElement).closest("#ptt-button")) {
+      e.preventDefault();
+      void pttDown();
+    }
+  });
+  document.addEventListener("pointerup", () => {
+    if (state.pttHeld) void pttUp();
+  });
+  document.addEventListener("pointercancel", () => {
+    if (state.pttHeld) void pttUp();
+  });
 }
 
 function fmManualGo(): void {
@@ -1109,8 +1247,13 @@ function wizardHtml(): string {
 
 function nwrWizardHtml(): string {
   const r = state.radio!;
+  // NWR's 7 channels are shared: several nearby transmitters can sit on the
+  // tuned frequency at once. Highlight only the closest one (the list is
+  // distance-sorted) so the picker shows a single active row, matching what
+  // the radio actually receives (the strongest signal on that channel).
+  const tunedIdx = state.nwrNearby.findIndex((s) => s.freq_hz === r.frequency_hz);
   const rows = state.nwrNearby
-    .map((s) => {
+    .map((s, i) => {
       const flag =
         s.status === "out_of_service"
           ? "out of service"
@@ -1122,7 +1265,7 @@ function nwrWizardHtml(): string {
         (s.freq_hz / 1e6).toFixed(3),
         `${s.site}, ${s.state}`,
         `${s.callsign} · ${flag}`,
-        s.freq_hz === r.frequency_hz,
+        i === tunedIdx,
         `${s.callsign} · ${s.site}, ${s.state}`,
       );
     })
@@ -1771,6 +1914,32 @@ function nowPlayingInner(): string {
           : ""
       }
       ${state.seeking ? `<span class="note" style="align-self:center">seeking…</span>` : ""}
+    </div>
+    ${r.mode === "frs" && r.running && state.server?.capabilities.includes("ptt") ? pttInner(st) : ""}`;
+}
+
+/** Push-to-talk block for the FRS "Now playing" card — only rendered when
+ *  the server actually advertises `ptt` (device tx-capable *and*
+ *  `--enable-tx`; see docs/architecture.md). Live mic audio when granted;
+ *  silence otherwise (see `acquireMicIfNeeded`) — either way the button
+ *  behaves the same, so it's always shown once `ptt` is available. */
+function pttInner(st: RadioStatus | null): string {
+  const keyed = st?.dsp.tx_keyed ?? false;
+  const hasMic = !!micStream;
+  return `
+    <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--line)">
+      <button id="ptt-button" class="ptt-btn${state.pttHeld ? " ptt-active" : ""}">
+        ${state.pttHeld ? "🔴 Transmitting — release to stop" : "🎙️ Hold to talk"}
+      </button>
+      <p class="note" style="margin:8px 0 0">
+        ${
+          keyed
+            ? "Server confirms: on the air."
+            : hasMic
+              ? "Mic ready — hold the button to transmit."
+              : "No mic granted — holding will key up but transmit silence."
+        }
+      </p>
     </div>`;
 }
 

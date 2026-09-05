@@ -36,6 +36,16 @@ class MainActivity : AppCompatActivity() {
             pendingGeo = null
         }
 
+    // FRS push-to-talk's mic (web/src/audio.ts's getUserMedia) — same
+    // request-then-resolve shape as location above, just against
+    // WebChromeClient's own PermissionRequest instead of Geolocation's.
+    private var pendingAudio: PermissionRequest? = null
+    private val micPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            pendingAudio?.let { req -> if (granted) req.grant(req.resources) else req.deny() }
+            pendingAudio = null
+        }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,8 +77,23 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = WebViewClient()
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
-                // Receive-only WebRTC needs no capture permission.
-                request.deny()
+                // FRS's push-to-talk mic is the only capture this app ever
+                // asks for (see acquireMicIfNeeded in web/src/main.ts) —
+                // everything else stays receive-only WebRTC, denied here.
+                if (request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) {
+                    val granted = ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (granted) {
+                        request.grant(request.resources)
+                    } else {
+                        pendingAudio = request
+                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                } else {
+                    request.deny()
+                }
             }
 
             override fun onGeolocationPermissionsShowPrompt(

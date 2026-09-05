@@ -1,0 +1,287 @@
+name: build
+
+# Cross-platform build of the server (server/ is the only Rust crate). The web
+# client is embedded into the binary at compile time (build.rs stages web/dist
+# → include_str!), so a single server executable *is* server + client. The
+# Android app is a separate APK and isn't part of this.
+#
+# Two tiers:
+#   standalone — `--no-default-features`: no SoapySDR, no system SDR libs. One
+#                self-contained file per OS (Windows links the CRT statically).
+#                Full REST API + web UI + WebRTC + discovery; live SDR is
+#                stubbed (runs `--debug-tone`). These are the release assets.
+#   soapy      — default features, dynamically linking libSoapySDR + its
+#                runtime-loaded driver modules. Cannot be a single file by
+#                SoapySDR's design — it needs radioconda/PothosSDR present on
+#                the target. Linux/macOS must pass; Windows is continue-on-error
+#                (pulls PothosSDR) so a run always reports where it stands.
+#
+# opus (audiopus_sys): Linux/macOS use system libopus via pkg-config; the
+# Windows MSVC target links audiopus_sys' own bundled prebuilt opus, so nothing
+# to install there. ring (webrtc crypto) needs NASM on Windows on both tiers.
+#
+# On a `v*` tag push, the standalone binaries are attached to a draft GitHub
+# Release.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # PothosSDR installer for the Windows soapy leg. Bump when it 404s; see
+  # https://downloads.myriadrf.org/builds/PothosSDR/
+  POTHOS_URL: https://downloads.myriadrf.org/builds/PothosSDR/PothosSDR-2023.11.04-vc16-x64.exe
+
+jobs:
+  web-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  standalone:
+    needs: web-bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            bin: lanline-server
+            asset: lanline-server-linux-x86_64.tar.gz
+          - os: macos-latest
+            name: macos-arm64
+            bin: lanline-server
+            asset: lanline-server-macos-arm64.tar.gz
+          - os: windows-latest
+            name: windows-x86_64
+            bin: lanline-server.exe
+            asset: lanline-server-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: standalone-${{ matrix.name }}
+
+      - name: opus (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopus-dev pkg-config
+      - name: opus (macOS)
+        if: runner.os == 'macOS'
+        run: brew install opus pkg-config
+      - name: NASM for ring (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      # opus: static-link it so the binary carries no libopus dependency.
+      #   Linux  — OPUS_STATIC makes audiopus_sys pick libopus.a (from
+      #            libopus-dev) via pkg-config.
+      #   macOS  — audiopus_sys already links opus statically on this target.
+      #   Windows — the MSVC path links audiopus_sys' bundled prebuilt opus;
+      #            OPUS_STATIC is a no-op there.
+      # No `+crt-static` on Windows: that bundled opus.lib embeds
+      # /DEFAULTLIB:MSVCRT (dynamic CRT) and would conflict; the zip carries
+      # the redistributable VC runtime DLLs instead (below).
+      - name: Build
+        env:
+          OPUS_STATIC: 1
+        run: cargo build --release --locked --no-default-features -p lanline-server
+
+      - run: cargo test --release --locked --no-default-features -p lanline-server
+
+      - name: Verify self-contained (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "ldd:"; ldd target/release/${{ matrix.bin }}
+          extra=$(ldd target/release/${{ matrix.bin }} \
+            | awk '/=> \//{print $1}' \
+            | grep -vE '^(libc|libm|libgcc_s|libpthread|libdl|librt|ld-linux.*)\.so' || true)
+          if [ -n "$extra" ]; then
+            echo "::error::binary has non-base dynamic deps: $extra"; exit 1
+          fi
+      - name: Verify self-contained (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "otool -L:"; otool -L target/release/${{ matrix.bin }}
+          bad=$(otool -L target/release/${{ matrix.bin }} | tail -n +2 \
+            | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/)' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::binary has unexpected dylib deps:"; echo "$bad"; exit 1
+          fi
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: tar -C target/release -czf "${{ matrix.asset }}" "${{ matrix.bin }}"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "pkg"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release/${{ matrix.bin }}" $stage
+          # Redistributable VC runtime — so "unzip and run" works on a bare
+          # Windows install, not just one that's had other software on it.
+          # The exe's own directory is searched first for these.
+          foreach ($dll in 'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll') {
+            Copy-Item "$env:SystemRoot\System32\$dll" $stage -ErrorAction SilentlyContinue
+          }
+          Compress-Archive -Path "$stage/*" -DestinationPath "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-${{ matrix.name }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  soapy:
+    needs: web-bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux,   bin: target/release/lanline-server,     soft: false }
+          - { os: macos-latest,   name: macos,   bin: target/release/lanline-server,     soft: false }
+          - { os: windows-latest, name: windows, bin: target/release/lanline-server.exe, soft: true }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.soft }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: soapy-${{ matrix.name }}
+
+      - name: SoapySDR + opus + libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsoapysdr-dev libopus-dev libclang-dev pkg-config
+
+      - name: SoapySDR + opus + LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install soapysdr opus llvm pkg-config
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: NASM for ring (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: SoapySDR (PothosSDR) + pkg-config (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install --no-progress -y pkgconfiglite
+          $exe = "$env:RUNNER_TEMP\PothosSDR.exe"
+          Invoke-WebRequest -Uri $env:POTHOS_URL -OutFile $exe
+          Start-Process -Wait -FilePath $exe -ArgumentList '/S','/D=C:\PothosSDR'
+          "C:\PothosSDR\bin"                          | Out-File -FilePath $env:GITHUB_PATH -Append
+          "PKG_CONFIG_PATH=C:\PothosSDR\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin"    | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: SoapySDRUtil sanity (non-fatal)
+        continue-on-error: true
+        run: SoapySDRUtil --info
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - run: cargo build --release --locked -p lanline-server
+
+      - name: cargo test (Linux only — lib is on the default loader path there)
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked -p lanline-server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lanline-server-${{ matrix.name }}-soapy
+          path: ${{ matrix.bin }}
+          if-no-files-found: error
+
+  clippy:
+    # Default features (links libSoapySDR), all targets, warnings are errors.
+    # No `cargo fmt --check`: the tree predates any rustfmt policy and a
+    # default-config reformat would touch nearly every file.
+    needs: web-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsoapysdr-dev libopus-dev libclang-dev pkg-config
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  release:
+    # `v*` tag → draft Release with the standalone binaries attached.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [standalone, clippy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: standalone-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: true
+          generate_release_notes: true
+          body: |
+            ## Standalone server builds
+
+            One self-contained executable per platform — the web client is
+            embedded, so running it and opening `http://<host>:8730/` is the
+            whole thing. No install, no runtime dependencies (the Windows build
+            links the CRT statically).
+
+            **These builds do not drive a real SDR.** They run everything
+            except live radio hardware (start with `--debug-tone` for an
+            end-to-end audio test). For a real HackRF/RTL-SDR you need the
+            SoapySDR build — see `docs/windows-port.md` and the `-soapy`
+            workflow artifacts — which by SoapySDR's design cannot be a single
+            file (it loads driver modules at runtime).

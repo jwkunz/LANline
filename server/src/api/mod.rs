@@ -35,6 +35,8 @@ pub fn router(state: AppState) -> Router {
         .route("/radio/start", post(radio::start))
         .route("/radio/stop", post(radio::stop))
         .route("/radio/status", get(radio::status))
+        .route("/radio/tx/key", post(radio::key_tx))
+        .route("/radio/tx/unkey", post(radio::unkey_tx))
         .route("/adsb/aircraft", get(adsb::aircraft))
         .route("/adsb/messages", get(adsb::messages))
         .route("/ais/vessels", get(ais::vessels))
@@ -119,7 +121,39 @@ mod tests {
         let config = Config::parse_from(["lanline-server", "--no-beacon"]);
         let registry = Arc::new(DeviceRegistry::new()); // no device selected
         let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
-        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None);
+        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, false);
+        let sessions = Arc::new(SessionStore::new(15, 45, 8));
+        let (webrtc, audio_out) = WebrtcEngine::new(
+            Ipv4Addr::LOCALHOST.into(),
+            0,
+            Ipv4Addr::LOCALHOST.into(),
+            radio_mgr.clone(),
+            sessions.clone(),
+        )
+        .await
+        .unwrap();
+        let state = AppState::new(
+            config,
+            Ports { c2: 0, audio_out, audio_in: 0, beast: 0, ais_nmea: 0 },
+            Ipv4Addr::LOCALHOST.into(),
+            registry,
+            sessions,
+            radio_cfg,
+            radio_mgr,
+            webrtc,
+        );
+        router(state)
+    }
+
+    /// Same as `app()`, but built as if started with `--enable-tx` — for the
+    /// handful of tests exercising what's gated *behind* that flag, as
+    /// opposed to the flag itself (which every other test's plain `app()`
+    /// covers by leaving it off, the real default).
+    async fn app_tx_enabled() -> axum::Router {
+        let config = Config::parse_from(["lanline-server", "--no-beacon", "--enable-tx"]);
+        let registry = Arc::new(DeviceRegistry::new()); // no device selected
+        let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
+        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, true);
         let sessions = Arc::new(SessionStore::new(15, 45, 8));
         let (webrtc, audio_out) = WebrtcEngine::new(
             Ipv4Addr::LOCALHOST.into(),
@@ -349,7 +383,7 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(b["mode"], "frs");
-        assert_eq!(b["mode_params"]["channel_bw_hz"], 12500.0);
+        assert_eq!(b["mode_params"]["channel_bw_hz"], 14000.0);
         assert_eq!(b["frequency_hz"], 462_562_500);
 
         // frs needs an SDR like nbfm/wbfm/am -> 503 with no device selected
@@ -360,6 +394,75 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(b["error"]["code"], "device_unavailable");
+    }
+
+    #[tokio::test]
+    async fn tx_key_requires_frs_mode() {
+        // TX enabled here specifically so this test isolates the mode check
+        // from the (separately tested) --enable-tx gate.
+        let app = app_tx_enabled().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        // Default mode is nbfm (RadioConfig::default_noaa) -> rejected even
+        // with TX enabled.
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/tx/key", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn tx_key_requires_enable_tx_flag() {
+        // Plain app() — the real default (TX off) — proves the gate holds
+        // even once every other precondition (mode) is satisfied.
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        send(
+            &app,
+            json_req("PATCH", "/api/v1/radio", Some(&token), json!({ "mode": "frs" })),
+        )
+        .await;
+
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/tx/key", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert_eq!(b["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn tx_unkey_is_always_a_safe_no_op() {
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/tx/unkey", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["keyed"], false);
     }
 
     #[tokio::test]

@@ -25,3 +25,6 @@ client/android/captures/
 # Local environment overrides
 /.env
 /.env.local
+
+# Local server launch overrides
+/scripts/run-server.env

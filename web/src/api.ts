@@ -181,6 +181,19 @@ export class Client {
   stopRadio = () =>
     this.request<RadioConfig>("POST", "/api/v1/radio/stop", { auth: true });
 
+  /** Push-to-talk: begins a transmission (currently a synthesized test
+   *  tone only, not live mic audio — see docs/architecture.md). Server-side
+   *  gated behind `--enable-tx` + `frs` mode + a tx-capable device, and
+   *  auto-unkeys after a hard server-side cap regardless of `unkeyTx`. */
+  keyTx = (gainDb?: number) =>
+    this.request<{ keyed: boolean; gain_db: number }>("POST", "/api/v1/radio/tx/key", {
+      auth: true,
+      body: gainDb != null ? { gain_db: gainDb } : {},
+    });
+
+  unkeyTx = () =>
+    this.request<{ keyed: boolean }>("POST", "/api/v1/radio/tx/unkey", { auth: true });
+
   audioOffer = (id: string, sdp: string) =>
     this.request<SdpMessage>("POST", `/api/v1/sessions/${id}/audio/offer`, {
       auth: true,

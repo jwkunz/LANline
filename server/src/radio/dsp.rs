@@ -596,7 +596,55 @@ impl LinearResampler {
     }
 }
 
-/// Reference NBFM modulator, used only by tests.
+/// Streaming NBFM modulator for live push-to-talk: consumes 48 kHz mono
+/// audio (whatever length arrives each call — a live mic feed doesn't come
+/// in the same tidy fixed-size chunks a synthetic test signal would),
+/// upsamples to `device_rate` (reusing [`LinearResampler`] backwards from
+/// its usual RX direction — interpolation works the same either way), and
+/// frequency-modulates it onto a baseband (zero-IF) carrier via a
+/// persistent phase accumulator so consecutive calls stay phase-continuous
+/// (no click at the seam between one audio chunk and the next). `run_sdr`'s
+/// TX-key path retunes the device's own LO to the target RF frequency
+/// directly rather than digitally offsetting, hence baseband here.
+pub struct TxModulator {
+    resamp: LinearResampler,
+    phase: f64,
+    device_rate: f64,
+    deviation_hz: f64,
+    scratch: Vec<f32>,
+}
+
+impl TxModulator {
+    pub fn new(device_rate: f64, deviation_hz: f64) -> Self {
+        Self {
+            resamp: LinearResampler::new(48_000.0, device_rate),
+            phase: 0.0,
+            device_rate,
+            deviation_hz,
+            scratch: Vec::new(),
+        }
+    }
+
+    /// Append modulated IQ for this chunk of audio (±1.0-ish range; silence
+    /// — all zeros — is a perfectly valid chunk, and produces an unmodulated
+    /// carrier, not silence-detection or a gap in transmission).
+    pub fn process(&mut self, audio: &[f32], out: &mut Vec<Complex32>) {
+        self.scratch.clear();
+        self.resamp.process(audio, &mut self.scratch);
+        for &a in &self.scratch {
+            self.phase += 2.0 * PI * self.deviation_hz * a as f64 / self.device_rate;
+            if self.phase.abs() > 1e6 {
+                self.phase %= 2.0 * PI;
+            }
+            out.push(Complex32::new(self.phase.cos() as f32, self.phase.sin() as f32));
+        }
+    }
+}
+
+/// Reference NBFM modulator (single tone, fixed-length buffer) used by the
+/// RX chain's unit tests as a synthetic signal source. Real transmit uses
+/// [`TxModulator`] instead — a live mic feed doesn't arrive in tidy
+/// fixed-size buffers the way a synthetic test tone does.
 #[cfg(test)]
 pub fn fm_modulate(
     fs: f64,
@@ -674,11 +722,56 @@ mod tests {
 
         assert!(audio.len() > 6_000, "got {} samples", audio.len());
         let tail = &audio[audio.len() / 2..];
-        let at_tone = goertzel(tail, AUDIO_RATE, tone as f64);
+        let at_tone = goertzel(tail, AUDIO_RATE, tone);
         let off_tone = goertzel(tail, AUDIO_RATE, 400.0);
         assert!(at_tone > 0.15, "tone amplitude {at_tone}");
         assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");
         assert!(chain.metrics().squelch_open, "squelch should open on a carrier");
+    }
+
+    /// Round-trip `TxModulator` (the real transmit path) through `FmChain`
+    /// (the real receive path) — same shape as `recovers_modulating_tone`
+    /// above, but exercising the streaming TX modulator's actual call
+    /// pattern: audio delivered across many small, irregularly-sized
+    /// chunks (mimicking live Opus frames arriving over the network), not
+    /// one big buffer up front.
+    #[test]
+    fn tx_modulator_round_trips_through_fm_chain() {
+        let device_rate = 2_000_000.0;
+        let tone = 1_200.0;
+        let deviation_hz = 5_000.0;
+        let mut txmod = TxModulator::new(device_rate, deviation_hz);
+
+        // 48kHz tone, delivered in ragged ~20ms-ish chunks of varying size.
+        let mut iq = Vec::new();
+        let mut msg_phase = 0.0f64;
+        let chunk_sizes = [960usize, 480, 1000, 800, 960, 960, 700];
+        for _ in 0..30 {
+            for &n in &chunk_sizes {
+                let audio: Vec<f32> = (0..n)
+                    .map(|_| {
+                        let v = (2.0 * PI * msg_phase).sin() as f32;
+                        msg_phase += tone / 48_000.0;
+                        v
+                    })
+                    .collect();
+                txmod.process(&audio, &mut iq);
+            }
+        }
+
+        let params = FmParams { deviation_hz, deemphasis_us: 0.0, lo_offset_hz: 1.0, ..FmParams::default() };
+        let mut chain = FmChain::new(device_rate, params);
+        let mut audio = Vec::new();
+        for block in iq.chunks(8192) {
+            chain.process(block, &mut audio);
+        }
+
+        assert!(audio.len() > 6_000, "got {} samples", audio.len());
+        let tail = &audio[audio.len() / 2..];
+        let at_tone = goertzel(tail, AUDIO_RATE, tone);
+        let off_tone = goertzel(tail, AUDIO_RATE, 400.0);
+        assert!(at_tone > 0.15, "tone amplitude {at_tone}");
+        assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");
     }
 
     #[test]
@@ -702,7 +795,7 @@ mod tests {
             chain.process(block, &mut audio);
         }
         let tail = &audio[audio.len() / 2..];
-        let at_tone = goertzel(tail, AUDIO_RATE, tone as f64);
+        let at_tone = goertzel(tail, AUDIO_RATE, tone);
         let off_tone = goertzel(tail, AUDIO_RATE, 1_000.0);
         assert!(at_tone > 0.1, "wideband tone amplitude {at_tone}");
         assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");
@@ -746,7 +839,7 @@ mod tests {
 
         assert!(audio.len() > 6_000, "got {} samples", audio.len());
         let tail = &audio[audio.len() / 2..];
-        let at_tone = goertzel(tail, AUDIO_RATE, tone as f64);
+        let at_tone = goertzel(tail, AUDIO_RATE, tone);
         let off_tone = goertzel(tail, AUDIO_RATE, 300.0);
         assert!(at_tone > 0.1, "tone amplitude {at_tone}");
         assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");

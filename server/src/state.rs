@@ -29,6 +29,7 @@ pub struct Inner {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)] // wiring constructor — a params struct would just move the noise
     pub fn new(
         config: Config,
         ports: Ports,
@@ -59,11 +60,17 @@ impl AppState {
     }
 
     /// `["rx", "webrtc", "nbfm", "debug_tone"]` plus `"tx"` when the selected
-    /// device can transmit.
+    /// device can transmit, plus `"ptt"` when transmit is *also* actually
+    /// enabled (`--enable-tx`) — a client uses this, not `"tx"` alone, to
+    /// decide whether to show a push-to-talk control at all.
     pub fn capabilities(&self) -> Vec<String> {
         let mut caps = crate::catalog::base_capabilities();
-        if self.0.registry.selected().map(|d| d.tx_capable).unwrap_or(false) {
+        let device_tx_capable = self.0.registry.selected().map(|d| d.tx_capable).unwrap_or(false);
+        if device_tx_capable {
             caps.push("tx".to_string());
+        }
+        if device_tx_capable && self.0.radio_mgr.tx_enabled() {
+            caps.push("ptt".to_string());
         }
         caps
     }

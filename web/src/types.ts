@@ -62,6 +62,7 @@ export interface DspStatus {
   audio_level_dbfs: number | null;
   sample_overruns: number;
   pipeline_latency_ms: number | null;
+  tx_keyed: boolean;
 }
 
 export interface RadioStatus {

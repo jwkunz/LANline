@@ -20,7 +20,7 @@ use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate};
 use bytes::Bytes;
 #[cfg(feature = "soapy")]
-use dsp::{AmChain, AmParams, FmChain, FmParams};
+use dsp::{AmChain, AmParams, FmChain, FmParams, TxModulator};
 use crate::audio::wav::WavDump;
 #[cfg(feature = "soapy")]
 use crate::model::GainMode;
@@ -47,6 +47,76 @@ pub struct Telemetry {
     pub squelch_open: bool,
     pub overruns: u64,
     pub source: &'static str,
+    /// Currently transmitting (push-to-talk keyed). See `PipelineCmd::Key`.
+    pub tx_keyed: bool,
+}
+
+/// Hard ceiling on one PTT key, regardless of what the client asks for — an
+/// auto-unkey safety net against a lost `unkey` request (a dropped
+/// connection, a crashed client) leaving the transmitter keyed indefinitely.
+#[cfg(feature = "soapy")]
+const MAX_TX_SECS: f64 = 10.0;
+
+/// One push-to-talk transmission: live mic audio (see `TxAudioSource`),
+/// frequency-modulated via `TxModulator`. `gain_db` is a single overall TX
+/// gain (HackRF's TX chain has VGA + AMP elements; SoapySDR's aggregate
+/// `setGain` distributes across them).
+#[cfg(feature = "soapy")]
+#[derive(Clone, Copy)]
+struct TxKeySpec {
+    deviation_hz: f64,
+    /// Linear gain on decoded mic PCM before modulation; see `frs`'s
+    /// `tx_mic_gain` mode param in `catalog.rs`.
+    mic_gain: f64,
+    gain_db: f64,
+    max_secs: f64,
+}
+
+/// Bridges live mic audio from the (async, tokio) WebRTC receive task to the
+/// (blocking) SDR pipeline thread's TX-key loop. A single global buffer, not
+/// per-session — only one physical radio exists, so only one transmission
+/// can be live at a time regardless of how many sessions are connected.
+pub struct TxAudioSource {
+    buf: Mutex<std::collections::VecDeque<f32>>,
+}
+
+impl TxAudioSource {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { buf: Mutex::new(std::collections::VecDeque::new()) })
+    }
+
+    /// Called from the WebRTC mic-decode task as frames arrive. Caps the
+    /// buffer (~2s of 48kHz mono audio) so a mic feed that outpaces TX
+    /// draining it — or one that's simply never keyed — can't grow forever.
+    pub fn push(&self, samples: &[f32]) {
+        let mut b = self.buf.lock().unwrap();
+        b.extend(samples.iter().copied());
+        let cap = 48_000 * 2;
+        while b.len() > cap {
+            b.pop_front();
+        }
+    }
+
+    /// Called from the TX-key loop. Pops up to `n` samples, oldest first;
+    /// pads with silence on underrun so the loop's pacing (set by the SDR's
+    /// own TX buffer backpressure in `write()`) never has to block waiting
+    /// on network/mic jitter — a brief silent patch, not a stall.
+    #[cfg(feature = "soapy")]
+    fn pull(&self, n: usize, out: &mut Vec<f32>) {
+        out.clear();
+        let mut b = self.buf.lock().unwrap();
+        for _ in 0..n {
+            out.push(b.pop_front().unwrap_or(0.0));
+        }
+    }
+
+    /// Drop anything buffered — called at key-up, so a stale tail (silence
+    /// that piled up between transmissions, since nothing was draining it)
+    /// doesn't play back at the start of the next one.
+    #[cfg(feature = "soapy")]
+    fn clear(&self) {
+        self.buf.lock().unwrap().clear();
+    }
 }
 
 pub struct RadioManager {
@@ -59,6 +129,11 @@ pub struct RadioManager {
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    /// Off by default (`--enable-tx`) — a general-purpose SDR transmitting
+    /// is a much bigger deal than one only ever receiving, so it needs an
+    /// explicit opt-in rather than working out of the box.
+    enable_tx: bool,
+    audio_in: Arc<TxAudioSource>,
 }
 
 #[derive(Default)]
@@ -76,6 +151,11 @@ enum PipelineCmd {
     Retune(f64),
     Gain { agc: bool, overall: Option<f64>, elements: Vec<(String, f64)> },
     Demod(DemodParams),
+    /// Begin a push-to-talk transmission (`run_sdr` only — see its handling
+    /// for the RX/TX device hand-off; other pipelines ignore this).
+    Key(TxKeySpec),
+    /// End the current transmission early (before `TxKeySpec::max_secs`).
+    Unkey,
 }
 
 /// Which analog demodulator `run_sdr` builds. `nbfm`/`wbfm` share the FM
@@ -149,6 +229,7 @@ impl RadioManager {
         cfg: Arc<Mutex<RadioConfig>>,
         registry: Arc<DeviceRegistry>,
         dump_wav: Option<PathBuf>,
+        enable_tx: bool,
     ) -> Arc<Self> {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Arc::new(Self {
@@ -161,7 +242,60 @@ impl RadioManager {
             adsb: Arc::new(AdsbShared::new()),
             ais: Arc::new(AisShared::new()),
             apt: Arc::new(AptShared::new()),
+            enable_tx,
+            audio_in: TxAudioSource::new(),
         })
+    }
+
+    pub fn tx_enabled(&self) -> bool {
+        self.enable_tx
+    }
+
+    /// The mic-audio bridge — pushed into by the WebRTC layer as it decodes
+    /// an incoming Opus track, pulled from by a running TX key. Public so
+    /// `media::WebrtcEngine` (which only holds `Arc<RadioManager>`) can
+    /// reach it without another constructor parameter threaded everywhere.
+    pub fn audio_in(&self) -> Arc<TxAudioSource> {
+        self.audio_in.clone()
+    }
+
+    /// Begin a push-to-talk transmission on the currently-running pipeline,
+    /// keying live mic audio pushed into `audio_in()` (silence if none has
+    /// arrived — see `TxAudioSource::pull`). Only meaningful in `frs` mode;
+    /// the caller (the API handler) is responsible for checking that before
+    /// calling this.
+    #[cfg(feature = "soapy")]
+    pub fn key(&self, gain_db: f64, deviation_hz: f64, mic_gain: f64) -> Result<(), &'static str> {
+        if !self.enable_tx {
+            return Err("transmit is disabled on this server — see --enable-tx");
+        }
+        self.audio_in.clear();
+        let run = self.run.lock().unwrap();
+        let cmd_tx = run.cmd_tx.as_ref().ok_or("radio is not running")?;
+        cmd_tx
+            .send(PipelineCmd::Key(TxKeySpec {
+                deviation_hz,
+                mic_gain,
+                gain_db,
+                max_secs: MAX_TX_SECS,
+            }))
+            .map_err(|_| "pipeline is not accepting commands")
+    }
+
+    #[cfg(not(feature = "soapy"))]
+    pub fn key(&self, _gain_db: f64, _deviation_hz: f64, _mic_gain: f64) -> Result<(), &'static str> {
+        Err("built without SDR support")
+    }
+
+    /// End the current transmission early (a no-op if nothing is keyed).
+    pub fn unkey(&self) {
+        #[cfg(feature = "soapy")]
+        {
+            let run = self.run.lock().unwrap();
+            if let Some(cmd_tx) = &run.cmd_tx {
+                let _ = cmd_tx.send(PipelineCmd::Unkey);
+            }
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
@@ -214,6 +348,7 @@ impl RadioManager {
         let adsb = self.adsb.clone();
         let ais = self.ais.clone();
         let apt = self.apt.clone();
+        let audio_in = self.audio_in.clone();
 
         #[cfg(feature = "soapy")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<PipelineCmd>();
@@ -222,7 +357,7 @@ impl RadioManager {
 
         let handle = std::thread::Builder::new()
             .name("rx-pipeline".into())
-            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt))
+            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, audio_in))
             .expect("spawn rx-pipeline thread");
 
         run.stop = Some(stop);
@@ -678,6 +813,7 @@ type CmdRx = mpsc::Receiver<PipelineCmd>;
 #[cfg(not(feature = "soapy"))]
 type CmdRx = ();
 
+#[allow(clippy::too_many_arguments)]
 fn run_pipeline(
     p: PipelineParams,
     tx: broadcast::Sender<AudioFrame>,
@@ -688,8 +824,9 @@ fn run_pipeline(
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    audio_in: Arc<TxAudioSource>,
 ) {
-    let _ = (&adsb, &ais, &apt);
+    let _ = (&adsb, &ais, &apt, &audio_in);
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
         Ok(w) => {
@@ -712,7 +849,7 @@ fn run_pipeline(
         }
         #[cfg(feature = "soapy")]
         SourceKind::Sdr(sdr) => {
-            run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut(), cmd_rx)
+            run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut(), cmd_rx, &audio_in)
         }
         #[cfg(feature = "soapy")]
         SourceKind::Adsb(p) => run_adsb(*p, adsb, &telemetry, &stop, cmd_rx),
@@ -806,6 +943,7 @@ fn run_sdr(
     stop: &Arc<AtomicBool>,
     mut wav: Option<&mut WavDump>,
     cmd_rx: mpsc::Receiver<PipelineCmd>,
+    audio_in: &Arc<TxAudioSource>,
 ) {
     use num_complex::Complex32;
     use soapysdr::{Device, Direction, ErrorCode};
@@ -828,7 +966,13 @@ fn run_sdr(
         }
     };
     log_set("sample_rate", dev.set_sample_rate(dir, ch, sp.device_rate));
-    let lo = sp.freq_hz - sp.demod.lo_offset_hz();
+    // `sp` is immutable and only carries the *start* channel. Track the live
+    // RX frequency here so it survives `PipelineCmd::Retune` — both the TX
+    // key (see `key_tx`) and the post-key RX restore must read this, not
+    // `sp.freq_hz`, or they snap back to whatever channel the pipeline
+    // launched on.
+    let mut cur_freq_hz = sp.freq_hz;
+    let mut lo = cur_freq_hz - sp.demod.lo_offset_hz();
     log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(lo, sp.freq_correction_ppm), ""));
     if let Some(ant) = &sp.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
@@ -891,10 +1035,11 @@ fn run_sdr(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 PipelineCmd::Retune(hz) => {
-                    let new_lo = hz - sp.demod.lo_offset_hz();
+                    cur_freq_hz = hz;
+                    lo = hz - sp.demod.lo_offset_hz();
                     log_set(
                         "frequency",
-                        dev.set_frequency(dir, ch, apply_ppm(new_lo, sp.freq_correction_ppm), ""),
+                        dev.set_frequency(dir, ch, apply_ppm(lo, sp.freq_correction_ppm), ""),
                     );
                     chain.on_retune();
                     tracing::info!("{label}: retuned to {:.4} MHz (live)", hz / 1e6);
@@ -916,6 +1061,28 @@ fn run_sdr(
                 PipelineCmd::Demod(params) => {
                     chain = Chain::new(sp.device_rate, params);
                 }
+                PipelineCmd::Key(spec) => {
+                    key_tx(
+                        &dev, ch, &log_set, &sp, cur_freq_hz, &spec, &cmd_rx, stop, telemetry, label,
+                        &mut stream, audio_in,
+                    );
+                    // The device was retuned to the TX frequency for the
+                    // duration of the key; put RX back on the live channel
+                    // (which may have moved via Retune since pipeline start).
+                    log_set(
+                        "frequency",
+                        dev.set_frequency(dir, ch, apply_ppm(lo, sp.freq_correction_ppm), ""),
+                    );
+                    if let Err(e) = stream.activate(None) {
+                        tracing::error!("{label}: rx stream reactivate after TX: {e}");
+                    }
+                    chain.on_retune();
+                    tracing::info!("{label}: TX unkeyed, RX resumed");
+                }
+                // A stray Unkey with nothing currently keyed (already ended,
+                // or arrived after `key_tx` already returned) is a no-op —
+                // the real unkey path is the `cmd_rx` check inside `key_tx`.
+                PipelineCmd::Unkey => {}
             }
         }
 
@@ -962,6 +1129,110 @@ fn run_sdr(
     }
 
     let _ = stream.deactivate(None);
+}
+
+/// One push-to-talk transmission. HackRF (like most low-cost SDRs) is
+/// half-duplex — confirmed directly against this project's own unit
+/// (`SoapySDRUtil --probe`: "Full-duplex: NO" on both RX and TX channels) —
+/// so this owns the full RX-down / TX-up / TX-down / (caller resumes RX)
+/// hand-off: deactivates `rx_stream` first, retunes to `tx_freq_hz` — the
+/// live RX channel, which may have moved via `PipelineCmd::Retune` since the
+/// pipeline started, so the caller passes it in rather than this reading the
+/// stale `sp.freq_hz` — straight, with no LO-offset digital mixing on the way
+/// out, unlike RX (there's no DC-spike self-interference concern to dodge
+/// when transmitting), opens+activates a TX stream, and repeatedly pulls live mic
+/// audio from `audio_in` (silence-padded on underrun — see
+/// `TxAudioSource::pull`), frequency-modulating it via `dsp::TxModulator` and
+/// writing the resulting IQ, until `PipelineCmd::Unkey` arrives,
+/// `spec.max_secs` elapses, or the pipeline is stopped.
+#[cfg(feature = "soapy")]
+#[allow(clippy::too_many_arguments)]
+fn key_tx(
+    dev: &soapysdr::Device,
+    ch: usize,
+    log_set: &dyn Fn(&str, Result<(), soapysdr::Error>),
+    sp: &SdrParams,
+    tx_freq_hz: f64,
+    spec: &TxKeySpec,
+    cmd_rx: &mpsc::Receiver<PipelineCmd>,
+    stop: &Arc<AtomicBool>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    label: &'static str,
+    rx_stream: &mut soapysdr::RxStream<num_complex::Complex32>,
+    audio_in: &Arc<TxAudioSource>,
+) {
+    use num_complex::Complex32;
+    use soapysdr::Direction;
+
+    let _ = rx_stream.deactivate(None);
+    telemetry.lock().unwrap().tx_keyed = true;
+    tracing::info!(
+        "{label}: TX key — {:.0} Hz deviation, {:.1} dB gain, max {:.0}s",
+        spec.deviation_hz,
+        spec.gain_db,
+        spec.max_secs
+    );
+
+    let txdir = Direction::Tx;
+    log_set(
+        "tx frequency",
+        dev.set_frequency(txdir, ch, apply_ppm(tx_freq_hz, sp.freq_correction_ppm), ""),
+    );
+    log_set("tx gain", dev.set_gain(txdir, ch, spec.gain_db));
+
+    let result = (|| -> Result<(), soapysdr::Error> {
+        let mut txs = dev.tx_stream::<Complex32>(&[ch])?;
+        txs.activate(None)?;
+
+        let mut modulator = TxModulator::new(sp.device_rate, spec.deviation_hz);
+        // 20ms @ 48kHz — matches the Opus frame size used elsewhere in this
+        // app, though nothing here actually depends on that; it's just a
+        // reasonable poll granularity for pulling from `audio_in`.
+        const AUDIO_CHUNK: usize = 960;
+        let mut audio_chunk: Vec<f32> = Vec::with_capacity(AUDIO_CHUNK);
+        let mut iq_chunk: Vec<Complex32> = Vec::new();
+        let mtu = txs.mtu().unwrap_or(65_536).max(1);
+        let started = Instant::now();
+        let max_dur = Duration::from_secs_f64(spec.max_secs.clamp(0.5, MAX_TX_SECS));
+
+        'key: while !stop.load(Ordering::SeqCst) && started.elapsed() < max_dur {
+            while let Ok(c) = cmd_rx.try_recv() {
+                if matches!(c, PipelineCmd::Unkey) {
+                    break 'key;
+                }
+                // Retune/Gain/Demod arriving mid-key are receive-oriented
+                // and don't apply while transmitting; dropped.
+            }
+            // Silence-padded on underrun (no mic audio has arrived yet, or
+            // network/decode is behind) — an unmodulated carrier for that
+            // stretch, not a stall; see `TxAudioSource::pull`.
+            audio_in.pull(AUDIO_CHUNK, &mut audio_chunk);
+            // Boost the (typically low-level) mic PCM, then hard-limit to
+            // full scale so peak deviation stays capped at `deviation_hz`
+            // however hot the gain is set — see `frs`'s `tx_mic_gain`.
+            if spec.mic_gain != 1.0 {
+                let g = spec.mic_gain as f32;
+                for s in audio_chunk.iter_mut() {
+                    *s = (*s * g).clamp(-1.0, 1.0);
+                }
+            }
+            iq_chunk.clear();
+            modulator.process(&audio_chunk, &mut iq_chunk);
+
+            let mut off = 0;
+            while off < iq_chunk.len() {
+                let end = (off + mtu).min(iq_chunk.len());
+                let n = txs.write(&[&iq_chunk[off..end]], None, false, 200_000)?;
+                off += n.max(1); // never spin forever on a persistent 0-write
+            }
+        }
+        txs.deactivate(None)
+    })();
+
+    if let Err(e) = result {
+        tracing::error!("{label}: TX: {e}");
+    }
+    telemetry.lock().unwrap().tx_keyed = false;
 }
 
 /// ADS-B pipeline: 2 Msps @ 1090 MHz into the [`crate::adsb`] demod/tracker.
@@ -1363,6 +1634,9 @@ fn run_apt(
                     }
                 }
                 PipelineCmd::Demod(_) => {}
+                // apt has no TX support (and no antenna-sharing concern —
+                // it never transmits); a stray key/unkey is a no-op here.
+                PipelineCmd::Key(_) | PipelineCmd::Unkey => {}
             }
         }
 
@@ -1413,7 +1687,28 @@ fn run_apt(
 
 #[cfg(all(test, feature = "soapy"))]
 mod tests {
-    use super::apply_ppm;
+    use super::{apply_ppm, TxAudioSource};
+
+    #[test]
+    fn tx_audio_source_pulls_fifo_and_pads_silence_on_underrun() {
+        let src = TxAudioSource::new();
+        src.push(&[1.0, 2.0, 3.0]);
+        src.push(&[4.0, 5.0]);
+
+        let mut out = Vec::new();
+        src.pull(4, &mut out);
+        assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0], "FIFO order across two pushes");
+
+        out.clear();
+        src.pull(4, &mut out);
+        assert_eq!(out, vec![5.0, 0.0, 0.0, 0.0], "underrun pads with silence, doesn't block");
+
+        src.push(&[9.0]);
+        src.clear();
+        out.clear();
+        src.pull(2, &mut out);
+        assert_eq!(out, vec![0.0, 0.0], "clear() drops anything buffered");
+    }
 
     #[test]
     fn ppm_correction_shifts_frequency_proportionally() {

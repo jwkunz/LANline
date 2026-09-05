@@ -111,6 +111,56 @@ pub async fn stop(State(st): State<AppState>, _auth: AuthedSession) -> ApiResult
     Ok(Json(response))
 }
 
+/// Begin a push-to-talk transmission, keying live mic audio streamed up
+/// over the session's WebRTC connection (see docs/architecture.md's PTT
+/// section) — silence if none has arrived yet by the time this returns.
+/// Body is optional: `{"gain_db": 10}` overrides the (deliberately
+/// conservative) default of 0 dB. Requires `--enable-tx` on the server,
+/// `frs` mode, a tx-capable device, and the radio already running.
+pub async fn key_tx(
+    State(st): State<AppState>,
+    _auth: AuthedSession,
+    body: Option<Json<Value>>,
+) -> ApiResult<Json<Value>> {
+    // Server policy first, ahead of any other check — a consistent 403
+    // regardless of mode/running/device state when TX is simply off.
+    if !st.radio_mgr.tx_enabled() {
+        return Err(ApiError::forbidden("transmit is disabled on this server — see --enable-tx"));
+    }
+    let (mode, running, deviation_hz, mic_gain) = {
+        let r = st.radio.lock().unwrap();
+        let deviation_hz =
+            r.mode_params.get("deviation_hz").and_then(Value::as_f64).unwrap_or(2_500.0);
+        let mic_gain =
+            r.mode_params.get("tx_mic_gain").and_then(Value::as_f64).unwrap_or(1.0).clamp(1.0, 32.0);
+        (r.mode.clone(), r.running, deviation_hz, mic_gain)
+    };
+    if mode != "frs" {
+        return Err(ApiError::bad_request("push-to-talk transmit is only supported in `frs` mode"));
+    }
+    if !running {
+        return Err(ApiError::conflict("start the radio before keying"));
+    }
+    let device_tx_capable = st.registry.selected().map(|d| d.tx_capable).unwrap_or(false);
+    if !device_tx_capable {
+        return Err(ApiError::device_unavailable("selected device cannot transmit"));
+    }
+
+    let body = body.map(|Json(v)| v).unwrap_or(Value::Null);
+    let gain_db = body.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 61.0);
+
+    st.radio_mgr.key(gain_db, deviation_hz, mic_gain).map_err(ApiError::forbidden)?;
+    Ok(Json(serde_json::json!({ "keyed": true, "gain_db": gain_db, "mic_gain": mic_gain })))
+}
+
+/// End the current transmission early (a no-op if nothing is keyed —
+/// including after it's already auto-unkeyed at the server's safety
+/// timeout, so a client is always safe to call this on release).
+pub async fn unkey_tx(State(st): State<AppState>, _auth: AuthedSession) -> ApiResult<Json<Value>> {
+    st.radio_mgr.unkey();
+    Ok(Json(serde_json::json!({ "keyed": false })))
+}
+
 pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
     let (mode, frequency_hz, bitrate_bps, sample_rate_hz, channels) = {
         let r = st.radio.lock().unwrap();
@@ -142,6 +192,7 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
             audio_level_dbfs: tele.audio_level_dbfs.map(f64::from),
             sample_overruns: tele.overruns,
             pipeline_latency_ms: running.then_some(20.0),
+            tx_keyed: tele.tx_keyed,
         },
         audio: AudioStatus {
             encoder: "opus",

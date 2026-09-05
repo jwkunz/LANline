@@ -84,6 +84,16 @@ pub struct Config {
     #[arg(long, env = "LANLINE_FREQ_CORRECTION_PPM", allow_hyphen_values = true, default_value_t = 0.0)]
     pub freq_correction_ppm: f64,
 
+    /// Allow push-to-talk transmit (`POST /radio/tx/key`). Off by default —
+    /// a general-purpose SDR keying a real transmitter is a materially
+    /// bigger deal than one that only ever receives, so it needs explicit
+    /// opt-in rather than working out of the box. See
+    /// docs/architecture.md's PTT section for what this actually does (and
+    /// doesn't yet) support, and the regulatory considerations for whatever
+    /// frequencies you point it at.
+    #[arg(long, env = "LANLINE_ENABLE_TX", default_value_t = false)]
+    pub enable_tx: bool,
+
     /// Maximum number of concurrent sessions.
     #[arg(long, env = "LANLINE_MAX_SESSIONS", default_value_t = 8)]
     pub max_sessions: usize,

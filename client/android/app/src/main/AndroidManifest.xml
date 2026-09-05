@@ -8,6 +8,16 @@
     <!-- optional: the "My location" button in the station finder -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-feature android:name="android.hardware.location" android:required="false" />
+    <!-- optional: FRS push-to-talk's mic (web/src/audio.ts's getUserMedia).
+         MODIFY_AUDIO_SETTINGS is required too: Chromium's AudioManagerAndroid
+         refuses to open a capture device without it ("Requires
+         MODIFY_AUDIO_SETTINGS and RECORD_AUDIO. No audio device will be
+         available for recording"), so getUserMedia rejects and PTT keys up
+         transmitting silence. It's a normal permission — auto-granted at
+         install, no runtime prompt. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <application
         android:allowBackup="true"

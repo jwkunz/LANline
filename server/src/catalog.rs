@@ -62,10 +62,23 @@ pub fn modes() -> Vec<ModeInfo> {
         ModeInfo {
             id: "frs",
             name: "FRS (Family Radio Service, 462/467 MHz)",
-            tx_capable: false,
+            tx_capable: true,
             params: BTreeMap::from([
-                ("deviation_hz", num(2500.0, 1000.0, 5000.0, "Hz")),
-                ("channel_bw_hz", num(12500.0, 8000.0, 16000.0, "Hz")),
+                // 4000/14000 (not the Part 95 narrowband-legal 2500/12500)
+                // — live-tuned against a real FRS handheld: the narrowband
+                // numbers sounded weak/under-modulated. See
+                // docs/architecture.md's PTT section.
+                ("deviation_hz", num(4000.0, 1000.0, 5000.0, "Hz")),
+                ("channel_bw_hz", num(14000.0, 8000.0, 16000.0, "Hz")),
+                // TX-only: linear gain applied to decoded mic PCM before FM
+                // modulation (`radio::key_tx`), hard-limited to full scale
+                // after, so peak deviation stays capped at `deviation_hz`.
+                // getUserMedia audio (esp. on Android WebView) comes in well
+                // below full scale; without this the recovered audio on the
+                // far radio is very quiet. 2.5 was live-tuned by ear against a
+                // handheld — enough lift without clipping speech peaks.
+                // Live-tunable like the rest.
+                ("tx_mic_gain", num(2.5, 1.0, 32.0, "x")),
                 ("deemphasis_us", num_enum(0.0, &[0.0, 50.0, 75.0], "us")),
                 ("audio_lpf_hz", num(3000.0, 1000.0, 4000.0, "Hz")),
                 ("squelch_db", num(-80.0, -120.0, 0.0, "dBFS")),

@@ -1,5 +1,7 @@
 # LANline
 
+[![build](https://github.com/jwkunz/LANline/actions/workflows/build.yml/badge.svg)](https://github.com/jwkunz/LANline/actions/workflows/build.yml)
+
 **LAN-native SDR command & control.** Point a browser (or the Android app) at a
 radio on your network and listen.
 
@@ -12,14 +14,16 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
   nothing to type,
 - a **WebRTC Opus audio stream** of the demodulated RF (receive path) —
   NOAA Weather Radio, FM broadcast, **AM** (mediumwave/shortwave), and
-  **FRS** (462/467 MHz walkie-talkie channels, receive-only for now),
+  **FRS** (462/467 MHz walkie-talkie channels),
+- **FRS push-to-talk transmit** — live mic audio up the same WebRTC
+  connection, FM-modulated onto the channel; off by default (`--enable-tx`),
+  personal-use only (see [docs/architecture.md](docs/architecture.md#frs-and-the-transmit-question)),
 - **traffic trackers** — **ADS-B** aircraft (1090 MHz) and **AIS** vessels
   (162 MHz): decoded tracks over REST + a raw TCP feed (Beast / AIVDM), plotted
   on a self-contained radar scope in the web client,
 - **NOAA APT** (137 MHz weather satellite): a real-time image downlink decoded
   into a two-channel grayscale raster over REST and rendered to canvas in the
   web client,
-- a reserved port for the future transmit path (modulated Opus in),
 - **discovery** so clients find it unaided: an **mDNS** responder
   (`lanline.local` + `_lanline._tcp`) for browsers, and a **UDP beacon** for the
   Android/CLI clients that can't use mDNS.
@@ -43,7 +47,7 @@ wrapper (`client/android`).
 | 2f | AM receive mode (mediumwave/shortwave), station-picker wizard | ✅ |
 | 2g | NOAA APT receive mode (137 MHz weather satellite image), canvas rendering | ✅ |
 | 2h | FRS receive mode (462/467 MHz, 22-channel plan), channel-picker wizard | ✅ |
-| 2i | Push-to-talk transmit path (FM modulator, half-duplex device switching, mic-audio uplink, PTT protocol) — FRS receive above is the first step toward this | |
+| 2i | Push-to-talk transmit (FRS only; FM modulator, half-duplex device switching, live mic-audio uplink over WebRTC, PTT protocol) — off by default (`--enable-tx`), personal-use only per FCC Part 95 | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -57,9 +61,72 @@ Cargo.toml            workspace root (only member: server/)
 server/               Rust LANline server (SDR + streaming; embeds & serves web/)
 web/                  Vite + TypeScript web client (built bundle is embedded in the server + the APK)
 client/android/       Android WebView wrapper + native beacon listener
-docs/                 rest-api.md, architecture.md, beacon-protocol.md
+docs/                 rest-api.md, architecture.md, beacon-protocol.md, windows-port.md
 scripts/dev-env.sh    points the build/runtime at radioconda's SoapySDR
+scripts/run-server.sh build (if needed) + run the server with that env already set up
 ```
+
+## Download and run (no SDR)
+
+The [Releases](https://github.com/jwkunz/LANline/releases) page has a
+**standalone server** for each platform. The web client is compiled into the
+binary, so it's genuinely one file — run it and open a browser.
+
+| Download | Platform | Contains |
+|----------|----------|----------|
+| `lanline-server-linux-x86_64.tar.gz` | Linux x86-64, glibc ≥ 2.35 (Ubuntu 22.04 / Debian 12 / Fedora 36 or newer) | the binary |
+| `lanline-server-macos-arm64.tar.gz` | macOS on Apple Silicon (M1+) | the binary |
+| `lanline-server-windows-x86_64.zip` | Windows 10/11 x64 | `lanline-server.exe` + its VC runtime DLLs |
+
+**Dependencies: none.** opus is statically linked, the Windows zip carries
+`vcruntime140*.dll` / `msvcp140.dll`, and macOS/Linux need only libraries the
+OS already ships. No radioconda, no SoapySDR, no runtime install.
+
+**These builds do not talk to real SDR hardware** — they run the full server
+(REST API, web UI, WebRTC audio, discovery) with the SDR layer stubbed. Use
+`--debug-tone` for an end-to-end audio check. For a live HackRF / RTL-SDR, see
+[Building the server](#building-the-server) below.
+
+### Linux
+
+```sh
+tar xzf lanline-server-linux-x86_64.tar.gz
+./lanline-server --debug-tone          # or plain ./lanline-server
+```
+
+### macOS
+
+```sh
+tar xzf lanline-server-macos-arm64.tar.gz
+xattr -d com.apple.quarantine lanline-server   # it's unsigned; clears Gatekeeper
+./lanline-server --debug-tone
+```
+
+### Windows
+
+Extract the zip (keep the `.exe` and the DLLs together) and run
+`lanline-server.exe` — a terminal, or double-click. SmartScreen will flag it
+as unrecognised (unsigned): **More info → Run anyway**. On first launch
+Windows Firewall will ask — **Allow** on private networks so LAN clients can
+reach it.
+
+### Then
+
+The server prints the URLs it's listening on. Open one in a browser:
+
+- **same machine:** `http://localhost:8730/`
+- **another device on the LAN:** `http://<server-ip>:8730/` (shown at startup),
+  or `http://lanline.local:8730/` where mDNS resolves
+- the **Android app** finds it over the LAN on its own
+
+Stop it with Ctrl-C. Common flags (full list: `lanline-server --help`):
+
+| Flag | |
+|------|--|
+| `--debug-tone` | serve a 440 Hz test tone — proves the audio path with no SDR |
+| `--c2-port 9000` | change the web/REST port from 8730 |
+| `--no-mdns` / `--no-beacon` | disable a discovery mechanism |
+| `--bind 127.0.0.1` | listen on loopback only (default is all interfaces) |
 
 ## Building the server
 
@@ -70,11 +137,22 @@ already carries the HackRF, PlutoSDR and RTL-SDR modules.
 ```sh
 npm --prefix web install && npm --prefix web run build   # bundle the server embeds & serves
 
+scripts/run-server.sh                     # sources dev-env.sh, cargo build --release, run
+scripts/run-server.sh --debug-tone        # 440 Hz A4, no SDR needed
+scripts/run-server.sh --dump-wav /tmp/rx.wav   # also save pre-Opus audio
+scripts/run-server.sh --no-build          # skip the rebuild, just launch
+```
+
+`run-server.sh` forwards every unrecognised flag to the server; per-machine
+settings (device filter, ppm correction, `--enable-tx`) go in a git-ignored
+`scripts/run-server.env` — copy `scripts/run-server.env.sample` to start.
+
+To do it by hand instead:
+
+```sh
 source scripts/dev-env.sh      # sets PKG_CONFIG_PATH, RUSTFLAGS rpath,
                                # SOAPY_SDR_PLUGIN_PATH, LIBCLANG_PATH
-cargo run --release -p lanline-server                  # discovers the HackRF, serves API + web client
-cargo run --release -p lanline-server -- --debug-tone  # 440 Hz A4, no SDR needed
-cargo run --release -p lanline-server -- --dump-wav /tmp/rx.wav   # also save pre-Opus audio
+cargo run --release -p lanline-server
 ```
 
 The server builds without the web bundle (it serves a placeholder page and logs
@@ -85,6 +163,10 @@ wideband FM at 4 Msps can starve the WebRTC threads (audio drops).
 
 Sanity-check the radio independently with `SoapySDRUtil --find` from inside the
 same shell.
+
+**Windows:** the server is Linux-first today. The Rust code is portable bar one
+hostname helper, but the SoapySDR/HackRF stack and native build deps need
+manual setup — see [`docs/windows-port.md`](docs/windows-port.md).
 
 ## Using the web client
 
@@ -156,12 +238,21 @@ Pick **FRS** in the mode strip — a fixed picker for all 22 FRS channels
 FRS-exclusive (channels 8–14) or shared with GMRS (1–7, 15–22). There's no
 station directory here — anyone could be transmitting on any channel from
 anywhere — so Seek in "Now playing" is the closest thing to browsing: it
-steps channel-by-channel looking for squelch-open traffic. **Receive-only**:
-this is the first step toward the push-to-talk radio emulation that's the
-actual goal, but transmitting on FRS requires FCC Part 95 type-accepted
-equipment, which a general-purpose SDR like a HackRF isn't — see
+steps channel-by-channel looking for squelch-open traffic.
+
+A **push-to-talk** button appears below the channel picker when the server
+is running with `--enable-tx` and a transmit-capable device is selected —
+hold it to key up and talk (live mic audio, not a test tone), release to
+stop; a hard 10s cap auto-releases regardless. This is off by default and
+deliberately so: FRS is a Part 95 certified-equipment service, and a
+general-purpose SDR like a HackRF isn't type-accepted for FRS transmission,
+independent of power level or intent. `--enable-tx` exists for personal,
+non-distributed use at the operator's own informed discretion, not as a
+feature this project is presenting as generally compliant — see
 [architecture.md](docs/architecture.md#frs-and-the-transmit-question) for
-what the transmit side will actually need.
+the full design (half-duplex hand-off, the WebRTC mic uplink, and a couple
+of real bugs found and fixed getting it working end-to-end against an
+actual handheld).
 
 If FRS reception sounds distorted or silent despite squelch opening, your
 SDR's crystal is likely just off-frequency enough at UHF to matter — set
@@ -186,6 +277,7 @@ or open `client/android/` in Android Studio and Run. See
 - [`docs/rest-api.md`](docs/rest-api.md) — full REST API
 - [`docs/architecture.md`](docs/architecture.md) — pipeline & module map
 - [`docs/beacon-protocol.md`](docs/beacon-protocol.md) — UDP discovery wire format
+- [`docs/windows-port.md`](docs/windows-port.md) — what a Windows build of the server would take (Linux-first today)
 
 ## License
 

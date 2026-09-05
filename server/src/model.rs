@@ -322,6 +322,8 @@ pub struct DspStatus {
     pub audio_level_dbfs: Option<f64>,
     pub sample_overruns: u64,
     pub pipeline_latency_ms: Option<f64>,
+    /// Currently transmitting (push-to-talk keyed).
+    pub tx_keyed: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]

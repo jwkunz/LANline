@@ -30,6 +30,12 @@ impl ApiError {
     pub fn unauthorized() -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid session token")
     }
+    /// The request is understood but server *policy* disallows it (e.g. TX
+    /// not enabled) — distinct from `not_implemented` (the feature doesn't
+    /// exist at all).
+    pub fn forbidden(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", m)
+    }
     pub fn not_found(m: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", m)
     }

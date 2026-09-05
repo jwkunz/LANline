@@ -5,6 +5,8 @@ use crate::model::{AudioConnState, AudioStateResponse};
 use crate::radio::RadioManager;
 use crate::sessions::SessionStore;
 use anyhow::{anyhow, Context, Result};
+use audiopus::coder::Decoder;
+use audiopus::{Channels, SampleRate};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +27,7 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
@@ -145,6 +147,62 @@ impl WebrtcEngine {
             pc.on_ice_connection_state_change(Box::new(move |s: RTCIceConnectionState| {
                 *cell.lock().unwrap() = s;
                 Box::pin(async {})
+            }));
+        }
+
+        // Push-to-talk uplink: if the browser's offer includes a mic track
+        // (only the `frs` wizard's PTT flow asks for one — see
+        // `web/src/audio.ts`), this fires once per incoming track and reads
+        // it for that track's lifetime. Opus depacketizes trivially (an RTP
+        // payload *is* one Opus frame, no NALU-style reassembly needed);
+        // decoded PCM feeds the single global `TxAudioSource` a real TX key
+        // pulls from — see `radio::key_tx`.
+        {
+            let radio_mgr = self.radio_mgr.clone();
+            pc.on_track(Box::new(move |track, _receiver, _transceiver| {
+                let radio_mgr = radio_mgr.clone();
+                Box::pin(async move {
+                    tracing::info!(
+                        "webrtc: track received — kind={:?} id={} codec={}",
+                        track.kind(),
+                        track.id(),
+                        track.codec().capability.mime_type,
+                    );
+                    if track.kind() != RTPCodecType::Audio {
+                        return;
+                    }
+                    let audio_in = radio_mgr.audio_in();
+                    let mut decoder = match Decoder::new(SampleRate::Hz48000, Channels::Mono) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::warn!("webrtc: mic decoder: {e}");
+                            return;
+                        }
+                    };
+                    // 120ms is Opus's own max frame duration at 48kHz —
+                    // always enough headroom regardless of what frame size
+                    // the browser actually negotiated/sends.
+                    let mut pcm = vec![0f32; 5_760];
+                    let mut scratch = vec![0u8; 1_500];
+                    let mut packets: u64 = 0;
+                    loop {
+                        let (packet, _attrs) = match track.read(&mut scratch).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::info!("webrtc: mic track ended after {packets} packets: {e}");
+                                break;
+                            }
+                        };
+                        packets += 1;
+                        if packets == 1 {
+                            tracing::info!("webrtc: first mic RTP packet ({} bytes payload)", packet.payload.len());
+                        }
+                        match decoder.decode_float(Some(packet.payload.as_ref()), pcm.as_mut_slice(), false) {
+                            Ok(n) => audio_in.push(&pcm[..n]),
+                            Err(e) => tracing::debug!("webrtc: mic decode: {e}"),
+                        }
+                    }
+                })
             }));
         }
 
