@@ -1,7 +1,8 @@
 //! Serves the embedded web client so a plain browser can just open the
 //! server's own address (no host to type). The bundle is a single inlined
-//! `index.html` produced by `web/` (Vite + vite-plugin-singlefile); the three
-//! station databases it fetches at runtime are embedded alongside it.
+//! `index.html` produced by `web/` (Vite + vite-plugin-singlefile); the
+//! station databases and satellite TLE data it fetches at runtime are
+//! embedded alongside it.
 //!
 //! `build.rs` stages these files from `web/dist` into `OUT_DIR`.
 
@@ -12,6 +13,7 @@ const INDEX_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/index.htm
 const NWR_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/nwr-stations.json"));
 const FM_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/fm-stations.json"));
 const AM_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/am-stations.json"));
+const APT_TLE_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/apt-tle.json"));
 
 /// `true` when a real bundle was embedded (vs. the build-time placeholder).
 pub fn bundled() -> bool {
@@ -32,6 +34,10 @@ pub async fn fm_stations() -> Response {
 
 pub async fn am_stations() -> Response {
     json(AM_JSON)
+}
+
+pub async fn apt_tle() -> Response {
+    json(APT_TLE_JSON)
 }
 
 fn json(body: &'static str) -> Response {

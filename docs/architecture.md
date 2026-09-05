@@ -185,7 +185,12 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   canvas that `putImageData`s the raster directly — no image crate on the
   server, no `<img>` decode on the client. See
   [below](#apt-line-sync-confidence-metric) for how "am I locked onto a real
-  pass" is decided.
+  pass" is decided. The wizard also predicts each satellite's next pass
+  (AOS/max-elevation) entirely client-side via SGP4 (`satellite.js`) against
+  a bundled TLE (`GET /apt-tle.json`, `scripts/fetch-apt-tle.mjs`) — no live
+  pass-prediction API, so it keeps working with no WAN access, at the cost
+  of the TLE snapshot going stale in 1-2 weeks (see
+  [rest-api.md](rest-api.md#predicting-the-next-pass)).
 
 ### AM and HackRF MF/LF sensitivity
 

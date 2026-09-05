@@ -50,6 +50,8 @@ browser pointed at the server's own address connects with nothing to type
 | `GET /` , `GET /index.html` | `text/html` — the single-file web app |
 | `GET /nwr-stations.json` | `application/json` — bundled NOAA Weather Radio transmitter directory |
 | `GET /fm-stations.json` | `application/json` — bundled FCC FM broadcast station directory |
+| `GET /am-stations.json` | `application/json` — bundled FCC AM broadcast station directory |
+| `GET /apt-tle.json` | `application/json` — bundled NOAA-15/18/19 orbital elements (TLE), for the client-side pass predictor |
 
 These are unauthenticated and cached (`Cache-Control: public, max-age=86400`).
 The same bundle is what the Android APK embeds as local assets.
@@ -558,6 +560,16 @@ Binary, not JSON (`content-type: application/octet-stream`):
 ```text
 [u32 width LE][u32 height LE][row-major grayscale bytes, width*height]
 ```
+
+### Predicting the next pass
+
+There's no dedicated "next pass" endpoint — the web client predicts passes
+entirely on its own, locally, from `GET /apt-tle.json` (the bundled NOAA-15/
+18/19 orbital elements — see [above](#web-client)) via SGP4 propagation
+(`satellite.js`). No live tracking/pass-prediction service is called at
+runtime; regenerate the bundled TLE periodically with
+`node scripts/fetch-apt-tle.mjs` (it goes stale in 1–2 weeks, unlike the
+station directories).
 
 Channel A (visible/IR depending on the satellite and time of day) occupies
 columns `0..909`, channel B `909..1818`. No PNG/image crate involved on
