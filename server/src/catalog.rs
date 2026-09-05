@@ -86,6 +86,26 @@ pub fn modes() -> Vec<ModeInfo> {
             ]),
         },
         ModeInfo {
+            id: "ham",
+            name: "Amateur NBFM (VHF/UHF FM simplex & repeaters)",
+            // Part 97 homebrew/experimental gear is allowed under an amateur
+            // licence (the operator holds Amateur Extra, KZ4AZ), but TX for
+            // this mode is deferred to a later commit — receive only for now.
+            tx_capable: false,
+            params: BTreeMap::from([
+                // 5 kHz deviation / 16 kHz channel is the de-facto VHF/UHF
+                // amateur "narrow-ish" FM (wider than Part 95 FRS, narrower
+                // than the 2.5 kHz "true narrowband" some commercial gear
+                // uses). Live-tunable against a handheld.
+                ("deviation_hz", num(5000.0, 1000.0, 8000.0, "Hz")),
+                ("channel_bw_hz", num(16000.0, 8000.0, 25000.0, "Hz")),
+                ("deemphasis_us", num_enum(0.0, &[0.0, 50.0, 75.0], "us")),
+                ("audio_lpf_hz", num(3400.0, 1000.0, 8000.0, "Hz")),
+                ("squelch_db", num(-80.0, -120.0, 0.0, "dBFS")),
+                ("noise_squelch", num(0.35, 0.02, 2.0, "ratio")),
+            ]),
+        },
+        ModeInfo {
             id: "apt",
             name: "NOAA APT (137 MHz weather satellite)",
             tx_capable: false,
@@ -189,7 +209,7 @@ pub fn presets() -> Vec<Preset> {
 /// Capability strings for `GET /api/v1/server` and the beacon. `tx` is added
 /// by the caller when the selected device supports it.
 pub fn base_capabilities() -> Vec<String> {
-    ["rx", "webrtc", "nbfm", "wbfm", "am", "frs", "apt", "adsb", "ais", "analysis", "debug_tone"]
+    ["rx", "webrtc", "nbfm", "wbfm", "am", "frs", "ham", "apt", "adsb", "ais", "analysis", "debug_tone"]
         .iter()
         .map(|s| s.to_string())
         .collect()

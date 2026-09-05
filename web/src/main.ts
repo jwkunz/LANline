@@ -37,6 +37,13 @@ import {
   type AptStatus,
 } from "./apt";
 import { FRS_CHANNELS, FRS_DEFAULT_FREQ_HZ, frsChannelAt, stepFrsChannel } from "./frs";
+import {
+  HAM_BANDS,
+  HAM_DEFAULT_BAND,
+  hamBand,
+  hamSegmentAt,
+  hamSimplexChannels,
+} from "./ham";
 import type {
   AudioStateResponse,
   CreateSessionResponse,
@@ -128,6 +135,14 @@ const MODE_META: Record<string, ModeMeta> = {
     loOffsetHz: 250_000,
     wantSampleRateHz: 2_000_000,
   },
+  ham: {
+    label: "Amateur FM",
+    icon: "📡",
+    band: "VHF/UHF",
+    defaultFreqHz: 146_520_000,
+    loOffsetHz: 250_000,
+    wantSampleRateHz: 2_000_000,
+  },
   debug_tone: {
     label: "Debug Tone",
     icon: "🔊",
@@ -166,6 +181,7 @@ interface State {
   amNearby: NearAm[];
   aptPasses: Record<string, AptPass[]> | null;
   bandTab: "nearby" | "manual";
+  hamBand: string;
   seeking: boolean;
   pttHeld: boolean;
   adsb: AdsbSnapshot | null;
@@ -200,6 +216,7 @@ const state: State = {
   amNearby: [],
   aptPasses: null,
   bandTab: "nearby",
+  hamBand: localStorage.getItem("lanline.hamBand") ?? HAM_DEFAULT_BAND,
   seeking: false,
   pttHeld: false,
   adsb: null,
@@ -681,7 +698,9 @@ async function switchMode(id: string): Promise<void> {
       ? meta!.defaultFreqHz
       : Number.isFinite(last) && last > 0
         ? last
-        : meta?.defaultFreqHz;
+        : id === "ham"
+          ? hamBand(state.hamBand).defaultHz
+          : meta?.defaultFreqHz;
     const sr = pickSampleRate(meta?.wantSampleRateHz ?? 2_000_000);
     const tuner: Record<string, unknown> = { lo_offset_hz: meta?.loOffsetHz ?? 250_000 };
     if (sr) tuner.sample_rate_hz = sr;
@@ -1063,6 +1082,9 @@ function structKey(): string {
     state.phase,
     state.radio?.mode ?? "",
     state.bandTab,
+    state.radio?.mode === "ham"
+      ? (hamBandContaining(state.radio.frequency_hz)?.id ?? state.hamBand)
+      : "",
     state.switching,
     state.seeking,
     state.modes.length,
@@ -1174,15 +1196,24 @@ function patchLive(): void {
   // rebuilt. Don't stomp a value the user is mid-edit on.
   syncAnalysisView();
 
-  const dial = q<HTMLInputElement>("#fm-freq, #am-freq, #apt-freq");
+  const dial = q<HTMLInputElement>("#fm-freq, #am-freq, #apt-freq, #ham-freq");
   if (dial && dial !== document.activeElement) {
     const v =
       dial.id === "am-freq"
         ? (freq / 1e3).toFixed(0)
-        : dial.id === "apt-freq"
+        : dial.id === "apt-freq" || dial.id === "ham-freq"
           ? (freq / 1e6).toFixed(4)
           : (freq / 1e6).toFixed(1);
     if (dial.value !== v) dial.value = v;
+  }
+
+  // Band-plan reference: move the "you are here" highlight as +/- steps the
+  // dial (structKey only rebuilds the panel when the *band* changes).
+  if (state.radio.mode === "ham") {
+    panels.querySelectorAll<HTMLElement>(".ham-seg").forEach((el) => {
+      const [lo, hi] = (el.dataset.seg ?? "0 0").split(" ").map(Number);
+      el.classList.toggle("here", freq >= lo! && freq < hi!);
+    });
   }
 }
 
@@ -1222,6 +1253,17 @@ function installDelegates(): void {
     if (hit("#am-up")) return void tuneFrequency(stepAm(state.radio!.frequency_hz, 1));
     if (hit("#am-go")) return amManualGo();
     if (hit("#apt-go")) return aptManualGo();
+    if (hit("#ham-down")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, -1));
+    if (hit("#ham-up")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, 1));
+    if (hit("#ham-go")) return hamManualGo();
+
+    const hamTab = t.closest<HTMLButtonElement>("[data-hamband]");
+    if (hamTab) {
+      const b = hamBand(hamTab.dataset.hamband!);
+      localStorage.setItem("lanline.hamBand", b.id);
+      setState({ hamBand: b.id });
+      return void tuneFrequency(b.defaultHz);
+    }
 
     const tab = t.closest<HTMLButtonElement>("[data-bandtab]");
     if (tab) return setState({ bandTab: tab.dataset.bandtab as "nearby" | "manual" });
@@ -1249,6 +1291,7 @@ function installDelegates(): void {
     else if (id === "fm-freq") fmManualGo();
     else if (id === "am-freq") amManualGo();
     else if (id === "apt-freq") aptManualGo();
+    else if (id === "ham-freq") hamManualGo();
   });
 
   // Press-and-hold, not click: pointerdown keys, pointerup/cancel unkeys.
@@ -1408,6 +1451,8 @@ function wizardHtml(): string {
       return aptWizardHtml();
     case "frs":
       return frsWizardHtml();
+    case "ham":
+      return hamWizardHtml();
     case "adsb":
     case "ais":
       return scopeWizardHtml();
@@ -1559,6 +1604,115 @@ function frsWizardHtml(): string {
       “Now playing” to scan for the next active channel.</p>
       <div class="stations">${rows}</div>
     </section>`;
+}
+
+/** The amateur band whose edges bracket `hz`, or null if `hz` is out of band. */
+function hamBandContaining(hz: number) {
+  return HAM_BANDS.find((b) => hz >= b.loHz && hz <= b.hiHz) ?? null;
+}
+
+function hamWizardHtml(): string {
+  const r = state.radio!;
+  // The active band follows the tuned frequency when it's in a ham band, so
+  // the tab bar and the dial never disagree; `state.hamBand` is only the
+  // fallback (e.g. right after a mode switch, before the first tune).
+  const band = hamBandContaining(r.frequency_hz) ?? hamBand(state.hamBand);
+  const mhz = (r.frequency_hz / 1e6).toFixed(4);
+  const seg = hamSegmentAt(band, r.frequency_hz);
+
+  const tabs = HAM_BANDS.map(
+    (b) =>
+      `<button class="tab${b.id === band.id ? " on" : ""}" data-hamband="${b.id}">${b.name}</button>`,
+  ).join("");
+
+  const simplexRows = hamSimplexChannels(band)
+    .map((s) =>
+      stationRow(
+        s.hz,
+        `${(s.hz / 1e6).toFixed(4)}`,
+        s.name,
+        s.note ?? "FM simplex",
+        s.hz === r.frequency_hz,
+        `${s.name} · ${(s.hz / 1e6).toFixed(4)} MHz`,
+      ),
+    )
+    .join("");
+
+  const planRows = band.segments
+    .map((s) => {
+      const here = r.frequency_hz >= s.loHz && r.frequency_hz < s.hiHz;
+      const lo = (s.loHz / 1e6).toFixed(3).replace(/\.?0+$/, "");
+      const hi = (s.hiHz / 1e6).toFixed(3).replace(/\.?0+$/, "");
+      return `<div class="ham-seg${here ? " here" : ""}${s.fm ? "" : " nofm"}" data-seg="${s.loHz} ${s.hiHz}">
+        <span class="ham-seg-range">${lo}–${hi}</span>
+        <span class="ham-seg-use">${esc(s.use)}</span>
+      </div>`;
+    })
+    .join("");
+
+  // Prefixed with "±" in the copy, so show the magnitude only.
+  const offKHz = Math.abs(band.repeaterOffsetHz) / 1e3;
+  const offsetLabel =
+    offKHz >= 1000 ? `${(offKHz / 1000).toFixed(offKHz % 1000 ? 1 : 0)} MHz` : `${offKHz} kHz`;
+
+  return `
+    <section class="card">
+      <h2>Amateur FM — ${band.name} (${band.rangeLabel})</h2>
+      <div class="tabs ham-bands">${tabs}</div>
+      <p class="note" style="margin:2px 0 10px">
+        Open to <strong>all U.S. license classes</strong> (Technician and up) for FM
+        voice — you hold Amateur Extra (KZ4AZ). Repeater offset on this band is
+        conventionally <strong>±${offsetLabel}</strong>. Receive-only for now:
+        repeater input/tone TX comes in a later build. The band-plan slices
+        below are the <strong>voluntary ARRL plan</strong>, not FCC sub-band
+        rules — local coordinators refine them.
+      </p>
+      ${
+        seg && !seg.fm
+          ? `<p class="note warn" style="margin:0 0 10px">Heads up: ${(r.frequency_hz / 1e6).toFixed(4)} MHz
+             is in a <strong>${esc(seg.use)}</strong> segment — normally CW/SSB/weak-signal, not FM.</p>`
+          : ""
+      }
+
+      <h3 class="ham-sub">Simplex &amp; calling</h3>
+      <div class="stations">${simplexRows}</div>
+
+      <h3 class="ham-sub">Manual tune</h3>
+      <div class="dial">
+        <button id="ham-down" class="secondary">−</button>
+        <input id="ham-freq" type="text" inputmode="decimal" value="${mhz}" />
+        <span class="dial-unit">MHz</span>
+        <button id="ham-up" class="secondary">+</button>
+        <button id="ham-go">Tune</button>
+      </div>
+      <p class="note" style="margin:8px 0 0">${(band.loHz / 1e6).toFixed(0)}–${(band.hiHz / 1e6).toFixed(0)} MHz ·
+      5 kHz steps · ${seg ? esc(seg.use) : "out of the band plan"}.</p>
+
+      <h3 class="ham-sub">Band plan (voluntary)</h3>
+      <div class="ham-plan">${planRows}</div>
+    </section>`;
+}
+
+function hamStep(hz: number, dir: 1 | -1): number {
+  const band = hamBandContaining(hz) ?? hamBand(state.hamBand);
+  const next = Math.round(hz + dir * 5_000);
+  return Math.min(band.hiHz, Math.max(band.loHz, next));
+}
+
+function hamManualGo(): void {
+  const raw = panels.querySelector<HTMLInputElement>("#ham-freq")?.value ?? "";
+  const mhz = parseFloat(raw);
+  if (!Number.isFinite(mhz)) return;
+  const want = Math.round(mhz * 1e6);
+  // If the typed frequency is in a *different* amateur band, jump there;
+  // otherwise clamp to the current band's edges.
+  const band =
+    hamBandContaining(want) ?? hamBandContaining(state.radio!.frequency_hz) ?? hamBand(state.hamBand);
+  if (band.id !== state.hamBand) {
+    localStorage.setItem("lanline.hamBand", band.id);
+    setState({ hamBand: band.id });
+  }
+  void tuneFrequency(Math.min(band.hiHz, Math.max(band.loHz, want)));
 }
 
 /** "next pass in 3h12m · 58° max" / "no pass in the next 48h" / a prompt to

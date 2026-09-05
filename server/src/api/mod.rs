@@ -369,6 +369,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ham_mode_is_selectable() {
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        let (_, modes) = send(&app, get("/api/v1/modes")).await;
+        assert!(modes.as_array().unwrap().iter().any(|m| m["id"] == "ham"));
+
+        let (s, b) = send(
+            &app,
+            json_req(
+                "PATCH",
+                "/api/v1/radio",
+                Some(&token),
+                json!({ "mode": "ham", "frequency_hz": 146_520_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["mode"], "ham");
+        assert_eq!(b["mode_params"]["deviation_hz"], 5000.0);
+        assert_eq!(b["frequency_hz"], 146_520_000);
+
+        // ham needs an SDR like nbfm/wbfm/am/frs -> 503 with no device selected
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/start", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(b["error"]["code"], "device_unavailable");
+
+        // server capabilities advertise it
+        let (_, srv) = send(&app, get("/api/v1/server")).await;
+        assert!(srv["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "ham"));
+    }
+
+    #[tokio::test]
     async fn frs_mode_is_selectable() {
         let app = app().await;
         let (_, b) = send(

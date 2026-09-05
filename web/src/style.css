@@ -347,8 +347,56 @@ canvas.apt-canvas {
   color: var(--muted);
   font-size: 13px;
 }
+.note.warn {
+  color: var(--warn);
+}
 .err {
   color: var(--bad);
+  font-weight: 600;
+}
+
+/* --- Amateur (ham) band picker ----------------------------------- */
+.tabs.ham-bands {
+  flex-wrap: wrap;
+}
+h3.ham-sub {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 18px 0 0;
+}
+.ham-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+  max-height: min(46vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 13px;
+}
+.ham-seg {
+  display: grid;
+  grid-template-columns: 108px 1fr;
+  gap: 10px;
+  padding: 5px 8px;
+  border-left: 2px solid transparent;
+}
+.ham-seg-range {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.ham-seg.nofm .ham-seg-use {
+  color: var(--muted);
+  font-style: italic;
+}
+.ham-seg.here {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ham-seg.here .ham-seg-range {
+  color: var(--ink);
   font-weight: 600;
 }
 

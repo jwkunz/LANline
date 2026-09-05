@@ -205,6 +205,26 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   station database (there's no directory to look up — anyone can be on any
   channel from anywhere). Receive-only; see
   [below](#frs-and-the-transmit-question) for why.
+- **2k** — `ham` mode: the fourth consumer of `dsp::FmChain` (after
+  `nbfm`/`wbfm`/`frs`), with amateur-NBFM catalog defaults (5 kHz deviation /
+  16 kHz channel). All the domain knowledge is client-side in
+  `web/src/ham.ts`: a per-band structure for 6 m – 23 cm, each carrying its
+  edges, conventional repeater offset, named simplex/calling frequencies (+
+  regular simplex grids), and the **voluntary ARRL band plan** as a list of
+  `{loHz, hiHz, use, fm}` segments. The wizard renders band tabs, the
+  simplex list as quick-tune rows, a band-bounded manual dial, and the
+  segment map with a live "you are here" marker (`patchLive` moves it as the
+  dial steps, since `structKey` only rebuilds the panel when the *band*
+  changes). Every VHF/UHF FM band is open to all licence classes, so there's
+  no privilege gating to enforce — the "privilege vs licence" hint is
+  informational. Receive-only for this build; repeater input/tone TX, a
+  fetched repeater DB (`scripts/fetch-repeaters.mjs` from RepeaterBook, the
+  same pre-fetch-and-bundle pattern as the FM/AM station DBs), manual
+  repeater entry, and CTCSS/DCS subaudible-tone squelch (a Goertzel detector
+  in `FmChain` + a ~300 Hz audio HPF) are planned follow-up commits. Part 97
+  allows homebrew/experimental transmit gear under an amateur licence (the
+  operator holds Amateur Extra, KZ4AZ), so a `ham` TX path is on firmer
+  regulatory footing than `frs`'s.
 
 ### AM and HackRF MF/LF sensitivity
 

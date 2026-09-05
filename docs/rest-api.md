@@ -328,6 +328,19 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "ham",
+    "name": "Amateur NBFM (VHF/UHF FM simplex & repeaters)",
+    "tx_capable": false,
+    "params": {
+      "deviation_hz":  { "type": "number", "default": 5000,  "min": 1000, "max": 8000,  "unit": "Hz" },
+      "channel_bw_hz": { "type": "number", "default": 16000, "min": 8000, "max": 25000, "unit": "Hz" },
+      "deemphasis_us": { "type": "number", "default": 0, "enum": [0, 50, 75], "unit": "us" },
+      "audio_lpf_hz":  { "type": "number", "default": 3400,  "min": 1000, "max": 8000,  "unit": "Hz" },
+      "squelch_db":    { "type": "number", "default": -80, "min": -120, "max": 0, "unit": "dBFS" },
+      "noise_squelch": { "type": "number", "default": 0.35, "min": 0.02, "max": 2.0, "unit": "ratio" }
+    }
+  },
+  {
     "id": "apt",
     "name": "NOAA APT (137 MHz weather satellite)",
     "tx_capable": false,
@@ -412,6 +425,17 @@ under-modulated on receive. It also supports push-to-talk transmit — see
 channel plan, the PTT endpoints (`/radio/tx/key`, `/radio/tx/unkey`), and
 the FCC Part 95 equipment-certification caveat that applies regardless of
 what this does or doesn't transmit.
+
+`ham` is the same `FmChain` as `nbfm`/`frs` with slightly wider defaults
+(5 kHz deviation / 16 kHz channel) for amateur VHF/UHF NBFM. The server side
+is just another FM mode; the band-plan structure (6 m – 23 cm, simplex/calling
+frequencies, and the voluntary ARRL segment map) lives entirely in the web
+client (`web/src/ham.ts`) — the API only sees `mode: "ham"` plus a
+`frequency_hz` anywhere in an amateur band. This first version is
+receive-only; repeater offsets, CTCSS/DCS subaudible tones, a fetched
+repeater database, and TX are planned follow-ups. Part 97 permits homebrew
+transmit equipment under an amateur licence, so a later TX build here is on
+firmer footing than `frs`'s.
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end

@@ -13,8 +13,9 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
   `http://<host>:8730/` (or `http://lanline.local:8730/`) and it connects with
   nothing to type,
 - a **WebRTC Opus audio stream** of the demodulated RF (receive path) —
-  NOAA Weather Radio, FM broadcast, **AM** (mediumwave/shortwave), and
-  **FRS** (462/467 MHz walkie-talkie channels),
+  NOAA Weather Radio, FM broadcast, **AM** (mediumwave/shortwave),
+  **FRS** (462/467 MHz walkie-talkie channels), and **Amateur FM**
+  (VHF/UHF NBFM, band-plan-organized channel picker for 6 m – 23 cm),
 - **FRS push-to-talk transmit** — live mic audio up the same WebRTC
   connection, FM-modulated onto the channel; off by default (`--enable-tx`),
   personal-use only (see [docs/architecture.md](docs/architecture.md#frs-and-the-transmit-question)),
@@ -51,6 +52,8 @@ wrapper (`client/android`).
 | 2g | NOAA APT receive mode (137 MHz weather satellite image), canvas rendering | ✅ |
 | 2h | FRS receive mode (462/467 MHz, 22-channel plan), channel-picker wizard | ✅ |
 | 2i | Push-to-talk transmit (FRS only; FM modulator, half-duplex device switching, live mic-audio uplink over WebRTC, PTT protocol) — off by default (`--enable-tx`), personal-use only per FCC Part 95 | ✅ |
+| 2j | Multi-radio device picker (HackRF / ADALM-Pluto), TLS with a self-signed cert, Receiver Analysis waterfall | ✅ |
+| 2k | Amateur NBFM receive mode — band-plan-organized channel picker (6 m – 23 cm), simplex/calling frequencies, voluntary ARRL band-plan hints; repeater offsets + subaudible tones + TX to follow | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -318,6 +321,25 @@ SDR's crystal is likely just off-frequency enough at UHF to matter — set
 `tuner.freq_correction_ppm` (or `--freq-correction-ppm` at startup); see
 [architecture.md](docs/architecture.md#hackrf-frequency-calibration) for how
 to measure it.
+
+### Amateur FM (VHF/UHF NBFM)
+
+Pick **Amateur FM** in the mode strip for narrowband FM on the amateur
+VHF/UHF bands. The picker is organized by **band** — 6 m, 2 m, 1.25 m,
+70 cm, 33 cm, 23 cm — and each band shows:
+
+- its **simplex & calling** frequencies (2 m 146.52, 70 cm 446.00, …) as
+  quick-tune rows,
+- a **manual dial** bounded to the band edges (5 kHz steps),
+- the **voluntary ARRL band plan** as a reference list, with a "you are
+  here" marker that tracks the dial and a caution when you land in a
+  CW/SSB/weak-signal segment where FM isn't used.
+
+Every band here is open to **all U.S. license classes** (Technician and up)
+for FM voice; the panel notes the conventional repeater offset for the band.
+This first build is **receive-only** — repeater input/tone TX, a fetched
+repeater database, and manual repeater entry (offsets + CTCSS/DCS) come in
+later builds. The same UHF `freq_correction_ppm` note as FRS applies.
 
 ### Receiver Analysis (waterfall)
 
