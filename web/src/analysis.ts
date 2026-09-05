@@ -11,6 +11,8 @@
 import type { Client } from "./api";
 
 const DB_MIN = -150; // matches analysis::DB_LO
+const AXIS_PX = 44; // left gutter (dB labels) — kept in sync with draw()
+const CENTER_STEPS_HZ = [10_000, 25_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000];
 const DB_MAX = 10; //   matches analysis::DB_HI
 const WF_ROWS = 1024; // offscreen waterfall history height
 
@@ -153,14 +155,27 @@ export class AnalysisView {
   private lut = buildLut("turbo");
   private showMaxHold = false;
   private cursorX: number | null = null;
-  private dragX: number | null = null;
-  private dragViewLo = 0;
-  private dragViewHi = 0;
+  // active pointers on the plot (for pan + pinch-zoom)
+  private ptrs = new Map<number, number>(); // pointerId → clientX
+  private panLastX: number | null = null;
+  private panMoved = 0;
+  private pinchStartDist = 0;
+  private pinchAnchor = 0.5;
+  private pinchViewLo = 0;
+  private pinchViewHi = 0;
+  private centerStepHz = 500_000;
+  private fBox!: HTMLInputElement;
 
-  constructor(host: HTMLElement, client: Client, onRetune: (hz: number) => void) {
+  constructor(
+    host: HTMLElement,
+    client: Client,
+    onRetune: (hz: number) => void,
+    initialCenterHz = 0,
+  ) {
     this.host = host;
     this.client = client;
     this.onRetune = onRetune;
+    this.centerHz = initialCenterHz;
     this.loadPrefs();
     this.build();
   }
@@ -198,11 +213,27 @@ export class AnalysisView {
     this.host.replaceChildren();
     this.host.className = "an-root";
     this.host.innerHTML = `
+      <div class="an-freq">
+        <label for="anf">Centre</label>
+        <button class="secondary an-f-dn" title="down one step">−</button>
+        <input id="anf" type="text" inputmode="decimal" class="an-f" />
+        <span class="an-unit">MHz</span>
+        <button class="secondary an-f-up" title="up one step">+</button>
+        <select class="an-step" title="tune step">
+          ${CENTER_STEPS_HZ.map(
+            (s) =>
+              `<option value="${s}"${s === this.centerStepHz ? " selected" : ""}>${
+                s >= 1e6 ? s / 1e6 + " MHz" : s / 1e3 + " kHz"
+              }</option>`,
+          ).join("")}
+        </select>
+      </div>
       <div class="an-plots">
         <canvas class="an-pan"></canvas>
         <canvas class="an-wf"></canvas>
       </div>
       <div class="an-readout note"></div>
+      <p class="note an-hint">Wheel / pinch to zoom · drag to pan · click the spectrum to set centre.</p>
       <div class="an-controls">
         <label>Range
           <input type="number" class="an-floor" step="5" value="${this.dbFloor}"> …
@@ -237,8 +268,35 @@ export class AnalysisView {
     this.readout = this.host.querySelector(".an-readout")!;
     this.recBtn = this.host.querySelector(".an-rec")!;
     this.recInfo = this.host.querySelector(".an-rec-info")!;
+    this.fBox = this.host.querySelector(".an-f")!;
+    this.fBox.value = this.centerHz ? (this.centerHz / 1e6).toFixed(4) : "";
 
     const q = <T extends Element>(s: string) => this.host.querySelector<T>(s)!;
+
+    // --- centre frequency ---
+    const stepCenter = (dir: number) => this.setCenter(this.centerHz + dir * this.centerStepHz);
+    q<HTMLButtonElement>(".an-f-dn").addEventListener("click", () => stepCenter(-1));
+    q<HTMLButtonElement>(".an-f-up").addEventListener("click", () => stepCenter(1));
+    q<HTMLSelectElement>(".an-step").addEventListener("change", (e) => {
+      this.centerStepHz = +(e.target as HTMLSelectElement).value;
+    });
+    const commitBox = () => {
+      const mhz = parseFloat(this.fBox.value.replace(/[, ]/g, ""));
+      if (Number.isFinite(mhz) && mhz > 0) this.setCenter(Math.round(mhz * 1e6));
+    };
+    this.fBox.addEventListener("change", commitBox);
+    this.fBox.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        commitBox();
+        this.fBox.blur();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        stepCenter(1);
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        stepCenter(-1);
+      }
+    });
     q<HTMLInputElement>(".an-floor").addEventListener("input", (e) => {
       this.dbFloor = +(e.target as HTMLInputElement).value;
       this.savePrefs();
@@ -277,6 +335,7 @@ export class AnalysisView {
       c.addEventListener("pointerdown", (e) => this.onDown(e));
       c.addEventListener("pointermove", (e) => this.onMove(e));
       c.addEventListener("pointerup", (e) => this.onUp(e));
+      c.addEventListener("pointercancel", (e) => this.onUp(e));
       c.addEventListener("pointerleave", () => {
         this.cursorX = null;
         this.readout.textContent = "";
@@ -286,6 +345,16 @@ export class AnalysisView {
         this.viewHi = 0.5;
       });
     }
+  }
+
+  /** Re-tune the receiver centre; optimistically update locally so the dial
+   *  and marker move immediately, the next frame confirms. */
+  private setCenter(hz: number): void {
+    hz = Math.round(hz);
+    if (!Number.isFinite(hz) || hz <= 0) return;
+    this.centerHz = hz;
+    if (this.fBox && document.activeElement !== this.fBox) this.fBox.value = (hz / 1e6).toFixed(4);
+    this.onRetune(hz);
   }
 
   private async patchParams(p: Record<string, number>): Promise<void> {
@@ -298,66 +367,99 @@ export class AnalysisView {
   }
 
   // ---- interaction ------------------------------------------------
+  /** Cursor position as a fraction 0..1 across the *plotted* area (i.e. past
+   *  the left dB-label gutter). */
   private frac(e: { clientX: number }, c: HTMLCanvasElement): number {
     const r = c.getBoundingClientRect();
-    return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    return Math.min(1, Math.max(0, (e.clientX - r.left - AXIS_PX) / Math.max(1, r.width - AXIS_PX)));
   }
   private viewHzAt(f: number): number {
-    const lo = this.viewLo,
-      hi = this.viewHi;
-    return this.centerHz + (lo + (hi - lo) * f) * this.spanHz;
+    return this.centerHz + (this.viewLo + (this.viewHi - this.viewLo) * f) * this.spanHz;
   }
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
-    const c = e.currentTarget as HTMLCanvasElement;
-    const p = this.frac(e, c);
+    const p = this.frac(e, e.currentTarget as HTMLCanvasElement);
     const anchor = this.viewLo + (this.viewHi - this.viewLo) * p;
     const k = e.deltaY > 0 ? 1.25 : 0.8;
     let lo = anchor + (this.viewLo - anchor) * k;
     let hi = anchor + (this.viewHi - anchor) * k;
-    if (hi - lo > 1) {
-      lo = -0.5;
-      hi = 0.5;
-    }
     if (hi - lo < 0.01) return;
-    this.viewLo = Math.max(-0.5, lo);
-    this.viewHi = Math.min(0.5, hi);
+    [lo, hi] = this.clampView(lo, hi);
+    this.viewLo = lo;
+    this.viewHi = hi;
   }
   private onDown(e: PointerEvent): void {
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    this.dragX = e.clientX;
-    this.dragViewLo = this.viewLo;
-    this.dragViewHi = this.viewHi;
+    const c = e.currentTarget as HTMLElement;
+    c.setPointerCapture(e.pointerId);
+    this.ptrs.set(e.pointerId, e.clientX);
+    if (this.ptrs.size === 1) {
+      this.panLastX = e.clientX;
+      this.panMoved = 0;
+    } else if (this.ptrs.size === 2) {
+      const [a, b] = [...this.ptrs.values()];
+      this.pinchStartDist = Math.max(1, Math.abs(a! - b!));
+      this.pinchViewLo = this.viewLo;
+      this.pinchViewHi = this.viewHi;
+      this.pinchAnchor = this.frac({ clientX: (a! + b!) / 2 }, e.currentTarget as HTMLCanvasElement);
+      this.panLastX = null; // suspend pan while pinching
+    }
   }
+
   private onMove(e: PointerEvent): void {
     const c = e.currentTarget as HTMLCanvasElement;
     this.cursorX = this.frac(e, c);
-    if (this.dragX != null) {
+    if (this.ptrs.has(e.pointerId)) this.ptrs.set(e.pointerId, e.clientX);
+
+    if (this.ptrs.size >= 2) {
+      const [a, b] = [...this.ptrs.values()];
+      const dist = Math.max(1, Math.abs(a! - b!));
+      const k = this.pinchStartDist / dist; // fingers apart → k<1 → zoom in
+      const span0 = this.pinchViewHi - this.pinchViewLo;
+      const anchorHzFrac = this.pinchViewLo + span0 * this.pinchAnchor;
+      let span = Math.min(1, Math.max(0.01, span0 * k));
+      let lo = anchorHzFrac - span * this.pinchAnchor;
+      let hi = lo + span;
+      [lo, hi] = this.clampView(lo, hi);
+      this.viewLo = lo;
+      this.viewHi = hi;
+    } else if (this.panLastX != null) {
       const r = c.getBoundingClientRect();
-      const d = ((e.clientX - this.dragX) / r.width) * (this.dragViewHi - this.dragViewLo);
-      let lo = this.dragViewLo - d;
-      let hi = this.dragViewHi - d;
-      if (lo < -0.5) {
-        hi += -0.5 - lo;
-        lo = -0.5;
-      }
-      if (hi > 0.5) {
-        lo -= hi - 0.5;
-        hi = 0.5;
-      }
+      const dx = e.clientX - this.panLastX;
+      this.panMoved += Math.abs(dx);
+      this.panLastX = e.clientX;
+      const d = (dx / Math.max(1, r.width - AXIS_PX)) * (this.viewHi - this.viewLo);
+      const [lo, hi] = this.clampView(this.viewLo - d, this.viewHi - d);
       this.viewLo = lo;
       this.viewHi = hi;
     }
+
     const hz = this.viewHzAt(this.cursorX);
     const db = this.dbAt(this.cursorX);
     this.readout.textContent = `${fmtHz(hz)}   ${db == null ? "" : db.toFixed(1) + " dBFS"}`;
   }
+
   private onUp(e: PointerEvent): void {
-    const moved = this.dragX != null && Math.abs(e.clientX - this.dragX) > 3;
-    this.dragX = null;
-    if (!moved && this.spanHz > 0) {
-      this.onRetune(Math.round(this.viewHzAt(this.frac(e, e.currentTarget as HTMLCanvasElement))));
+    const wasSingle = this.ptrs.size === 1;
+    this.ptrs.delete(e.pointerId);
+    if (this.ptrs.size === 1) {
+      // dropped to one finger after a pinch — reseat pan origin
+      this.panLastX = [...this.ptrs.values()][0]!;
+      this.panMoved = 999;
+    } else if (this.ptrs.size === 0) {
+      const tap = wasSingle && this.panMoved < 8;
+      this.panLastX = null;
+      if (tap && this.spanHz > 0) {
+        this.setCenter(this.viewHzAt(this.frac(e, e.currentTarget as HTMLCanvasElement)));
+      }
     }
+  }
+
+  private clampView(lo: number, hi: number): [number, number] {
+    const span = hi - lo;
+    if (span >= 1) return [-0.5, 0.5];
+    if (lo < -0.5) return [-0.5, -0.5 + span];
+    if (hi > 0.5) return [0.5 - span, 0.5];
+    return [lo, hi];
   }
   private dbAt(f: number): number | null {
     if (!this.avg.length) return null;
@@ -426,6 +528,9 @@ export class AnalysisView {
     this.centerHz = f.centerHz;
     this.spanHz = f.spanHz;
     this.avg = f.avg;
+    if (this.fBox && document.activeElement !== this.fBox) {
+      this.fBox.value = (f.centerHz / 1e6).toFixed(4);
+    }
     if (this.showMaxHold) {
       if (!this.maxHold || this.maxHold.length !== f.nBins) this.maxHold = f.avg.slice();
       else for (let i = 0; i < f.nBins; i++) this.maxHold[i] = Math.max(this.maxHold[i]!, f.avg[i]!);
@@ -525,6 +630,16 @@ export class AnalysisView {
         trace(this.avg, false, getCss("--accent"));
       }
       if (this.showMaxHold && this.maxHold) trace(this.maxHold, false, getCss("--muted"));
+      const fc = (0 - this.viewLo) / (this.viewHi - this.viewLo);
+      if (fc >= 0 && fc <= 1) {
+        const x = gx + fc * plotW;
+        g.strokeStyle = "#e0463b";
+        g.lineWidth = 1.5;
+        g.beginPath();
+        g.moveTo(x, 0);
+        g.lineTo(x, H);
+        g.stroke();
+      }
       if (this.cursorX != null) {
         const x = gx + this.cursorX * plotW;
         g.strokeStyle = getCss("--muted");
@@ -569,9 +684,20 @@ export class AnalysisView {
         g.lineTo(x, H - 18 * dpr);
         g.stroke();
       }
+      const fc = (0 - this.viewLo) / (this.viewHi - this.viewLo);
+      if (fc >= 0 && fc <= 1) {
+        const x = gx + fc * (W - gx);
+        g.strokeStyle = "#e0463b";
+        g.lineWidth = 1.5 * dpr;
+        g.beginPath();
+        g.moveTo(x, 0);
+        g.lineTo(x, H);
+        g.stroke();
+      }
       if (this.cursorX != null) {
         const x = gx + this.cursorX * (W - gx);
         g.strokeStyle = "rgba(255,255,255,0.6)";
+        g.lineWidth = 1;
         g.beginPath();
         g.moveTo(x, 0);
         g.lineTo(x, H);

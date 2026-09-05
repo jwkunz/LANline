@@ -544,3 +544,41 @@ canvas.apt-canvas {
 .an-rec-info a {
   color: var(--accent);
 }
+
+.an-freq {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.an-freq label {
+  font-weight: 600;
+  font-size: 13px;
+}
+.an-freq .an-f {
+  width: 8em;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.an-freq .an-unit {
+  color: var(--muted);
+  font-size: 13px;
+}
+.an-freq .an-step {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  margin-left: auto;
+}
+.an-hint {
+  margin: 0;
+}

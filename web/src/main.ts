@@ -1068,7 +1068,12 @@ function syncAnalysisView(): void {
   }
   if (!state.client) return;
   if (!analysisView) {
-    analysisView = new AnalysisView(wantHost, state.client, (hz) => void tuneFrequency(hz));
+    analysisView = new AnalysisView(
+      wantHost,
+      state.client,
+      (hz) => void tuneFrequency(hz),
+      state.radio?.frequency_hz ?? 0,
+    );
     analysisView.start();
   } else if (analysisView.host !== wantHost) {
     analysisView.rehost(wantHost);
