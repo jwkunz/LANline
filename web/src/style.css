@@ -477,3 +477,70 @@ canvas.apt-canvas {
   flex: 0 0 auto;
   padding: 6px 10px;
 }
+
+/* --- Receiver Analysis (waterfall) ------------------------------- */
+.an-root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.an-plots {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+}
+.an-pan,
+.an-wf {
+  display: block;
+  width: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+.an-pan {
+  border-bottom: 1px solid var(--line);
+}
+.an-readout {
+  font-variant-numeric: tabular-nums;
+  min-height: 1.2em;
+}
+.an-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  font-size: 13px;
+}
+.an-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+}
+.an-controls input[type="number"] {
+  width: 5.5em;
+  padding: 5px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+.an-controls select {
+  padding: 5px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
+.an-controls .an-check input {
+  width: auto;
+}
+.an-rec.an-rec-on {
+  background: #d92626;
+  color: #fff;
+}
+.an-rec-info a {
+  color: var(--accent);
+}

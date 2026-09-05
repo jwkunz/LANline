@@ -122,6 +122,20 @@ pub fn modes() -> Vec<ModeInfo> {
             ]),
         },
         ModeInfo {
+            id: "analysis",
+            name: "Receiver Analysis (FFT panadapter + waterfall)",
+            tx_capable: false,
+            params: BTreeMap::from([
+                // Server-side FFT. Everything visual (dynamic range, colour
+                // map, zoom) is client-side over the fixed u8 dB window.
+                ("fft_size", num_enum(4096.0, &[1024.0, 2048.0, 4096.0, 8192.0, 16384.0], "bins")),
+                // 0=Hann, 1=Blackman, 2=Blackman-Harris, 3=rectangular
+                ("window", num_enum(0.0, &[0.0, 1.0, 2.0, 3.0], "code")),
+                ("frame_rate_hz", num(20.0, 1.0, 60.0, "fps")),
+                ("averaging", num(0.5, 0.0, 0.98, "ratio")),
+            ]),
+        },
+        ModeInfo {
             id: "debug_tone",
             name: "Debug Tone (A4 440 Hz)",
             tx_capable: false,
@@ -175,7 +189,7 @@ pub fn presets() -> Vec<Preset> {
 /// Capability strings for `GET /api/v1/server` and the beacon. `tx` is added
 /// by the caller when the selected device supports it.
 pub fn base_capabilities() -> Vec<String> {
-    ["rx", "webrtc", "nbfm", "wbfm", "am", "frs", "apt", "adsb", "ais", "debug_tone"]
+    ["rx", "webrtc", "nbfm", "wbfm", "am", "frs", "apt", "adsb", "ais", "analysis", "debug_tone"]
         .iter()
         .map(|s| s.to_string())
         .collect()

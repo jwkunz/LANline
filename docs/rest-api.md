@@ -363,6 +363,17 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "analysis",
+    "name": "Receiver Analysis (FFT panadapter + waterfall)",
+    "tx_capable": false,
+    "params": {
+      "fft_size":      { "type": "number", "default": 4096, "enum": [1024, 2048, 4096, 8192, 16384], "unit": "bins" },
+      "window":        { "type": "number", "default": 0, "enum": [0, 1, 2, 3], "unit": "code" },
+      "frame_rate_hz": { "type": "number", "default": 20, "min": 1, "max": 60, "unit": "fps" },
+      "averaging":     { "type": "number", "default": 0.5, "min": 0, "max": 0.98, "unit": "ratio" }
+    }
+  },
+  {
     "id": "debug_tone",
     "name": "Debug Tone (A4 440 Hz)",
     "tx_capable": false,
@@ -373,6 +384,11 @@ the client uses to render controls and the server uses to validate
   }
 ]
 ```
+
+`analysis` produces no audio: the server runs overlapped windowed FFTs on the
+raw IQ and serves them for the web client's interactive waterfall. `window`
+codes: `0` Hann, `1` Blackman, `2` Blackman-Harris, `3` rectangular. See the
+`/analysis/*` endpoints below.
 
 `nbfm` and `wbfm` share one DSP chain (LO-offset NCO → FIR decimation → polar
 discriminator → de-emphasis → audio LPF → resample); the parameters scale it
@@ -940,6 +956,55 @@ so the client code path exists for later.
 ### `DELETE /api/v1/sessions/{id}/audio`
 
 Close the peer connection, keep the session. `204 No Content`.
+
+---
+
+## Receiver Analysis
+
+Populated only while the `analysis` mode pipeline runs. Read endpoints are
+unauthenticated (same posture as `/radio/status`).
+
+### `GET /api/v1/analysis/spectrum?since=<seq>&max_rows=<n>`
+
+Binary FFT frame, `application/octet-stream`, little-endian:
+
+```text
+"LWF1"       magic (4 bytes)
+seq          u64   total waterfall rows produced since pipeline start
+center_hz    f64
+span_hz      f64   = the sample rate
+n_bins       u32   = fft_size
+db_lo, db_hi f32   the dB window the u8 rows are quantised over (−150, +10)
+n_new_rows   u32
+avg_db       f32 × n_bins   EMA-averaged spectrum (the panadapter trace), DC-centred
+rows         u8  × n_bins × n_new_rows   instantaneous rows since `since`, oldest first
+```
+
+Poll with `since` = the previous frame's `seq`. `max_rows` (default 256)
+bounds catch-up after a stall. The client maps `u8` → colour over its own
+visible floor/ceiling, so changing the dynamic range needs no round-trip.
+
+### `GET /api/v1/analysis/status`
+
+```json
+{ "running": true, "center_hz": 100000000, "span_hz": 2000000, "n_bins": 4096,
+  "seq": 5123, "rows_held": 2000, "recording": false, "last_recording": null }
+```
+
+### `POST /api/v1/analysis/record`
+
+Auth. `{ "action": "start", "max_secs": 60 }` begins an IQ recording — a
+2-channel 16-bit PCM WAV (interleaved I, Q at `tuner.sample_rate_hz`), the
+format GQRX / SDR# / SDRuno read. `max_secs` is clamped 1–600 (default 60);
+recording auto-stops at the cap. `{ "action": "stop" }` closes it and returns
+`last_recording` metadata. `409` if analysis isn't running, or already
+recording. Files land in `--iq-dir` (default: the server's working
+directory); at 2 Msps that's ~8 MB/s.
+
+### `GET /api/v1/analysis/recording`
+
+Streams the most recently completed recording as a `.wav` attachment. `404`
+if there is none, `409` while one is still in progress.
 
 ---
 

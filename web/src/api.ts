@@ -1,6 +1,7 @@
 // Thin typed REST client for the LANline server.
 
 import type {
+  AnalysisStatus,
   ApiErrorBody,
   AudioStateResponse,
   CreateSessionResponse,
@@ -180,6 +181,28 @@ export class Client {
 
   patchRadio = (patch: Record<string, unknown>) =>
     this.request<RadioConfig>("PATCH", "/api/v1/radio", { auth: true, body: patch });
+
+  // --- Receiver Analysis -------------------------------------------
+  analysisStatus = (signal?: AbortSignal) =>
+    this.request<AnalysisStatus>("GET", "/api/v1/analysis/status", { signal });
+
+  /** Binary spectrum/waterfall frame (`LWF1` — see analysis.ts). Bare fetch,
+   *  no retry: a dropped frame just means one skipped waterfall row. */
+  async analysisSpectrum(sinceSeq: number, maxRows: number): Promise<ArrayBuffer> {
+    const res = await fetch(
+      `${this.base}/api/v1/analysis/spectrum?since=${sinceSeq}&max_rows=${maxRows}`,
+    );
+    if (!res.ok) throw new ApiError(res.status, "http_error", `${res.status} ${res.statusText}`);
+    return res.arrayBuffer();
+  }
+
+  analysisRecord = (action: "start" | "stop", maxSecs?: number) =>
+    this.request<Record<string, unknown>>("POST", "/api/v1/analysis/record", {
+      auth: true,
+      body: { action, ...(maxSecs != null ? { max_secs: maxSecs } : {}) },
+    });
+
+  analysisRecordingUrl = () => `${this.base}/api/v1/analysis/recording`;
 
   startRadio = () =>
     this.request<RadioConfig>("POST", "/api/v1/radio/start", { auth: true });

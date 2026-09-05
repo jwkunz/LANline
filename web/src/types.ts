@@ -111,6 +111,24 @@ export interface DeviceInfo {
   };
 }
 
+export interface AnalysisStatus {
+  running: boolean;
+  center_hz: number;
+  span_hz: number;
+  n_bins: number;
+  seq: number;
+  rows_held: number;
+  recording: boolean;
+  last_recording: {
+    filename: string;
+    path: string;
+    bytes: number;
+    secs: number;
+    sample_rate_hz: number;
+    center_hz: number;
+  } | null;
+}
+
 /** `radio.tuner` — a loose bag the Radio Options panel reads and writes. */
 export interface TunerConfig {
   device_id: string | null;

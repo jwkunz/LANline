@@ -72,6 +72,11 @@ pub struct Config {
     #[arg(long, env = "LANLINE_DUMP_WAV")]
     pub dump_wav: Option<PathBuf>,
 
+    /// Directory for Receiver Analysis IQ `.wav` recordings. Default: the
+    /// current working directory. Files can be large (~8 MB/s at 2 Msps).
+    #[arg(long, env = "LANLINE_IQ_DIR")]
+    pub iq_dir: Option<PathBuf>,
+
     /// This device's known crystal frequency error, in parts-per-million
     /// (applied to every tuned frequency on every mode). A HackRF's stock
     /// TCXO commonly drifts a few to a few tens of ppm; negligible at VHF,

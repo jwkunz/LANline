@@ -24,6 +24,9 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
 - **NOAA APT** (137 MHz weather satellite): a real-time image downlink decoded
   into a two-channel grayscale raster over REST and rendered to canvas in the
   web client,
+- **Receiver Analysis**: a server-computed FFT panadapter + waterfall,
+  rendered as an interactive (zoom / pan / click-to-tune) plot in the web
+  client, with IQ `.wav` recording,
 - **discovery** so clients find it unaided: an **mDNS** responder
   (`lanline.local` + `_lanline._tcp`) for browsers, and a **UDP beacon** for the
   Android/CLI clients that can't use mDNS.
@@ -309,6 +312,19 @@ SDR's crystal is likely just off-frequency enough at UHF to matter — set
 `tuner.freq_correction_ppm` (or `--freq-correction-ppm` at startup); see
 [architecture.md](docs/architecture.md#hackrf-frequency-calibration) for how
 to measure it.
+
+### Receiver Analysis (waterfall)
+
+Pick **Analysis** in the mode strip for an interactive FFT panadapter +
+waterfall over the current `tuner.sample_rate_hz` span. Wheel to zoom the
+frequency axis, drag to pan, click to re-tune the centre; adjustable dynamic
+range, colour map, FFT size, window and frame rate. No audio in this mode —
+switch to nbfm/wbfm/am to listen.
+
+**⏺ Record IQ** writes a 2-channel int16 `.wav` (interleaved I/Q at the
+device rate — the format GQRX / SDR# / SDRuno read) to the server's
+`--iq-dir` (default: its working directory), then offers a download link.
+~8 MB/s at 2 Msps; 60-second cap by default.
 
 ## Building the Android client
 

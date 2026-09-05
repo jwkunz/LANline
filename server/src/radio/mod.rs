@@ -12,6 +12,7 @@ pub mod dsp;
 
 use crate::adsb::AdsbShared;
 use crate::ais::AisShared;
+use crate::analysis::AnalysisShared;
 use crate::apt::AptShared;
 use crate::audio::{rms_dbfs, AudioFrame};
 use crate::model::RadioConfig;
@@ -129,6 +130,7 @@ pub struct RadioManager {
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    analysis: Arc<AnalysisShared>,
     /// Off by default (`--enable-tx`) — a general-purpose SDR transmitting
     /// is a much bigger deal than one only ever receiving, so it needs an
     /// explicit opt-in rather than working out of the box.
@@ -229,6 +231,7 @@ impl RadioManager {
         cfg: Arc<Mutex<RadioConfig>>,
         registry: Arc<DeviceRegistry>,
         dump_wav: Option<PathBuf>,
+        iq_dir: std::path::PathBuf,
         enable_tx: bool,
     ) -> Arc<Self> {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -242,6 +245,7 @@ impl RadioManager {
             adsb: Arc::new(AdsbShared::new()),
             ais: Arc::new(AisShared::new()),
             apt: Arc::new(AptShared::new()),
+            analysis: Arc::new(AnalysisShared::new(iq_dir)),
             enable_tx,
             audio_in: TxAudioSource::new(),
         })
@@ -320,6 +324,12 @@ impl RadioManager {
         self.apt.clone()
     }
 
+    /// Shared receiver-analysis spectrum/waterfall + IQ recorder
+    /// (populated only while the `analysis` mode pipeline is running).
+    pub fn analysis(&self) -> Arc<AnalysisShared> {
+        self.analysis.clone()
+    }
+
     pub fn is_running(&self) -> bool {
         self.run.lock().unwrap().running
     }
@@ -348,6 +358,7 @@ impl RadioManager {
         let adsb = self.adsb.clone();
         let ais = self.ais.clone();
         let apt = self.apt.clone();
+        let analysis = self.analysis.clone();
         let audio_in = self.audio_in.clone();
 
         #[cfg(feature = "soapy")]
@@ -357,7 +368,7 @@ impl RadioManager {
 
         let handle = std::thread::Builder::new()
             .name("rx-pipeline".into())
-            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, audio_in))
+            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, analysis, audio_in))
             .expect("spawn rx-pipeline thread");
 
         run.stop = Some(stop);
@@ -528,6 +539,8 @@ enum SourceKind {
     Ais(Box<AisSdrParams>),
     #[cfg(feature = "soapy")]
     Apt(Box<AptSdrParams>),
+    #[cfg(feature = "soapy")]
+    Analysis(Box<AnalysisSdrParams>),
 }
 
 #[cfg(feature = "soapy")]
@@ -580,6 +593,26 @@ struct AptSdrParams {
     freq_correction_ppm: f64,
     apt: crate::apt::demod::AptParams,
     max_lines: usize,
+}
+
+#[cfg(feature = "soapy")]
+struct AnalysisSdrParams {
+    soapy_args: String,
+    device_rate: f64,
+    freq_hz: f64,
+    channel: usize,
+    antenna: Option<String>,
+    bandwidth_hz: Option<f64>,
+    agc: bool,
+    gain_overall_db: Option<f64>,
+    gain_elements_db: Vec<(String, f64)>,
+    settings: Vec<(String, String)>,
+    freq_correction_ppm: f64,
+    fft_size: usize,
+    window_code: u32,
+    frame_rate_hz: f64,
+    avg_alpha: f32,
+    max_rows: usize,
 }
 
 #[cfg(feature = "soapy")]
@@ -797,6 +830,45 @@ impl PipelineParams {
                     None => SourceKind::Silence,
                 }
             }
+            "analysis" => {
+                #[cfg(not(feature = "soapy"))]
+                {
+                    let _ = device;
+                    SourceKind::Silence
+                }
+                #[cfg(feature = "soapy")]
+                match device {
+                    Some(dev) => SourceKind::Analysis(Box::new(AnalysisSdrParams {
+                        soapy_args: dev.soapy_args.clone(),
+                        device_rate: cfg.tuner.sample_rate_hz,
+                        freq_hz: cfg.frequency_hz as f64,
+                        channel: cfg.tuner.channel,
+                        antenna: cfg.tuner.antenna.clone(),
+                        bandwidth_hz: cfg.tuner.bandwidth_hz,
+                        agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
+                        gain_overall_db: cfg.tuner.gain_db,
+                        gain_elements_db: cfg
+                            .tuner
+                            .gain_elements_db
+                            .iter()
+                            .map(|(k, v)| (k.clone(), *v))
+                            .collect(),
+                        settings: cfg
+                            .tuner
+                            .device_settings
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                        freq_correction_ppm: cfg.tuner.freq_correction_ppm,
+                        fft_size: param("fft_size", 4096.0).max(256.0) as usize,
+                        window_code: param("window", 0.0).max(0.0) as u32,
+                        frame_rate_hz: param("frame_rate_hz", 20.0).clamp(1.0, 60.0),
+                        avg_alpha: (1.0 - param("averaging", 0.5).clamp(0.0, 0.98)) as f32,
+                        max_rows: 2000,
+                    })),
+                    None => SourceKind::Silence,
+                }
+            }
             _ => SourceKind::Silence,
         };
 
@@ -836,9 +908,10 @@ fn run_pipeline(
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    analysis: Arc<AnalysisShared>,
     audio_in: Arc<TxAudioSource>,
 ) {
-    let _ = (&adsb, &ais, &apt, &audio_in);
+    let _ = (&adsb, &ais, &apt, &analysis, &audio_in);
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
         Ok(w) => {
@@ -869,6 +942,8 @@ fn run_pipeline(
         SourceKind::Ais(p) => run_ais(*p, ais, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
         SourceKind::Apt(p) => run_apt(*p, apt, &telemetry, &stop, cmd_rx),
+        #[cfg(feature = "soapy")]
+        SourceKind::Analysis(p) => run_analysis(*p, analysis, &telemetry, &stop, cmd_rx),
     }
 }
 
@@ -1695,6 +1770,178 @@ fn run_apt(
         }
     }
 
+    let _ = stream.deactivate(None);
+}
+
+/// Receiver Analysis pipeline: raw IQ → FFT panadapter + waterfall (written
+/// into `analysis::Spectrum`), plus an optional IQ-to-WAV recorder tap. No
+/// demod, no audio — the client renders the spectrum to canvas.
+#[cfg(feature = "soapy")]
+fn run_analysis(
+    p: AnalysisSdrParams,
+    shared: Arc<AnalysisShared>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+    cmd_rx: mpsc::Receiver<PipelineCmd>,
+) {
+    use crate::analysis::Analyzer;
+    use num_complex::Complex32;
+    use soapysdr::{Device, Direction, ErrorCode};
+
+    let dir = Direction::Rx;
+    let ch = p.channel;
+
+    let dev = match Device::new(p.soapy_args.as_str()) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("analysis: cannot open device: {e}");
+            return;
+        }
+    };
+    let log_set = |what: &str, r: Result<(), soapysdr::Error>| {
+        if let Err(e) = r {
+            tracing::warn!("analysis: set {what}: {e}");
+        }
+    };
+    log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
+    // Analysis tunes the device straight to the center frequency — the whole
+    // point is to see what's actually there, DC spike included.
+    log_set(
+        "frequency",
+        dev.set_frequency(dir, ch, apply_ppm(p.freq_hz, p.freq_correction_ppm), ""),
+    );
+    if let Some(ant) = &p.antenna {
+        log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
+    }
+    if let Some(bw) = p.bandwidth_hz {
+        log_set("bandwidth", dev.set_bandwidth(dir, ch, bw));
+    }
+    if p.agc {
+        log_set("agc", dev.set_gain_mode(dir, ch, true));
+    } else {
+        log_set("gain_mode", dev.set_gain_mode(dir, ch, false));
+        if let Some(g) = p.gain_overall_db {
+            log_set("gain", dev.set_gain(dir, ch, g));
+        }
+        for (name, v) in &p.gain_elements_db {
+            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+        }
+    }
+    for (k, v) in &p.settings {
+        log_set("setting", dev.write_setting(k.as_str(), v.as_str()));
+    }
+
+    let mut analyzer = Analyzer::new(p.fft_size, p.window_code, p.frame_rate_hz);
+    shared
+        .spectrum
+        .lock()
+        .unwrap()
+        .reset(p.freq_hz, p.device_rate, analyzer.size(), p.max_rows);
+
+    let mut stream = match dev.rx_stream::<Complex32>(&[ch]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("analysis: rx_stream: {e}");
+            return;
+        }
+    };
+    if let Err(e) = stream.activate(None) {
+        tracing::error!("analysis: stream activate: {e}");
+        return;
+    }
+
+    let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
+    let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
+
+    telemetry.lock().unwrap().source = "analysis";
+    tracing::info!(
+        "analysis: {} @ {:.4} MHz, {:.3} Msps, {}-pt FFT @ {:.0} fps",
+        p.soapy_args,
+        p.freq_hz / 1e6,
+        p.device_rate / 1e6,
+        analyzer.size(),
+        p.frame_rate_hz,
+    );
+
+    let mut overruns: u64 = 0;
+    let mut rssi_ema = -60.0f32;
+    let mut last_status = Instant::now();
+    let avg_alpha = p.avg_alpha;
+
+    while !stop.load(Ordering::SeqCst) {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                PipelineCmd::Retune(hz) => {
+                    log_set(
+                        "frequency",
+                        dev.set_frequency(dir, ch, apply_ppm(hz, p.freq_correction_ppm), ""),
+                    );
+                    shared.spectrum.lock().unwrap().set_center(hz);
+                    tracing::info!("analysis: retuned to {:.4} MHz (live)", hz / 1e6);
+                }
+                PipelineCmd::Gain { agc, overall, elements } => {
+                    log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
+                    if !agc {
+                        if let Some(g) = overall {
+                            log_set("gain", dev.set_gain(dir, ch, g));
+                        }
+                        for (name, v) in &elements {
+                            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+                        }
+                    }
+                }
+                PipelineCmd::Demod(_) | PipelineCmd::Key(_) | PipelineCmd::Unkey => {}
+            }
+        }
+
+        let n = match stream.read(&mut [iq.as_mut_slice()], 200_000) {
+            Ok(n) => n,
+            Err(e) => {
+                match e.code {
+                    ErrorCode::Timeout => {}
+                    ErrorCode::Overflow => overruns += 1,
+                    _ => {
+                        tracing::warn!("analysis: stream read: {e}");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                continue;
+            }
+        };
+        if n == 0 {
+            continue;
+        }
+        let block = &iq[..n];
+
+        shared.record_iq(block);
+
+        let power: f32 = block.iter().map(|c| c.norm_sqr()).sum::<f32>() / n as f32;
+        let rssi_dbfs = (10.0 * (power + 1e-12).log10()).clamp(-120.0, 0.0);
+        rssi_ema = rssi_ema * 0.95 + rssi_dbfs * 0.05;
+
+        let sp = &shared.spectrum;
+        analyzer.process(block, |db| {
+            sp.lock().unwrap().push(db, avg_alpha);
+        });
+
+        if last_status.elapsed() >= Duration::from_millis(300) {
+            last_status = Instant::now();
+            let rows = shared.spectrum.lock().unwrap().seq;
+            let mut t = telemetry.lock().unwrap();
+            t.frames_sent = rows;
+            t.rssi_dbfs = Some(rssi_ema);
+            t.squelch_open = false;
+            t.overruns = overruns;
+        }
+    }
+
+    // Stop any recording cleanly on pipeline shutdown.
+    if let Some(rec) = shared.recorder.lock().unwrap().take() {
+        if let Ok(info) = rec.finish() {
+            tracing::info!("analysis: IQ recording closed: {} ({} bytes)", info.filename, info.bytes);
+            *shared.last_recording.lock().unwrap() = Some(info);
+        }
+    }
     let _ = stream.deactivate(None);
 }
 

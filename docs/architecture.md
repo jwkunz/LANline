@@ -93,11 +93,17 @@ server/src/
     tracker.rs         per-MMSI vessel table: position + static merge, trails, expiry
     nmea.rs            AIVDM sentence builder + TCP fan-out server
 
+  analysis/
+    mod.rs             AnalysisShared: Spectrum (panadapter + waterfall ring) +
+                       Analyzer (overlapped windowed rustfft -> dBFS, fftshift)
+                       + the IQ recorder handle
+    iq_wav.rs          IqRecorder: 2-channel int16 RIFF/WAVE (I,Q), header backpatch
+
   radio/
     mod.rs             RadioManager: owns config + pipeline task, hot-apply, telemetry;
                        run_sdr (nbfm/wbfm/am -> Opus, picks FmChain/AmChain via
-                       the Chain enum), run_adsb and run_ais (IQ -> track table,
-                       no audio)
+                       the Chain enum), run_adsb / run_ais / run_apt / run_analysis
+                       (IQ -> tracks / raster / spectrum, no audio)
     dsp.rs             FmChain (NBFM/WBFM) + AmChain (AM), sharing one
                        decimate/squelch/resample skeleton; Nco/FirDecimator/
                        Biquad/LinearResampler building blocks
@@ -443,6 +449,36 @@ settings with their types/ranges/descriptions needs a raw
 the panel offers `device_settings` as free-text key/value rows for now.
 IQ-balance mode is read (`has_iq_balance_mode`) but not written — the crate
 only exposes `setIQBalance(complex)`, not the automatic-mode toggle.
+
+### Receiver Analysis
+
+The `analysis` mode (`radio::run_analysis` → `analysis::AnalysisShared`) is a
+spectrum analyser, not a receiver: no demod, no audio. It reads raw IQ,
+runs 50 %-overlapped windowed FFTs (`rustfft`, planned once per FFT size),
+converts to dBFS power and `fftshift`s so DC sits centre, then EMA-averages
+into the panadapter trace and pushes a fresh instantaneous row into a
+2000-deep ring — rate-limited to `frame_rate_hz` regardless of block size.
+
+`GET /api/v1/analysis/spectrum` serves that as a compact binary frame (magic
+`LWF1`): the f32 averaged spectrum plus any waterfall rows produced since the
+client's `seq` cursor, the rows quantised to `u8` over a *fixed wide* dB
+window (−150…+10 dBFS). The client (`web/src/analysis.ts`, `AnalysisView`)
+maps `u8` → colour over its *own* visible floor/ceiling, so dragging the
+dynamic range or swapping colour map is instant and local — as in GQRX. It
+keeps an offscreen waterfall bitmap it scrolls and blits (never redrawing
+history), and layers on wheel-zoom / drag-pan of the frequency axis
+(interpolated past FFT resolution), click-to-retune-centre, a max-hold
+trace, dB grid + frequency ticks, and a hover readout. FFT size / window /
+frame rate are `mode_params` — changing them bounces the pipeline (planner
+rebuild), which the poll loop notices via a `seq` reset and resyncs.
+
+**IQ recording.** `POST /api/v1/analysis/record` tees the IQ block, as it's
+read, into `analysis::iq_wav::IqRecorder` — a 2-channel int16 RIFF/WAVE
+(interleaved I, Q at the device rate; the de-facto SDR IQ format). The header
+size fields are backpatched on close, so a crash leaves a recoverable file.
+A hard `max_secs` cap (default 60, ~0.5 GB max at the ceiling) auto-stops it;
+`GET /api/v1/analysis/recording` streams the finished file off disk (via
+`tokio_util::io::ReaderStream`, never buffered) as an attachment.
 
 ### HackRF frequency calibration
 

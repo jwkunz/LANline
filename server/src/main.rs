@@ -6,6 +6,7 @@
 
 mod adsb;
 mod ais;
+mod analysis;
 mod api;
 mod apt;
 mod audio;
@@ -79,6 +80,7 @@ async fn main() -> Result<()> {
         radio_cfg.clone(),
         registry.clone(),
         config.dump_wav.clone(),
+        config.iq_dir.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
         config.enable_tx,
     );
     if config.enable_tx {

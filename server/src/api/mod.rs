@@ -1,6 +1,7 @@
 //! axum router assembly.
 
 mod adsb;
+mod analysis;
 mod ais;
 mod apt;
 mod audio;
@@ -43,6 +44,10 @@ pub fn router(state: AppState) -> Router {
         .route("/ais/messages", get(ais::sentences))
         .route("/apt/image", get(apt::image))
         .route("/apt/status", get(apt::status))
+        .route("/analysis/spectrum", get(analysis::spectrum))
+        .route("/analysis/status", get(analysis::status))
+        .route("/analysis/record", post(analysis::record))
+        .route("/analysis/recording", get(analysis::download))
         .route("/radio/tx", get(reserved::stub).patch(reserved::stub))
         .route("/radio/tx/ptt", post(reserved::stub))
         .route("/sessions", get(sessions::list).post(sessions::create))
@@ -121,7 +126,7 @@ mod tests {
         let config = Config::parse_from(["lanline-server", "--no-beacon"]);
         let registry = Arc::new(DeviceRegistry::new()); // no device selected
         let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
-        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, false);
+        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, std::env::temp_dir(), false);
         let sessions = Arc::new(SessionStore::new(15, 45, 8));
         let (webrtc, audio_out) = WebrtcEngine::new(
             Ipv4Addr::LOCALHOST.into(),
@@ -153,7 +158,7 @@ mod tests {
         let config = Config::parse_from(["lanline-server", "--no-beacon", "--enable-tx"]);
         let registry = Arc::new(DeviceRegistry::new()); // no device selected
         let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
-        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, true);
+        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, std::env::temp_dir(), true);
         let sessions = Arc::new(SessionStore::new(15, 45, 8));
         let (webrtc, audio_out) = WebrtcEngine::new(
             Ipv4Addr::LOCALHOST.into(),

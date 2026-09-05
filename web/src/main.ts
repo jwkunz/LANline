@@ -1,6 +1,7 @@
 import "./style.css";
 import { ApiError, Client, normalizeBase } from "./api";
 import { openRadioOptions, radioOptionsOpen } from "./radio-options";
+import { AnalysisView } from "./analysis";
 import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { parseLatLon, type Located } from "./geo";
@@ -85,6 +86,14 @@ const MODE_META: Record<string, ModeMeta> = {
     defaultFreqHz: 1_000_000,
     loOffsetHz: 25_000,
     wantSampleRateHz: 1_000_000,
+  },
+  analysis: {
+    label: "Analysis",
+    icon: "✳️",
+    band: "spectrum",
+    defaultFreqHz: 100_000_000,
+    loOffsetHz: 0,
+    wantSampleRateHz: 2_000_000,
   },
   adsb: {
     label: "ADS-B",
@@ -208,6 +217,7 @@ let pollFails = 0;
  *  `refreshAptImage`/`drawAptImage`, mirroring `scopePlot` below). */
 let aptImg: AptImage | null = null;
 let aptImageFetchedAt = 0;
+let analysisView: AnalysisView | null = null;
 
 function readSavedLoc(): Located | null {
   return parseLatLon(localStorage.getItem(LOC_KEY) ?? "");
@@ -650,7 +660,8 @@ async function switchMode(id: string): Promise<void> {
     if (radio.running || NATIVE) {
       if (!radio.running) radio = await state.client.startRadio();
       setState({ radio });
-      if (!fixedFreq && state.audio && state.audioState === "idle") void startAudio();
+      if (!fixedFreq && id !== "analysis" && state.audio && state.audioState === "idle")
+        void startAudio();
     }
   } catch (e) {
     const err = e as ApiError;
@@ -1041,6 +1052,29 @@ const setHTML = (sel: string, html: string) => {
   if (el && el.innerHTML !== html) el.innerHTML = html;
 };
 
+
+/** Mount / rehost / tear down the Receiver Analysis panel to match the
+ *  current mode. The `AnalysisView` keeps its offscreen waterfall + view
+ *  state across a `panels` rebuild; only its visible DOM is remounted. */
+function syncAnalysisView(): void {
+  const wantHost =
+    state.radio?.mode === "analysis" ? panels.querySelector<HTMLElement>("#analysis-host") : null;
+  if (!wantHost) {
+    if (analysisView) {
+      analysisView.destroy();
+      analysisView = null;
+    }
+    return;
+  }
+  if (!state.client) return;
+  if (!analysisView) {
+    analysisView = new AnalysisView(wantHost, state.client, (hz) => void tuneFrequency(hz));
+    analysisView.start();
+  } else if (analysisView.host !== wantHost) {
+    analysisView.rehost(wantHost);
+  }
+}
+
 /** Update the values that change every poll without touching the DOM
  *  structure (so the station list keeps its scroll position). */
 function patchLive(): void {
@@ -1067,6 +1101,8 @@ function patchLive(): void {
   // Keep the manual-tune dial's number in sync as +/- and Seek move the
   // frequency — structKey() ignores frequency_hz, so the panel isn't
   // rebuilt. Don't stomp a value the user is mid-edit on.
+  syncAnalysisView();
+
   const dial = q<HTMLInputElement>("#fm-freq, #am-freq, #apt-freq");
   if (dial && dial !== document.activeElement) {
     const v =
@@ -1226,7 +1262,10 @@ function idlePanelsHtml(): string {
 
 function panelsHtml(): string {
   const dataMode =
-    state.radio?.mode === "adsb" || state.radio?.mode === "ais" || state.radio?.mode === "apt";
+    state.radio?.mode === "adsb" ||
+    state.radio?.mode === "ais" ||
+    state.radio?.mode === "apt" ||
+    state.radio?.mode === "analysis";
   return `
     ${modeStripHtml()}
     ${wizardHtml()}
@@ -1295,6 +1334,8 @@ function wizardHtml(): string {
     case "adsb":
     case "ais":
       return scopeWizardHtml();
+    case "analysis":
+      return `<section class="card"><h2>Receiver Analysis</h2><div id="analysis-host"></div></section>`;
     case "debug_tone":
       return toneWizardHtml();
     default:
