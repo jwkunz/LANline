@@ -466,9 +466,11 @@ window (−150…+10 dBFS). The client (`web/src/analysis.ts`, `AnalysisView`)
 maps `u8` → colour over its *own* visible floor/ceiling, so dragging the
 dynamic range or swapping colour map is instant and local — as in GQRX. It
 keeps an offscreen waterfall bitmap it scrolls and blits (never redrawing
-history), and layers on wheel-zoom / drag-pan of the frequency axis
-(interpolated past FFT resolution), click-to-retune-centre, a max-hold
-trace, dB grid + frequency ticks, and a hover readout. FFT size / window /
+history), and layers on wheel- and pinch-zoom / drag-pan of the frequency
+axis (interpolated past FFT resolution), an explicit centre-frequency box
+plus click-to-retune-centre, a max-hold trace, dB grid, frequency ticks, a
+time axis (from the *measured* row rate, not the requested one), and a hover
+readout. FFT size / window /
 frame rate are `mode_params` — changing them bounces the pipeline (planner
 rebuild), which the poll loop notices via a `seq` reset and resyncs.
 

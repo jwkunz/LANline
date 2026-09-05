@@ -143,6 +143,10 @@ export class AnalysisView {
   private maxHold: Float32Array | null = null;
   private lastSeq = 0;
   private raf = 0;
+  // effective waterfall row rate (measured, not the requested frame_rate_hz)
+  private rowRate = 20;
+  private rateSeq = 0;
+  private rateT = 0;
   private inflight = false;
   private stopped = true;
 
@@ -536,7 +540,23 @@ export class AnalysisView {
       else for (let i = 0; i < f.nBins; i++) this.maxHold[i] = Math.max(this.maxHold[i]!, f.avg[i]!);
     }
 
-    if (f.seq < this.lastSeq) this.lastSeq = 0; // pipeline restarted
+    if (f.seq < this.lastSeq) {
+      this.lastSeq = 0; // pipeline restarted
+      this.rateSeq = f.seq;
+      this.rateT = performance.now();
+    }
+    // measure the real row rate off seq/wall-clock deltas (the server's
+    // frame_rate_hz is a target it may not hit, and poll cadence bounds it)
+    {
+      const now = performance.now();
+      const dt = (now - this.rateT) / 1000;
+      if (dt > 0.75) {
+        const inst = (f.seq - this.rateSeq) / dt;
+        if (inst > 0.1 && inst < 200) this.rowRate = this.rowRate * 0.7 + inst * 0.3;
+        this.rateSeq = f.seq;
+        this.rateT = now;
+      }
+    }
     if (f.rows.length) {
       // scroll history up by rows.length, blit new rows at the bottom
       const k = Math.min(f.rows.length, WF_ROWS);
@@ -663,6 +683,35 @@ export class AnalysisView {
       const sx = lo * this.nBins;
       const sw = (hi - lo) * this.nBins;
       g.drawImage(this.wfBmp, sx, 0, sw, WF_ROWS, gx, 0, W - gx, H);
+
+      // time axis in the left gutter: bottom = now, up = older. The full
+      // canvas shows WF_ROWS of history at the measured row rate.
+      {
+        const rate = Math.max(0.5, this.rowRate);
+        const windowSec = WF_ROWS / rate;
+        // don't label past what's actually filled in yet
+        const filledSec = Math.min(windowSec, Math.min(this.lastSeq, WF_ROWS) / rate);
+        const nice = [1, 2, 5, 10, 15, 20, 30, 60, 120, 300];
+        const step = nice.find((s) => windowSec / s <= 6) ?? 600;
+        g.fillStyle = getCss("--card");
+        g.fillRect(0, 0, gx, H);
+        g.textAlign = "right";
+        g.font = `${11 * dpr}px system-ui`;
+        for (let age = step; age <= filledSec + 0.01; age += step) {
+          const y = H * (1 - age / windowSec);
+          g.strokeStyle = "rgba(255,255,255,0.12)";
+          g.lineWidth = 1;
+          g.beginPath();
+          g.moveTo(gx, y);
+          g.lineTo(W, y);
+          g.stroke();
+          g.fillStyle = getCss("--muted");
+          g.fillText(`${age >= 60 ? Math.round(age / 60) + "m" : age + "s"}`, gx - 4 * dpr, y + 4 * dpr);
+        }
+        g.fillStyle = getCss("--muted");
+        g.fillText("now", gx - 4 * dpr, H - 4 * dpr);
+      }
+
       // frequency labels along the bottom
       g.fillStyle = getCss("--muted");
       g.font = `${11 * dpr}px system-ui`;
