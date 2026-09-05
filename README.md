@@ -131,15 +131,21 @@ The server also exports the tracks over REST and as a raw TCP feed:
 ### NOAA APT (weather satellite)
 
 Pick **NOAA APT** in the mode strip — quick-picks for NOAA-15/18/19's 137 MHz
-downlinks, or a manual frequency, plus a canvas that fills in with the
+downlinks (each showing its predicted next pass and max elevation for your
+saved location), or a manual frequency, plus a canvas that fills in with the
 decoded image as scan lines arrive (`GET /api/v1/apt/{status,image}`, the
 latter a small binary raster, no image crate involved). Unlike every other
 mode here, this one has no ambient signal to fall back on: it's a real-time
 feed from one satellite, receivable only during an actual overhead pass (a
-few minutes, several times a day — predictable from a NORAD TLE via
-`gpredict` or similar). Outside of a pass, expect a low `sync_quality` and a
-noisy/empty image; that's the decoder correctly declining to claim a lock,
-not a bug.
+few minutes, several times a day). Outside of a pass, expect a low
+`sync_quality` and a noisy/empty image; that's the decoder correctly
+declining to claim a lock, not a bug.
+
+Pass predictions are computed **locally in the browser** via SGP4
+(`satellite.js`) against a bundled set of orbital elements
+(`GET /apt-tle.json`) — no live tracking API call, works offline. That
+snapshot goes stale faster than the station directories (accurate for
+roughly 1–2 weeks); regenerate it with `node scripts/fetch-apt-tle.mjs`.
 
 ## Building the Android client
 

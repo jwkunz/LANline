@@ -2,6 +2,17 @@
 // decode. Mirrors the server's `apt::Status` JSON and `apt::Image::encode()`
 // raster (see docs/rest-api.md).
 
+import {
+  degreesToRadians,
+  ecfToLookAngles,
+  eciToEcf,
+  gstime,
+  propagate,
+  radiansToDegrees,
+  twoline2satrec,
+} from "satellite.js";
+import { loadJson } from "./geo";
+
 export interface AptStatus {
   width: number;
   height: number;
@@ -45,3 +56,73 @@ export const APT_SATELLITES: AptSatellite[] = [
 
 export const APT_MIN_HZ = 137_000_000;
 export const APT_MAX_HZ = 138_000_000;
+
+// --- pass prediction (local SGP4, no live pass-prediction service) --------
+
+export interface AptTle {
+  name: string;
+  norad_id: number;
+  line1: string;
+  line2: string;
+}
+
+/** Regenerate with `node scripts/fetch-apt-tle.mjs`. Unlike the station
+ *  directories, this goes stale within 1-2 weeks — a TLE's accuracy decays
+ *  with its age, so predictions from a long-uncommitted snapshot drift off. */
+export const loadAptTle = () => loadJson<AptTle[]>("./apt-tle.json");
+
+export interface AptPass {
+  /** Epoch ms. */
+  aos: number;
+  los: number;
+  max_elevation_deg: number;
+}
+
+/** Upcoming passes above `minElevationDeg`, computed locally from the TLE
+ *  via SGP4 (satellite.js) — no network call, no external prediction
+ *  service, works offline once the TLE is loaded. `withinHours` bounds how
+ *  far ahead to search; a satellite with no qualifying pass in that window
+ *  (a real possibility — ~14 orbits/day doesn't mean 14 usable overhead
+ *  passes for any one location) simply returns fewer than `maxPasses`. */
+export function nextPasses(
+  tle: AptTle,
+  lat: number,
+  lon: number,
+  withinHours = 48,
+  minElevationDeg = 15,
+  maxPasses = 3,
+): AptPass[] {
+  let satrec;
+  try {
+    satrec = twoline2satrec(tle.line1, tle.line2);
+  } catch {
+    return [];
+  }
+  const observerGd = { longitude: degreesToRadians(lon), latitude: degreesToRadians(lat), height: 0 };
+  const stepMs = 30_000;
+  const start = Date.now();
+  const end = start + withinHours * 3_600_000;
+  const passes: AptPass[] = [];
+  let inPass = false;
+  let aos = 0;
+  let maxEl = -90;
+  for (let t = start; t <= end && passes.length < maxPasses; t += stepMs) {
+    const date = new Date(t);
+    const pv = propagate(satrec, date);
+    if (!pv?.position) continue; // decayed element set / propagation error
+    const look = ecfToLookAngles(observerGd, eciToEcf(pv.position, gstime(date)));
+    const elDeg = radiansToDegrees(look.elevation);
+    const above = elDeg >= minElevationDeg;
+    if (above && !inPass) {
+      inPass = true;
+      aos = t;
+      maxEl = elDeg;
+    } else if (above) {
+      maxEl = Math.max(maxEl, elDeg);
+    } else if (inPass) {
+      inPass = false;
+      passes.push({ aos, los: t, max_elevation_deg: Math.round(maxEl) });
+    }
+  }
+  return passes;
+}

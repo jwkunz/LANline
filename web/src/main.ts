@@ -24,7 +24,16 @@ import {
   stepAm,
   type AmStation,
 } from "./am";
-import { APT_MAX_HZ, APT_MIN_HZ, APT_SATELLITES, type AptImage, type AptStatus } from "./apt";
+import {
+  APT_MAX_HZ,
+  APT_MIN_HZ,
+  APT_SATELLITES,
+  loadAptTle,
+  nextPasses,
+  type AptImage,
+  type AptPass,
+  type AptStatus,
+} from "./apt";
 import type {
   AudioStateResponse,
   CreateSessionResponse,
@@ -134,6 +143,7 @@ interface State {
   nwrNearby: NearNwr[];
   fmNearby: NearFm[];
   amNearby: NearAm[];
+  aptPasses: Record<string, AptPass[]> | null;
   bandTab: "nearby" | "manual";
   seeking: boolean;
   adsb: AdsbSnapshot | null;
@@ -165,6 +175,7 @@ const state: State = {
   nwrNearby: [],
   fmNearby: [],
   amNearby: [],
+  aptPasses: null,
   bandTab: "nearby",
   seeking: false,
   adsb: null,
@@ -692,6 +703,11 @@ async function refreshStations(): Promise<void> {
     } else if (mode === "am") {
       const list = await loadAmStations();
       setState({ amNearby: nearestAm(loc.lat, loc.lon, list, 24) });
+    } else if (mode === "apt") {
+      const tles = await loadAptTle();
+      const aptPasses: Record<string, AptPass[]> = {};
+      for (const tle of tles) aptPasses[tle.name] = nextPasses(tle, loc.lat, loc.lon);
+      setState({ aptPasses });
     }
   } catch (e) {
     setState({ locNote: `station list failed to load (${(e as Error).message})` });
@@ -823,6 +839,7 @@ function structKey(): string {
     state.nwrNearby.length,
     state.fmNearby.length,
     state.amNearby.length,
+    state.aptPasses ? 1 : 0,
     state.loc ? 1 : 0,
     state.locNote ?? "",
     state.audioStats ? 1 : 0,
@@ -883,6 +900,7 @@ function patchLive(): void {
     drawScope();
   } else if (state.radio.mode === "apt") {
     setHTML("#apt-status", aptStatusInner());
+    setHTML("#apt-sat-rows", aptSatRowsInner());
     drawAptImage();
   }
 
@@ -1176,28 +1194,51 @@ function amWizardHtml(): string {
     </section>`;
 }
 
+/** "next pass in 3h12m · 58° max" / "no pass in the next 48h" / a prompt to
+ *  set a location — pass times are predicted locally via SGP4 against the
+ *  bundled TLE (see `apt.ts`), not fetched from a live tracking service. */
+function aptPassLabel(name: string): string {
+  if (!state.loc) return "set location for pass times";
+  const passes = state.aptPasses?.[name];
+  if (!passes) return "loading pass times…";
+  if (passes.length === 0) return "no pass in the next 48h";
+  const p = passes[0]!;
+  const mins = Math.max(0, Math.round((p.aos - Date.now()) / 60_000));
+  const when = mins === 0 ? "now" : mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`;
+  return `next pass in ${when} · ${p.max_elevation_deg}° max`;
+}
+
+/** Just the satellite rows — refreshed on its own each poll (see
+ *  `patchLive`) so the "next pass in Xm" countdown ticks down without
+ *  rebuilding the whole panel or recomputing SGP4. */
+function aptSatRowsInner(): string {
+  const r = state.radio!;
+  return APT_SATELLITES.map((s) =>
+    stationRow(s.freq_hz, (s.freq_hz / 1e6).toFixed(4), s.name, aptPassLabel(s.name), s.freq_hz === r.frequency_hz, s.name),
+  ).join("");
+}
+
 function aptWizardHtml(): string {
   const r = state.radio!;
   const mhz = (r.frequency_hz / 1e6).toFixed(4);
-  const rows = APT_SATELLITES.map((s) =>
-    stationRow(s.freq_hz, (s.freq_hz / 1e6).toFixed(4), s.name, "NOAA POES", s.freq_hz === r.frequency_hz, s.name),
-  ).join("");
   const tab = state.bandTab;
   return `
     <section class="card">
       <h2>NOAA APT — weather satellite image</h2>
       <p class="note" style="margin:0 0 10px">Unlike AM/FM/ADS-B/AIS, this is a
       real-time downlink from one specific satellite — reception only works
-      during an actual overhead pass (a few minutes, several times a day).
-      Picking a satellite here just tunes its frequency; the image below
-      fills in once a pass is underway.</p>
+      during an actual overhead pass. Pass times below are predicted locally
+      from current orbital elements (SGP4 against a TLE fetched ahead of
+      time — no live tracking service, works offline); accuracy drifts as
+      the TLE ages, and a low max elevation or an obstructed horizon can
+      still leave a "pass" unreceivable.</p>
       <div class="tabs">
         <button class="tab${tab === "nearby" ? " on" : ""}" data-bandtab="nearby">Satellites</button>
         <button class="tab${tab === "manual" ? " on" : ""}" data-bandtab="manual">Manual</button>
       </div>
       ${
         tab === "nearby"
-          ? `<div class="stations">${rows}</div>`
+          ? `${locRowHtml()}<div class="stations" id="apt-sat-rows">${aptSatRowsInner()}</div>`
           : `<div class="dial">
                <input id="apt-freq" type="text" inputmode="decimal" value="${mhz}" />
                <span class="dial-unit">MHz</span>

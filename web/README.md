@@ -42,8 +42,9 @@ npm run preview    # serve the built bundle
 | `src/geo.ts` | haversine nearest-N + `lat, lon` parse + XHR JSON loader (works from `file://`) |
 | `src/nwr.ts` / `src/fm.ts` / `src/am.ts` | NOAA Weather Radio + FM broadcast + AM broadcast station directories, nearest-station search |
 | `src/adsb.ts` / `src/ais.ts` | ADS-B + AIS track types + the equirectangular projection the shared radar scope uses |
-| `src/apt.ts` | NOAA APT status/image types, binary raster decode, the NOAA-15/18/19 satellite frequency table |
+| `src/apt.ts` | NOAA APT status/image types, binary raster decode, the NOAA-15/18/19 satellite frequency table, and local SGP4 pass prediction (`satellite.js`) against the bundled TLE |
 | `public/nwr-stations.json` / `public/fm-stations.json` / `public/am-stations.json` | the bundled directories (served by the server too) |
+| `public/apt-tle.json` | NOAA-15/18/19 orbital elements (TLE) for local pass prediction (served by the server too) |
 | `src/main.ts` | app: origin/host connect flow, mode wizard, heartbeat + 1 Hz poll loops, seek, rendering |
 | `src/style.css` | light/dark styling |
 
@@ -53,4 +54,12 @@ Regenerate the station data (committed so builds need no network):
 node ../scripts/fetch-nwr.mjs     # ~1000 NWR transmitters, from NWS CCL.js
 node ../scripts/fetch-fm.mjs      # ~11k licensed FM stations, from the FCC FM Query
 node ../scripts/fetch-am.mjs      # ~4.3k licensed AM stations, from the FCC AM Query
+```
+
+`apt-tle.json` is regenerated the same way, but goes stale much faster (a
+TLE is only accurate for 1-2 weeks, not indefinitely) — rerun it closer to
+when you actually need current pass predictions:
+
+```sh
+node ../scripts/fetch-apt-tle.mjs   # NOAA-15/18/19 orbital elements, from Celestrak
 ```
