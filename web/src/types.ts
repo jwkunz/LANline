@@ -88,10 +88,21 @@ export interface Range {
   step: number;
 }
 
+export interface DeviceSummary {
+  id: string;
+  driver: string;
+  label: string;
+  serial: string;
+  soapy_args: string;
+  tx_capable: boolean;
+  available: boolean;
+}
+
 export interface DeviceInfo {
   id: string;
   driver: string;
   label: string;
+  serial: string;
   status: string;
   tx_capable: boolean;
   rx: {

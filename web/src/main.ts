@@ -41,6 +41,7 @@ import type {
   AudioStateResponse,
   CreateSessionResponse,
   DeviceInfo,
+  DeviceSummary,
   ModeInfo,
   RadioConfig,
   RadioStatus,
@@ -149,6 +150,7 @@ interface State {
   session: CreateSessionResponse | null;
   server: ServerInfo | null;
   device: DeviceInfo | null;
+  devices: DeviceSummary[];
   modes: ModeInfo[];
   radio: RadioConfig | null;
   status: RadioStatus | null;
@@ -182,6 +184,7 @@ const state: State = {
   session: null,
   server: null,
   device: null,
+  devices: [],
   modes: [],
   radio: null,
   status: null,
@@ -399,6 +402,7 @@ async function connect(hostRaw: string): Promise<void> {
     if (stale()) return;
     const modes = await client.modes(abort.signal).catch(() => [] as ModeInfo[]);
     const device = await client.device(abort.signal).catch(() => null);
+    const devices = await client.devices(abort.signal).catch(() => [] as DeviceSummary[]);
     if (stale()) return;
     console.info(`lanline: rest ok (${server.hostname}, ${modes.length} modes, device=${!!device})`);
     const session = await client.createSession(
@@ -417,6 +421,7 @@ async function connect(hostRaw: string): Promise<void> {
     state.session = session;
     state.modes = modes;
     state.device = device;
+    state.devices = devices;
 
     const audio = new AudioSession(client, session.session_id);
     audio.element.setAttribute("hidden", "");
@@ -521,6 +526,7 @@ async function disconnect(): Promise<void> {
     phase: "disconnected",
     server: null,
     device: null,
+    devices: [],
     radio: null,
     status: null,
     error: null,
@@ -595,13 +601,71 @@ function toggleMute(): void {
   }
 }
 
-/** Largest device-supported sample rate ≤ want (else the smallest available). */
-function pickSampleRate(wantHz: number): number | null {
-  const ranges = state.device?.rx.sample_rate_ranges_hz ?? [];
-  const cands = ranges.flatMap((r) => [r.min, r.max]).filter((v) => v > 0);
-  if (cands.length === 0) return null;
-  const under = cands.filter((v) => v <= wantHz + 1);
-  return under.length ? Math.max(...under) : Math.min(...cands);
+/** A sample rate the device can do, at or below `want`. Handles both a
+ *  continuous range (Pluto: 65 kHz–61 MHz — use `want` exactly) and a set of
+ *  discrete rates (HackRF: 1–20 Msps in 1 MHz steps — nearest ≤ want). */
+function pickSampleRateFor(dev: DeviceInfo | null, wantHz: number): number | null {
+  const ranges = dev?.rx.sample_rate_ranges_hz ?? [];
+  if (ranges.length === 0) return null;
+  for (const r of ranges) {
+    if (r.max > r.min && wantHz >= r.min && wantHz <= r.max) return Math.round(wantHz);
+  }
+  const pts = ranges
+    .flatMap((r) => (r.max > r.min ? [r.min, r.max] : [r.min]))
+    .filter((v) => v > 0);
+  const under = pts.filter((v) => v <= wantHz + 1);
+  return under.length ? Math.max(...under) : Math.min(...pts);
+}
+const pickSampleRate = (wantHz: number) => pickSampleRateFor(state.device, wantHz);
+
+/** SDR devices worth showing in the picker (SoapySDR also enumerates sound
+ *  cards via its `audio` module — never those). */
+function sdrDevices(): DeviceSummary[] {
+  return state.devices.filter((d) => d.driver !== "audio" && d.available);
+}
+
+/** Does a mode's home frequency fall in the selected device's tuning range? */
+function modeInDeviceRange(id: string): boolean {
+  const hz = MODE_META[id]?.defaultFreqHz;
+  const ranges = state.device?.rx.frequency_ranges_hz;
+  if (hz == null || !ranges?.length) return true;
+  return ranges.some((r) => hz >= r.min && hz <= r.max);
+}
+
+async function switchDevice(id: string): Promise<void> {
+  if (!state.client || state.switching || state.device?.id === id) return;
+  setState({ switching: true });
+  try {
+    if (state.radio?.running) await state.client.stopRadio();
+    const info = await state.client.selectDevice(id);
+    // Drop tuner overrides that belonged to the old radio (its antenna
+    // name, its gain elements) so they don't fail validation on the new one,
+    // then re-pick a sample rate this device actually supports.
+    const want = MODE_META[state.radio?.mode ?? "nbfm"]?.wantSampleRateHz ?? 2_000_000;
+    const sr = pickSampleRateFor(info, want);
+    const radio = await state.client.patchRadio({
+      tuner: {
+        antenna: null,
+        gain_elements_db: {},
+        gain_db: null,
+        gain_mode: "manual",
+        bandwidth_hz: null,
+        ...(sr ? { sample_rate_hz: sr } : {}),
+      },
+    });
+    const devices = await state.client.devices().catch(() => state.devices);
+    setState({ device: info, devices, radio });
+    logLine(`radio → ${info.label}`);
+  } catch (e) {
+    logLine(`device switch failed — ${(e as ApiError).message}`);
+    try {
+      setState({ device: await state.client.device(), radio: await state.client.radio() });
+    } catch {
+      /* leave stale */
+    }
+  } finally {
+    setState({ switching: false });
+  }
 }
 
 async function switchMode(id: string): Promise<void> {
@@ -1012,6 +1076,8 @@ function structKey(): string {
     state.adsb || state.ais ? 1 : 0,
     state.apt ? 1 : 0,
     state.scopeRangeNm,
+    state.device?.id ?? state.device?.label ?? "",
+    state.devices.length,
   ].join("|");
 }
 
@@ -1123,6 +1189,11 @@ function patchLive(): void {
 // --- delegated events (wired once) ----------------------------------
 
 function installDelegates(): void {
+  panels.addEventListener("change", (e) => {
+    const t = e.target as HTMLElement;
+    if (t.id === "device-pick") void switchDevice((t as HTMLSelectElement).value);
+  });
+
   panels.addEventListener("click", (e) => {
     const t = e.target as HTMLElement;
     const hit = (sel: string) => t.closest(sel);
@@ -1292,7 +1363,8 @@ function modeStripHtml(): string {
         ${ids
           .map((id) => {
             const meta = MODE_META[id] ?? { label: id, icon: "•", band: "" };
-            return `<button class="mode-btn${id === cur ? " on" : ""}" data-mode="${esc(id)}" ${state.switching ? "disabled" : ""}>
+            const outOfRange = !modeInDeviceRange(id);
+            return `<button class="mode-btn${id === cur ? " on" : ""}${outOfRange ? " oor" : ""}" data-mode="${esc(id)}" ${state.switching || outOfRange ? "disabled" : ""} ${outOfRange ? `title="outside ${esc(state.device?.label ?? "this device")}'s tuning range"` : ""}>
               <span class="m-icon">${meta.icon}</span>
               <span class="m-label">${esc(meta.label)}</span>
               <span class="m-band">${esc(meta.band)}</span>
@@ -2103,7 +2175,27 @@ function telemetryInner(): string {
 
 function serverHtml(): string {
   const s = state.server!;
-  const dev = s.selected_device;
+  const dev = state.device ?? s.selected_device;
+  const sdrs = sdrDevices();
+  const curId = state.device?.id;
+  const devPicker =
+    sdrs.length > 1
+      ? `<div class="connect-row" style="margin-top:12px">
+           <label class="note" for="device-pick" style="align-self:center">Radio</label>
+           <select id="device-pick" ${state.switching ? "disabled" : ""}>
+             ${sdrs
+               .map(
+                 (d) =>
+                   `<option value="${esc(d.id)}"${
+                     d.id === curId || d.label === state.device?.label ? " selected" : ""
+                   }>${esc(d.label)}</option>`,
+               )
+               .join("")}
+           </select>
+           ${state.switching ? `<span class="note" style="align-self:center">switching…</span>` : ""}
+         </div>
+         <p class="note" style="margin:6px 0 0">Switching stops the receiver; adjust gain in ⚙ Radio options after.</p>`
+      : "";
   return `
     <section class="card">
       <h2>Server</h2>
@@ -2114,6 +2206,7 @@ function serverHtml(): string {
         ${kv("Device", dev ? `${esc(dev.label)} · ${esc(dev.driver)}` : "none")}
         ${kv("Session", state.session!.session_id.slice(0, 8))}
       </div>
+      ${devPicker}
       <div class="chips" style="margin-top:12px">
         ${s.capabilities.map((c) => `<span class="chip">${esc(c)}</span>`).join("")}
       </div>

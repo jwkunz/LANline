@@ -6,6 +6,7 @@ import type {
   AudioStateResponse,
   CreateSessionResponse,
   DeviceInfo,
+  DeviceSummary,
   HealthResponse,
   ModeInfo,
   RadioConfig,
@@ -118,6 +119,11 @@ export class Client {
     this.request<ServerInfo>("GET", "/api/v1/server", { signal });
   device = (signal?: AbortSignal) =>
     this.request<DeviceInfo>("GET", "/api/v1/device", { signal });
+  devices = (signal?: AbortSignal) =>
+    this.request<DeviceSummary[]>("GET", "/api/v1/devices", { signal });
+  /** Switch the active SDR. `409` if the radio is running — stop it first. */
+  selectDevice = (id: string) =>
+    this.request<DeviceInfo>("PUT", "/api/v1/device", { auth: true, body: { id } });
   modes = (signal?: AbortSignal) => this.request<ModeInfo[]>("GET", "/api/v1/modes", { signal });
   radio = (signal?: AbortSignal) => this.request<RadioConfig>("GET", "/api/v1/radio", { signal });
   radioStatus = (signal?: AbortSignal) =>

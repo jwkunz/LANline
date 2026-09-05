@@ -423,6 +423,29 @@ host inherits the page's scheme. The Android WebView adds an
 address or a `*.local` name (the only things this app ever connects to),
 rejecting anything routable.
 
+### Multiple radios
+
+Device enumeration, probing and selection (`registry.rs` + `registry::soapy`)
+have always been driver-agnostic — `SoapySDRDevice_enumerate("")` then, per
+device, `listGains` / `getGainRange` / `getSampleRateRange` /
+`getBandwidthRange` / `listAntennas` / `hasDCOffsetMode` / … into the
+`DeviceInfo.rx` capability model. So a second radio needed no server code:
+attach an ADALM-Pluto alongside the HackRF and both show up in
+`GET /api/v1/devices`; `PUT /api/v1/device` opens the chosen one (its
+`soapy_args` carries whatever the driver needs — e.g. `uri=usb:1.21.5` for
+the Pluto over USB).
+
+What `PUT /device` gained: it now clears the device-specific tuner fields
+(antenna name, gain elements, overall gain, bandwidth) and re-clamps the
+sample rate into the new device's range, so the config can't carry a
+HackRF's `TX/RX` antenna or `LNA/AMP/VGA` element names into a Pluto (one
+`PGA`, `A_BALANCED`). The web client adds a **Radio** picker in the Server
+card (only when >1 non-`audio` device is present), greys out modes whose
+home frequency is outside the selected device's `frequency_ranges_hz` (AM's
+520 kHz vs the Pluto's 70 MHz floor), and its `pickSampleRate` now handles a
+*continuous* rate range (Pluto: 65 kHz–61 MHz — use the wanted rate as-is)
+as well as a discrete set (HackRF: 1–20 Msps in 1 MHz steps).
+
 ### Radio options panel
 
 `web/src/radio-options.ts` is a modal (⚙ in "Now playing") over the raw

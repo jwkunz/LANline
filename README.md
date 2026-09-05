@@ -223,10 +223,16 @@ LAN on its own.
 
 **⚙ Radio options** (in the "Now playing" card) opens a panel over the raw
 SoapySDR knobs for the selected device — PPM correction, per-element gain
-(LNA / VGA / AMP on a HackRF), analog bandwidth, sample rate, antenna,
-DC-offset mode, and free-form `writeSetting` key/values. Ranges come from the
-device itself; frequency and gain apply live, the rest briefly restart the
-receiver.
+(LNA / VGA / AMP on a HackRF, a single PGA on a Pluto), analog bandwidth,
+sample rate, antenna, DC-offset mode, and free-form `writeSetting`
+key/values. Ranges come from the device itself; frequency and gain apply
+live, the rest briefly restart the receiver.
+
+If more than one SDR is attached, a **Radio** picker appears in the *Server*
+card — any SoapySDR-supported device works (HackRF and ADALM-Pluto verified;
+RTL-SDR, LimeSDR, etc. should too). Switching stops the receiver and resets
+the device-specific tuner fields; the mode strip greys out modes whose home
+frequency is outside the new device's tuning range (e.g. AM on a Pluto).
 
 To iterate on the web client itself:
 

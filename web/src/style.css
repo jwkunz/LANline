@@ -582,3 +582,17 @@ canvas.apt-canvas {
 .an-hint {
   margin: 0;
 }
+
+.mode-btn.oor {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+#device-pick {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+}
