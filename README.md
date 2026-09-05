@@ -178,15 +178,17 @@ already carries the HackRF, PlutoSDR and RTL-SDR modules.
 ```sh
 npm --prefix web install && npm --prefix web run build   # bundle the server embeds & serves
 
-scripts/run-server.sh                     # sources dev-env.sh, cargo build --release, run
+scripts/run-server.sh                     # sources dev-env.sh, cargo build --release, run (HTTPS)
 scripts/run-server.sh --debug-tone        # 440 Hz A4, no SDR needed
-scripts/run-server.sh --dump-wav /tmp/rx.wav   # also save pre-Opus audio
+scripts/run-server.sh --no-tls            # plain HTTP instead of self-signed HTTPS
 scripts/run-server.sh --no-build          # skip the rebuild, just launch
 ```
 
-`run-server.sh` forwards every unrecognised flag to the server; per-machine
-settings (device filter, ppm correction, `--enable-tx`) go in a git-ignored
-`scripts/run-server.env` — copy `scripts/run-server.env.sample` to start.
+`run-server.sh` defaults to `--tls` (self-signed HTTPS, so the mic and
+location button work off-box) and forwards every unrecognised flag to the
+server; per-machine settings (device filter, ppm correction, `--enable-tx`,
+TLS cert paths) go in a git-ignored `scripts/run-server.env` — copy
+`scripts/run-server.env.sample` to start.
 
 To do it by hand instead:
 
