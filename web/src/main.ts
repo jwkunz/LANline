@@ -697,7 +697,10 @@ async function seek(dir: 1 | -1): Promise<void> {
   const step = mode === "wbfm" ? 200_000 : mode === "am" ? 10_000 : 25_000;
   const lo = mode === "wbfm" ? 87_700_000 : mode === "am" ? 530_000 : 162_400_000;
   const hi = mode === "wbfm" ? 108_100_000 : mode === "am" ? 1_700_000 : 162_550_000;
-  const rssiGate = mode === "wbfm" ? -48 : mode === "am" ? -55 : mode === "frs" ? -70 : -75;
+  // wbfm has no squelch, so seek stops purely on RSSI — keep this strict
+  // enough to skip fringe carriers and land on a station you'd actually
+  // listen to. (nbfm/frs also require squelch_open, so they can be looser.)
+  const rssiGate = mode === "wbfm" ? -40 : mode === "am" ? -55 : mode === "frs" ? -70 : -75;
   const settleMs = mode === "wbfm" || mode === "am" ? 220 : 200;
   const steps = mode === "frs" ? FRS_CHANNELS.length : Math.round((hi - lo) / step) + 1;
 
