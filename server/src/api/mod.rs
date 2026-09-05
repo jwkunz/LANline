@@ -330,6 +330,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frs_mode_is_selectable() {
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        let (_, modes) = send(&app, get("/api/v1/modes")).await;
+        assert!(modes.as_array().unwrap().iter().any(|m| m["id"] == "frs"));
+
+        let (s, b) = send(
+            &app,
+            json_req("PATCH", "/api/v1/radio", Some(&token), json!({ "mode": "frs", "frequency_hz": 462_562_500 })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["mode"], "frs");
+        assert_eq!(b["mode_params"]["channel_bw_hz"], 12500.0);
+        assert_eq!(b["frequency_hz"], 462_562_500);
+
+        // frs needs an SDR like nbfm/wbfm/am -> 503 with no device selected
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/start", Some(&token), Value::Null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(b["error"]["code"], "device_unavailable");
+    }
+
+    #[tokio::test]
     async fn adsb_endpoints_report_empty_when_idle() {
         let app = app().await;
 

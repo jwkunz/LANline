@@ -60,6 +60,19 @@ pub fn modes() -> Vec<ModeInfo> {
             ]),
         },
         ModeInfo {
+            id: "frs",
+            name: "FRS (Family Radio Service, 462/467 MHz)",
+            tx_capable: false,
+            params: BTreeMap::from([
+                ("deviation_hz", num(2500.0, 1000.0, 5000.0, "Hz")),
+                ("channel_bw_hz", num(12500.0, 8000.0, 16000.0, "Hz")),
+                ("deemphasis_us", num_enum(0.0, &[0.0, 50.0, 75.0], "us")),
+                ("audio_lpf_hz", num(3000.0, 1000.0, 4000.0, "Hz")),
+                ("squelch_db", num(-80.0, -120.0, 0.0, "dBFS")),
+                ("noise_squelch", num(0.3, 0.02, 2.0, "ratio")),
+            ]),
+        },
+        ModeInfo {
             id: "apt",
             name: "NOAA APT (137 MHz weather satellite)",
             tx_capable: false,
@@ -149,7 +162,7 @@ pub fn presets() -> Vec<Preset> {
 /// Capability strings for `GET /api/v1/server` and the beacon. `tx` is added
 /// by the caller when the selected device supports it.
 pub fn base_capabilities() -> Vec<String> {
-    ["rx", "webrtc", "nbfm", "wbfm", "am", "apt", "adsb", "ais", "debug_tone"]
+    ["rx", "webrtc", "nbfm", "wbfm", "am", "frs", "apt", "adsb", "ais", "debug_tone"]
         .iter()
         .map(|s| s.to_string())
         .collect()

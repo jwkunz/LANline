@@ -44,7 +44,7 @@ packet):
     "tx_capable": true
   },
   "devices_available": 1,
-  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "am", "apt", "adsb", "ais", "debug_tone"],
+  "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "am", "frs", "apt", "adsb", "ais", "debug_tone"],
   "timestamp": "2026-09-03T17:04:11Z"
 }
 ```

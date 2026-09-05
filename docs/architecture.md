@@ -191,6 +191,13 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   pass-prediction API, so it keeps working with no WAN access, at the cost
   of the TLE snapshot going stale in 1-2 weeks (see
   [rest-api.md](rest-api.md#predicting-the-next-pass)).
+- **2h** — `frs` mode: no new DSP at all — it's `dsp::FmChain` again (same
+  one `nbfm`/`wbfm` use), just with narrower catalog defaults matching FRS's
+  Part 95 emission mask, and a fixed 22-channel table
+  (`web/src/frs.ts`) in place of a continuous tunable band or a
+  station database (there's no directory to look up — anyone can be on any
+  channel from anywhere). Receive-only; see
+  [below](#frs-and-the-transmit-question) for why.
 
 ### AM and HackRF MF/LF sensitivity
 
@@ -231,3 +238,34 @@ confirmed as pure static once rendered) still reported `sync_quality: 1.68`
 and read as "locked" against the then-current (much lower) threshold.
 Computing the noise floor from the words directly, rather than from the
 correlation curve, avoids that self-contamination.
+
+### FRS and the transmit question
+
+FRS (Family Radio Service) is 22 fixed UHF channels — 462.5625–462.7125 MHz
+(channels 1–7, shared with GMRS, ≤2 W), 467.5625–467.7125 MHz (channels 8–14,
+FRS-exclusive, simplex only, ≤0.5 W), and 462.5500–462.7250 MHz (channels
+15–22, interstitial, shared with GMRS, ≤2 W) — all narrowband FM (≤2.5 kHz
+deviation, 12.5 kHz channel spacing). `web/src/frs.ts` hardcodes this table
+directly (it's a fixed FCC Part 95 channel plan, not something that changes
+or needs fetching); receive uses it exactly like `nbfm`, just retuning
+`FmChain` to each channel's frequency.
+
+There's no privacy-code (CTCSS/DCS tone squelch) matching yet — the receiver
+demodulates and passes through everything on a channel regardless of tone.
+That's arguably the more useful behavior for a monitor/scanner tool anyway
+(privacy codes only quiet a *transmitting* radio's speaker for
+non-matching traffic; they were never a privacy mechanism against a receiver
+built to listen to everything), but it does mean this won't yet mimic a
+consumer FRS handset's tone-based squelching if that's ever wanted.
+
+This mode is receive-only, deliberately. FRS is a **Part 95 certified-
+equipment service** — a general-purpose SDR like a HackRF is not type-
+accepted for FRS transmission, so keying up on an FRS frequency with one
+isn't compliant with FCC rules regardless of power level or intent. Actual
+push-to-talk transmit (the eventual goal here) is a separate, much larger
+piece of work besides — it needs an FM *modulator* (the inverse of
+`FmChain`), half-duplex RX/TX arbitration on the SDR (a HackRF can't do both
+at once), a live microphone-audio uplink over WebRTC (the reserved
+`audio_in` port exists but nothing uses it yet), and a PTT signaling
+protocol across both clients — tracked as phase 2i in the README roadmap,
+not started.

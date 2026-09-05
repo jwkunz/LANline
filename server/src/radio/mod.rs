@@ -282,7 +282,7 @@ impl RadioManager {
             || old.audio.frame_ms != new.audio.frame_ms
             || old.audio.sample_rate_hz != new.audio.sample_rate_hz
             || old.audio.opus_bitrate_bps != new.audio.opus_bitrate_bps
-            || (!matches!(new.mode.as_str(), "nbfm" | "wbfm" | "am") && old.mode_params != new.mode_params);
+            || (!matches!(new.mode.as_str(), "nbfm" | "wbfm" | "am" | "frs") && old.mode_params != new.mode_params);
 
         if needs_restart {
             self.reconfigure();
@@ -312,7 +312,7 @@ impl RadioManager {
             }
             if old.mode_params != new.mode_params {
                 match new.mode.as_str() {
-                    "nbfm" | "wbfm" => cmds.push(PipelineCmd::Demod(DemodParams::Fm(fm_params(new)))),
+                    "nbfm" | "wbfm" | "frs" => cmds.push(PipelineCmd::Demod(DemodParams::Fm(fm_params(new)))),
                     "am" => cmds.push(PipelineCmd::Demod(DemodParams::Am(am_params(new)))),
                     _ => {}
                 }
@@ -468,7 +468,7 @@ impl PipelineParams {
                 let level_dbfs = param("level_dbfs", -12.0).clamp(-60.0, -1.0);
                 SourceKind::Tone { hz, amp: 10f64.powf(level_dbfs / 20.0) as f32 }
             }
-            "nbfm" | "wbfm" | "am" => {
+            "nbfm" | "wbfm" | "am" | "frs" => {
                 #[cfg(not(feature = "soapy"))]
                 {
                     let _ = device;

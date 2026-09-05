@@ -309,6 +309,19 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "frs",
+    "name": "FRS (Family Radio Service, 462/467 MHz)",
+    "tx_capable": false,
+    "params": {
+      "deviation_hz":  { "type": "number", "default": 2500,  "min": 1000, "max": 5000,  "unit": "Hz" },
+      "channel_bw_hz": { "type": "number", "default": 12500, "min": 8000, "max": 16000, "unit": "Hz" },
+      "deemphasis_us": { "type": "number", "default": 0, "enum": [0, 50, 75], "unit": "us" },
+      "audio_lpf_hz":  { "type": "number", "default": 3000,  "min": 1000, "max": 4000,  "unit": "Hz" },
+      "squelch_db":    { "type": "number", "default": -80, "min": -120, "max": 0, "unit": "dBFS" },
+      "noise_squelch": { "type": "number", "default": 0.3, "min": 0.02, "max": 2.0, "unit": "ratio" }
+    }
+  },
+  {
     "id": "apt",
     "name": "NOAA APT (137 MHz weather satellite)",
     "tx_capable": false,
@@ -366,6 +379,14 @@ the same decimate/squelch/resample skeleton as the FM chain, tuned for
 mediumwave/shortwave broadcast (~10 kHz channels). Whether the attached SDR
 can actually pull in AM depends on its LF/MF front end — see the note in
 [architecture.md](architecture.md#am-and-hackrf-mfLF-sensitivity).
+
+`frs` is the exact same `FmChain` as `nbfm`/`wbfm` — no new DSP, just
+narrower defaults (2.5 kHz deviation, 12.5 kHz channel filter) matching FRS's
+Part 95 emission mask, and a fixed 22-channel frequency table instead of a
+continuous tunable band (see
+[architecture.md](architecture.md#frs-and-the-transmit-question) for the
+channel plan and why this is receive-only for now — transmit needs FCC
+Part 95 type-accepted equipment, which a general-purpose SDR isn't).
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end
