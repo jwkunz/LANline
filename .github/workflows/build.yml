@@ -39,9 +39,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # PothosSDR installer for the Windows soapy leg. Bump when it 404s; see
+  # PothosSDR installer for the Windows soapy leg (that job is
+  # continue-on-error). If this 404s, pick a real filename from
   # https://downloads.myriadrf.org/builds/PothosSDR/
-  POTHOS_URL: https://downloads.myriadrf.org/builds/PothosSDR/PothosSDR-2023.11.04-vc16-x64.exe
+  POTHOS_URL: https://downloads.myriadrf.org/builds/PothosSDR/PothosSDR-2021.07.25-vc16-x64.exe
 
 jobs:
   web-bundle:
@@ -71,14 +72,20 @@ jobs:
             name: linux-x86_64
             bin: lanline-server
             asset: lanline-server-linux-x86_64.tar.gz
+            # bundle non-system .so's beside the binary; the loader resolves
+            # them via $ORIGIN (audiopus_sys won't static-link libopus.a from
+            # apt — it lives in a system dir the pkg-config crate keeps dynamic)
+            rustflags: '-C link-arg=-Wl,-rpath,$ORIGIN'
           - os: macos-latest
             name: macos-arm64
             bin: lanline-server
             asset: lanline-server-macos-arm64.tar.gz
+            rustflags: ''
           - os: windows-latest
             name: windows-x86_64
             bin: lanline-server.exe
             asset: lanline-server-windows-x86_64.zip
+            rustflags: ''
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -102,45 +109,51 @@ jobs:
           name: web-dist
           path: web/dist
 
-      # opus: static-link it so the binary carries no libopus dependency.
-      #   Linux  — OPUS_STATIC makes audiopus_sys pick libopus.a (from
-      #            libopus-dev) via pkg-config.
-      #   macOS  — audiopus_sys already links opus statically on this target.
-      #   Windows — the MSVC path links audiopus_sys' bundled prebuilt opus;
-      #            OPUS_STATIC is a no-op there.
+      # opus:
+      #   macOS  — audiopus_sys links it statically on this target already.
+      #   Windows — the MSVC path links audiopus_sys' bundled prebuilt opus.
+      #   Linux  — stays a dynamic libopus.so.0; it's bundled into the tar
+      #            beside the binary (Package step) and found via the $ORIGIN
+      #            rpath set through matrix.rustflags.
       # No `+crt-static` on Windows: that bundled opus.lib embeds
       # /DEFAULTLIB:MSVCRT (dynamic CRT) and would conflict; the zip carries
       # the redistributable VC runtime DLLs instead (below).
       - name: Build
         env:
-          OPUS_STATIC: 1
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked --no-default-features -p lanline-server
 
       - run: cargo test --release --locked --no-default-features -p lanline-server
 
-      - name: Verify self-contained (Linux)
+      - name: Package (Linux — binary + bundled non-system libs)
         if: runner.os == 'Linux'
         run: |
-          echo "ldd:"; ldd target/release/${{ matrix.bin }}
-          extra=$(ldd target/release/${{ matrix.bin }} \
-            | awk '/=> \//{print $1}' \
-            | grep -vE '^(libc|libm|libgcc_s|libpthread|libdl|librt|ld-linux.*)\.so' || true)
-          if [ -n "$extra" ]; then
-            echo "::error::binary has non-base dynamic deps: $extra"; exit 1
+          set -euo pipefail
+          mkdir -p pkg
+          cp "target/release/${{ matrix.bin }}" pkg/
+          ldd "target/release/${{ matrix.bin }}" | awk '/=> \//{print $3}' | while read -r so; do
+            case "$so" in
+              */libc.so.*|*/libm.so.*|*/libgcc_s.so.*|*/libpthread.so.*|*/libdl.so.*|*/librt.so.*) ;;
+              *) echo "bundling $so"; cp -L "$so" pkg/ ;;
+            esac
+          done
+          echo "--- resolves against the bundle + base only: ---"
+          ( cd pkg && LD_LIBRARY_PATH="$PWD" ldd "./${{ matrix.bin }}" )
+          if ( cd pkg && LD_LIBRARY_PATH="$PWD" ldd "./${{ matrix.bin }}" ) | grep -q "not found"; then
+            echo "::error::unresolved dependency in the packaged bundle"; exit 1
           fi
-      - name: Verify self-contained (macOS)
+          tar -C pkg -czf "${{ matrix.asset }}" .
+
+      - name: Package (macOS — verify self-contained, then tar)
         if: runner.os == 'macOS'
         run: |
-          echo "otool -L:"; otool -L target/release/${{ matrix.bin }}
-          bad=$(otool -L target/release/${{ matrix.bin }} | tail -n +2 \
+          echo "otool -L:"; otool -L "target/release/${{ matrix.bin }}"
+          bad=$(otool -L "target/release/${{ matrix.bin }}" | tail -n +2 \
             | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/)' || true)
           if [ -n "$bad" ]; then
             echo "::error::binary has unexpected dylib deps:"; echo "$bad"; exit 1
           fi
-
-      - name: Package (unix)
-        if: runner.os != 'Windows'
-        run: tar -C target/release -czf "${{ matrix.asset }}" "${{ matrix.bin }}"
+          tar -C target/release -czf "${{ matrix.asset }}" "${{ matrix.bin }}"
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
