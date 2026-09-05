@@ -72,6 +72,18 @@ pub struct Config {
     #[arg(long, env = "LANLINE_DUMP_WAV")]
     pub dump_wav: Option<PathBuf>,
 
+    /// This device's known crystal frequency error, in parts-per-million
+    /// (applied to every tuned frequency on every mode). A HackRF's stock
+    /// TCXO commonly drifts a few to a few tens of ppm; negligible at VHF,
+    /// but enough at UHF (FRS's 462/467 MHz, say) to push a narrowband FM
+    /// discriminator out of its linear range. Determine a device's ppm
+    /// empirically (tune to a known-frequency signal and watch for a steady
+    /// discriminator bias — see docs/architecture.md) rather than guessing;
+    /// 0 (the default) applies no correction. Also settable live via
+    /// `PATCH /radio`'s `tuner.freq_correction_ppm`.
+    #[arg(long, env = "LANLINE_FREQ_CORRECTION_PPM", allow_hyphen_values = true, default_value_t = 0.0)]
+    pub freq_correction_ppm: f64,
+
     /// Maximum number of concurrent sessions.
     #[arg(long, env = "LANLINE_MAX_SESSIONS", default_value_t = 8)]
     pub max_sessions: usize,

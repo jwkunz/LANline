@@ -685,7 +685,7 @@ mode + mode params + audio encoder.
 | `gain_mode` | `manual` or `agc` (only if `device.rx.has_agc`) |
 | `gain_db` | Overall gain (SoapySDR `setGain`); when non-null it wins over `gain_elements_db` |
 | `gain_elements_db` | Per-element gains, keys must be a subset of `device.rx.gain_elements[].name` |
-| `freq_correction_ppm` | Frequency correction; requires `device.rx.has_frequency_correction` |
+| `freq_correction_ppm` | This device's crystal error, applied in software to every tuned frequency (`freq * (1 + ppm/1e6)`) on every mode — works on any device, doesn't depend on `device.rx.has_frequency_correction` (which HackRF, for one, doesn't advertise). `0` (default) applies no correction; also settable at startup via `--freq-correction-ppm`. See [architecture.md](architecture.md#hackrf-frequency-calibration) for how to determine a device's value |
 | `dc_offset_correction` / `iq_balance_correction` | Toggle SoapySDR automatic correction (only if the matching `has_*_mode`) |
 | `device_settings` | Raw SoapySDR `writeSetting` passthrough; keys must be a subset of `device.rx.setting_info[].key`, values are strings |
 

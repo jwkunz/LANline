@@ -269,3 +269,52 @@ at once), a live microphone-audio uplink over WebRTC (the reserved
 `audio_in` port exists but nothing uses it yet), and a PTT signaling
 protocol across both clients — tracked as phase 2i in the README roadmap,
 not started.
+
+### HackRF frequency calibration
+
+`tuner.freq_correction_ppm` (in the radio config since phase 1, but never
+actually wired to hardware until this was chased down) corrects a device's
+crystal error in software: every tuned frequency, on every mode, is
+multiplied by `(1 + ppm/1e6)` (`radio::apply_ppm`) before being handed to
+SoapySDR. This works on any device — it doesn't depend on
+`device.rx.has_frequency_correction` (a SoapySDR "CORR" tunable component,
+which HackRF's driver doesn't implement; that's presumably why this field
+was left unwired originally). Set it once at startup (`--freq-correction-
+ppm`, `LANLINE_FREQ_CORRECTION_PPM`) or live via `PATCH /radio`'s
+`tuner.freq_correction_ppm`; `0` (default) applies no correction.
+
+This was found and fixed the hard way: a live FRS bench test (real HackRF,
+real handheld, channel 1) reported a keyed carrier and a clean, non-clipped
+signal chain, yet no intelligible audio came through — just what sounded
+like a steady tone. Inspecting the raw pre-Opus samples (`--dump-wav`)
+showed why: the discriminator output was sitting at a **steady ~‑0.82** (on
+a ±1.0 scale) the entire time, nowhere near the expected near-zero average
+for a real voice signal, with only a small ripple riding on top of that huge
+bias. A persistent, non-oscillating discriminator bias like that means the
+receiver's effective center frequency doesn't match the real carrier — at
+this device's `deviation_hz` setting (5000), `bias × deviation_hz` gives the
+actual offset: **≈‑4.1 kHz**, or ≈‑8.9 ppm at 462.5625 MHz. Retuning ‑4.1 kHz
+lower dropped that bias to ≈0.02 and the level immediately started showing
+real dynamic range (long quiet stretches, sharp louder excursions) — the
+shape of actual speech, not a stuck rail.
+
+A HackRF's stock TCXO commonly drifts by a few to a few tens of ppm — this
+±8.9 ppm on the bench unit here is unremarkable as these things go. It was
+invisible on every mode built before FRS (137–166 MHz, ±5–75 kHz deviation)
+because a few kHz of absolute error is negligible against that much margin;
+FRS's tight ±2.5–5 kHz window was the first to actually expose it. Any UHF
+narrowband mode — FRS today, GMRS or a PTT transmit path later — inherits
+the same exposure and the same fix.
+
+**To determine your own device's ppm**, without needing a signal generator:
+tune to *any* frequency you can reliably get a clean, on-frequency carrier
+on (a nearby FM broadcast station, a NOAA weather radio transmitter, or —
+as here — someone else's handheld on a known channel), widen `deviation_hz`
+well beyond what should be needed so the discriminator can't saturate, hold
+a steady key-up, and look at the mean of the raw samples (`--dump-wav`) or
+`ChainMetrics`. A steady non-zero bias `b` (on the chain's ±1.0 scale) at
+that `deviation_hz` setting means an offset of `b × deviation_hz` Hz;
+convert to ppm by dividing by the tuned frequency and multiplying by 1e6.
+The sign of `freq_correction_ppm` to apply isn't worth deriving from first
+principles (it depends on the NCO/mixing convention) — just try it, and
+flip the sign if the bias grows instead of shrinking on the next capture.

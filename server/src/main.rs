@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         if let Some(dev) = registry.selected() {
             radio.tuner.device_id = Some(dev.id);
         }
+        radio.tuner.freq_correction_ppm = config.freq_correction_ppm;
     }
     let radio_mgr =
         radio::RadioManager::new(radio_cfg.clone(), registry.clone(), config.dump_wav.clone());

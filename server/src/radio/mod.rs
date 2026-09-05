@@ -398,6 +398,7 @@ struct AdsbSdrParams {
     gain_overall_db: Option<f64>,
     gain_elements_db: Vec<(String, f64)>,
     settings: Vec<(String, String)>,
+    freq_correction_ppm: f64,
     reference: Option<(f64, f64)>,
     max_range_nm: f64,
     trail_secs: f64,
@@ -415,6 +416,7 @@ struct AisSdrParams {
     gain_overall_db: Option<f64>,
     gain_elements_db: Vec<(String, f64)>,
     settings: Vec<(String, String)>,
+    freq_correction_ppm: f64,
     reference: Option<(f64, f64)>,
     max_range_nm: f64,
     trail_secs: f64,
@@ -432,6 +434,7 @@ struct AptSdrParams {
     gain_overall_db: Option<f64>,
     gain_elements_db: Vec<(String, f64)>,
     settings: Vec<(String, String)>,
+    freq_correction_ppm: f64,
     apt: crate::apt::demod::AptParams,
     max_lines: usize,
 }
@@ -448,7 +451,21 @@ struct SdrParams {
     gain_elements_db: Vec<(String, f64)>,
     dc_offset: bool,
     settings: Vec<(String, String)>,
+    freq_correction_ppm: f64,
     demod: DemodParams,
+}
+
+/// Correct a requested RF frequency for a device's known crystal error
+/// (parts-per-million). A HackRF's stock TCXO commonly drifts a few to a few
+/// tens of ppm; at UHF (462 MHz FRS, say) that's several kHz — enough to push
+/// a narrowband FM discriminator (±2.5 kHz deviation) out of its linear range
+/// entirely, while the same error is negligible at VHF. Determine a device's
+/// ppm empirically (tune to a known-frequency signal, watch for a steady
+/// discriminator bias — see docs/architecture.md) and set it once via
+/// `--freq-correction-ppm` or `PATCH /radio`'s `tuner.freq_correction_ppm`.
+#[cfg(feature = "soapy")]
+fn apply_ppm(freq_hz: f64, ppm: f64) -> f64 {
+    freq_hz * (1.0 + ppm * 1e-6)
 }
 
 impl PipelineParams {
@@ -497,6 +514,7 @@ impl PipelineParams {
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect(),
+                    freq_correction_ppm: cfg.tuner.freq_correction_ppm,
                     demod: if cfg.mode == "am" {
                         DemodParams::Am(am_params(cfg))
                     } else {
@@ -539,6 +557,7 @@ impl PipelineParams {
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect(),
+                            freq_correction_ppm: cfg.tuner.freq_correction_ppm,
                             reference,
                             max_range_nm: param("max_range_nm", 250.0),
                             trail_secs: param("trail_seconds", 120.0),
@@ -581,6 +600,7 @@ impl PipelineParams {
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect(),
+                            freq_correction_ppm: cfg.tuner.freq_correction_ppm,
                             reference,
                             max_range_nm: param("max_range_nm", 60.0),
                             trail_secs: param("trail_seconds", 600.0),
@@ -618,6 +638,7 @@ impl PipelineParams {
                             .iter()
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect(),
+                        freq_correction_ppm: cfg.tuner.freq_correction_ppm,
                         apt: crate::apt::demod::AptParams {
                             deviation_hz: param("deviation_hz", 17_000.0),
                             channel_bw_hz: param("channel_bw_hz", 40_000.0),
@@ -808,7 +829,7 @@ fn run_sdr(
     };
     log_set("sample_rate", dev.set_sample_rate(dir, ch, sp.device_rate));
     let lo = sp.freq_hz - sp.demod.lo_offset_hz();
-    log_set("frequency", dev.set_frequency(dir, ch, lo, ""));
+    log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(lo, sp.freq_correction_ppm), ""));
     if let Some(ant) = &sp.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
     }
@@ -871,7 +892,10 @@ fn run_sdr(
             match cmd {
                 PipelineCmd::Retune(hz) => {
                     let new_lo = hz - sp.demod.lo_offset_hz();
-                    log_set("frequency", dev.set_frequency(dir, ch, new_lo, ""));
+                    log_set(
+                        "frequency",
+                        dev.set_frequency(dir, ch, apply_ppm(new_lo, sp.freq_correction_ppm), ""),
+                    );
                     chain.on_retune();
                     tracing::info!("{label}: retuned to {:.4} MHz (live)", hz / 1e6);
                 }
@@ -977,7 +1001,7 @@ fn run_adsb(
         }
     };
     log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
-    log_set("frequency", dev.set_frequency(dir, ch, p.freq_hz, ""));
+    log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(p.freq_hz, p.freq_correction_ppm), ""));
     if let Some(ant) = &p.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
     }
@@ -1121,7 +1145,7 @@ fn run_ais(
         }
     };
     log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
-    log_set("frequency", dev.set_frequency(dir, ch, CENTER_HZ, ""));
+    log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(CENTER_HZ, p.freq_correction_ppm), ""));
     if let Some(ant) = &p.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
     }
@@ -1265,7 +1289,7 @@ fn run_apt(
     };
     log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
     let lo = p.freq_hz - p.apt.lo_offset_hz;
-    log_set("frequency", dev.set_frequency(dir, ch, lo, ""));
+    log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(lo, p.freq_correction_ppm), ""));
     if let Some(ant) = &p.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
     }
@@ -1321,7 +1345,10 @@ fn run_apt(
             match cmd {
                 PipelineCmd::Retune(hz) => {
                     let new_lo = hz - p.apt.lo_offset_hz;
-                    log_set("frequency", dev.set_frequency(dir, ch, new_lo, ""));
+                    log_set(
+                        "frequency",
+                        dev.set_frequency(dir, ch, apply_ppm(new_lo, p.freq_correction_ppm), ""),
+                    );
                     tracing::info!("apt: retuned to {:.4} MHz (live)", hz / 1e6);
                 }
                 PipelineCmd::Gain { agc, overall, elements } => {
@@ -1382,4 +1409,25 @@ fn run_apt(
     }
 
     let _ = stream.deactivate(None);
+}
+
+#[cfg(all(test, feature = "soapy"))]
+mod tests {
+    use super::apply_ppm;
+
+    #[test]
+    fn ppm_correction_shifts_frequency_proportionally() {
+        // The empirically-measured correction from a real HackRF unit at
+        // 462.5625 MHz FRS channel 1: about -8.9 ppm, i.e. roughly -4.1 kHz.
+        let corrected = apply_ppm(462_562_500.0, -8.9);
+        assert!(
+            (corrected - 462_558_383.19).abs() < 0.01,
+            "corrected {corrected}, expected ~462_558_383.19"
+        );
+    }
+
+    #[test]
+    fn zero_ppm_is_a_no_op() {
+        assert_eq!(apply_ppm(137_100_000.0, 0.0), 137_100_000.0);
+    }
 }

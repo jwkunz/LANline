@@ -163,6 +163,12 @@ equipment, which a general-purpose SDR like a HackRF isn't — see
 [architecture.md](docs/architecture.md#frs-and-the-transmit-question) for
 what the transmit side will actually need.
 
+If FRS reception sounds distorted or silent despite squelch opening, your
+SDR's crystal is likely just off-frequency enough at UHF to matter — set
+`tuner.freq_correction_ppm` (or `--freq-correction-ppm` at startup); see
+[architecture.md](docs/architecture.md#hackrf-frequency-calibration) for how
+to measure it.
+
 ## Building the Android client
 
 ```sh
