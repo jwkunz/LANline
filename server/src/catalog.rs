@@ -103,6 +103,13 @@ pub fn modes() -> Vec<ModeInfo> {
                 ("audio_lpf_hz", num(3400.0, 1000.0, 8000.0, "Hz")),
                 ("squelch_db", num(-80.0, -120.0, 0.0, "dBFS")),
                 ("noise_squelch", num(0.35, 0.02, 2.0, "ratio")),
+                // CTCSS sub-audible tone squelch. 0 = off (carrier squelch
+                // only). When set to a standard tone (67.0–254.1 Hz), the
+                // channel only unmutes while that tone is present and the
+                // recovered audio is high-passed ~300 Hz. `ctcss_squelch` 0
+                // detects + reports the tone without gating ("monitor").
+                ("ctcss_hz", num(0.0, 0.0, 260.0, "Hz")),
+                ("ctcss_squelch", num_enum(1.0, &[0.0, 1.0], "bool")),
             ]),
         },
         ModeInfo {

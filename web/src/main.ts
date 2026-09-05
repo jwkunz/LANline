@@ -38,6 +38,7 @@ import {
 } from "./apt";
 import { FRS_CHANNELS, FRS_DEFAULT_FREQ_HZ, frsChannelAt, stepFrsChannel } from "./frs";
 import {
+  CTCSS_TONES,
   HAM_BANDS,
   HAM_DEFAULT_BAND,
   hamBand,
@@ -1083,7 +1084,9 @@ function structKey(): string {
     state.radio?.mode ?? "",
     state.bandTab,
     state.radio?.mode === "ham"
-      ? (hamBandContaining(state.radio.frequency_hz)?.id ?? state.hamBand)
+      ? `${hamBandContaining(state.radio.frequency_hz)?.id ?? state.hamBand}:${
+          Number(state.radio.mode_params.ctcss_hz ?? 0) > 0
+        }`
       : "",
     state.switching,
     state.seeking,
@@ -1214,6 +1217,12 @@ function patchLive(): void {
       const [lo, hi] = (el.dataset.seg ?? "0 0").split(" ").map(Number);
       el.classList.toggle("here", freq >= lo! && freq < hi!);
     });
+    const det = q("#ham-ctcss-det");
+    if (det) {
+      const d = state.status?.dsp.ctcss_tone_hz;
+      det.textContent = d != null ? `detected ${d.toFixed(1)} Hz ✓` : "not detected";
+      det.classList.toggle("ok", d != null);
+    }
   }
 }
 
@@ -1278,6 +1287,7 @@ function installDelegates(): void {
   panels.addEventListener("change", (e) => {
     const el = e.target as HTMLElement;
     if (el.id === "audio-mute") toggleMute();
+    if (el.id === "ham-ctcss" || el.id === "ham-ctcss-mon") void applyHamCtcss();
     if (el.id === "scope-range") {
       const v = (el as HTMLSelectElement).value;
       setState({ scopeRangeNm: v === "auto" ? "auto" : Number(v) });
@@ -1655,6 +1665,16 @@ function hamWizardHtml(): string {
   const offsetLabel =
     offKHz >= 1000 ? `${(offKHz / 1000).toFixed(offKHz % 1000 ? 1 : 0)} MHz` : `${offKHz} kHz`;
 
+  const cfgTone = Number(r.mode_params.ctcss_hz ?? 0);
+  const toneMonitor = Number(r.mode_params.ctcss_squelch ?? 1) === 0;
+  const toneOpts = [
+    `<option value="0"${cfgTone === 0 ? " selected" : ""}>Off — carrier squelch</option>`,
+    ...CTCSS_TONES.map(
+      (t) =>
+        `<option value="${t}"${Math.abs(t - cfgTone) < 0.05 ? " selected" : ""}>${t.toFixed(1)} Hz</option>`,
+    ),
+  ].join("");
+
   return `
     <section class="card">
       <h2>Amateur FM — ${band.name} (${band.rangeLabel})</h2>
@@ -1688,9 +1708,42 @@ function hamWizardHtml(): string {
       <p class="note" style="margin:8px 0 0">${(band.loHz / 1e6).toFixed(0)}–${(band.hiHz / 1e6).toFixed(0)} MHz ·
       5 kHz steps · ${seg ? esc(seg.use) : "out of the band plan"}.</p>
 
+      <h3 class="ham-sub">Tone squelch (CTCSS)</h3>
+      <div class="ham-ctcss">
+        <select id="ham-ctcss">${toneOpts}</select>
+        <label class="ham-ck"><input type="checkbox" id="ham-ctcss-mon"${toneMonitor ? " checked" : ""} /> monitor only</label>
+      </div>
+      <p class="note" style="margin:6px 0 0">
+        ${
+          cfgTone > 0
+            ? `Requiring <strong>${cfgTone.toFixed(1)} Hz</strong>${toneMonitor ? " (detect only — audio not muted)" : ""} —
+               <span id="ham-ctcss-det">…</span>. Single-tone presence check, not a full decoder.`
+            : "Set the sub-audible tone a repeater requires (its “PL”/CTCSS) to hear only traffic carrying it."
+        }
+      </p>
+
       <h3 class="ham-sub">Band plan (voluntary)</h3>
       <div class="ham-plan">${planRows}</div>
     </section>`;
+}
+
+async function applyHamCtcss(): Promise<void> {
+  if (!state.client || !state.radio) return;
+  const sel = panels.querySelector<HTMLSelectElement>("#ham-ctcss");
+  const mon = panels.querySelector<HTMLInputElement>("#ham-ctcss-mon");
+  const ctcss_hz = sel ? Number(sel.value) : 0;
+  const ctcss_squelch = mon?.checked ? 0 : 1;
+  try {
+    const radio = await state.client.patchRadio({ mode_params: { ctcss_hz, ctcss_squelch } });
+    setState({ radio });
+    logLine(
+      ctcss_hz > 0
+        ? `CTCSS ${ctcss_hz.toFixed(1)} Hz${ctcss_squelch ? "" : " · monitor"}`
+        : "CTCSS off",
+    );
+  } catch (e) {
+    logLine(`CTCSS set failed — ${(e as ApiError).message}`);
+  }
 }
 
 function hamStep(hz: number, dir: 1 | -1): number {
@@ -2233,6 +2286,14 @@ function nowPlayingInner(): string {
       ${kv("Device", st?.device_status ?? "—")}
       ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
       ${kv("Squelch", st ? (st.dsp.squelch_open ? "open" : "closed") : "—")}
+      ${
+        r.mode === "ham" && Number(r.mode_params.ctcss_hz ?? 0) > 0
+          ? kv(
+              "Tone",
+              `${Number(r.mode_params.ctcss_hz).toFixed(1)} Hz ${st?.dsp.ctcss_tone_hz != null ? "✓" : "…"}`,
+            )
+          : ""
+      }
       ${kv("Audio", `${r.audio.sample_rate_hz / 1000} kHz · ${r.audio.channels === 1 ? "mono" : `${r.audio.channels}ch`} · ${r.audio.opus_bitrate_bps / 1000} kbps`)}
     </div>
     <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap">

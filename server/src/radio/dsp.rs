@@ -33,6 +33,16 @@ pub struct FmParams {
     /// (open).
     pub noise_squelch: f64,
     pub lo_offset_hz: f64,
+    /// CTCSS sub-audible tone (Hz), `0.0` = disabled. When set, a
+    /// [`CtcssDetector`] runs on the discriminator output and (unless
+    /// `ctcss_squelch` is off) the channel only unmutes while that tone is
+    /// present; the recovered audio is also high-passed at ~300 Hz so the
+    /// tone isn't an audible rumble.
+    pub ctcss_hz: f64,
+    /// When `true` and `ctcss_hz > 0`, the tone gates the squelch. When
+    /// `false`, the tone is still detected and reported but never withholds
+    /// audio ("monitor" mode).
+    pub ctcss_squelch: bool,
 }
 
 impl Default for FmParams {
@@ -45,6 +55,8 @@ impl Default for FmParams {
             squelch_dbfs: -80.0,
             noise_squelch: 0.18,
             lo_offset_hz: 250_000.0,
+            ctcss_hz: 0.0,
+            ctcss_squelch: true,
         }
     }
 }
@@ -55,6 +67,9 @@ pub struct ChainMetrics {
     pub snr_db: f32,
     pub squelch_open: bool,
     pub audio_dbfs: f32,
+    /// The configured CTCSS tone (Hz) while it is currently detected as
+    /// present, else `0.0` (disabled, or not locked).
+    pub ctcss_tone_hz: f32,
 }
 
 pub struct FmChain {
@@ -72,6 +87,9 @@ pub struct FmChain {
     squelch_thresh_dbfs: f32,
     squelch_gain: f32,
     sig_env: f32,
+    ctcss: Option<CtcssDetector>,
+    ctcss_gates: bool,
+    tone_hp: Option<Biquad>,
     metrics: ChainMetrics,
     resamp: LinearResampler,
     scratch_iq: Vec<Complex32>,
@@ -112,6 +130,15 @@ impl FmChain {
             0.707,
         );
 
+        // CTCSS: only meaningful in the sub-audible 60–260 Hz range. When
+        // active, also high-pass the recovered audio at ~300 Hz so the tone
+        // itself isn't a low rumble under the voice.
+        let ctcss = (p.ctcss_hz >= 60.0 && p.ctcss_hz <= 260.0)
+            .then(|| CtcssDetector::new(channel_rate, p.ctcss_hz));
+        let tone_hp = ctcss
+            .is_some()
+            .then(|| Biquad::highpass(channel_rate, 300.0, 0.707));
+
         Self {
             nco: Nco::new(-p.lo_offset_hz / device_rate),
             decim: FirDecimator::new(decim, cutoff, device_rate, num_taps),
@@ -127,6 +154,9 @@ impl FmChain {
             squelch_thresh_dbfs: p.squelch_dbfs as f32,
             squelch_gain: 0.0,
             sig_env: 0.0,
+            ctcss,
+            ctcss_gates: p.ctcss_squelch,
+            tone_hp,
             metrics: ChainMetrics::default(),
             resamp: LinearResampler::new(channel_rate, AUDIO_RATE),
             scratch_iq: Vec::new(),
@@ -147,6 +177,9 @@ impl FmChain {
     pub fn on_retune(&mut self) {
         self.prev_iq = Complex32::new(1.0, 0.0);
         self.noise_env = 1.0;
+        if let Some(d) = &mut self.ctcss {
+            d.reset();
+        }
     }
 
     /// Consume a block of device-rate IQ, append 48 kHz mono audio to `out`.
@@ -165,7 +198,12 @@ impl FmChain {
         let power: f32 =
             chan.iter().map(|c| c.norm_sqr()).sum::<f32>() / chan.len() as f32;
         let rssi_dbfs = 10.0 * (power + 1e-12).log10();
-        let open = rssi_dbfs >= self.squelch_thresh_dbfs && self.noise_env < self.noise_gate;
+        // The CTCSS lock (updated in the sample loop below) reflects up to the
+        // previous block, exactly like `noise_env` — consistent gating.
+        let tone_locked = self.ctcss.as_ref().map(|d| d.locked);
+        let tone_ok = !self.ctcss_gates || tone_locked.unwrap_or(true);
+        let open =
+            rssi_dbfs >= self.squelch_thresh_dbfs && self.noise_env < self.noise_gate && tone_ok;
         let target = if open { 1.0 } else { 0.0 };
         // ~5 ms audio ramp, ~10 ms noise envelope
         let ramp = (1.0 / (0.005 * self.channel_rate as f32)).min(1.0);
@@ -181,6 +219,9 @@ impl FmChain {
             let raw = prod.im.atan2(prod.re);
             let hf = self.noise_hp.process(raw);
             self.noise_env += (hf.abs() - self.noise_env) * nk;
+            if let Some(d) = &mut self.ctcss {
+                d.process(raw);
+            }
 
             let mut a = raw * self.disc_gain;
             if let Some(notch) = &mut self.pilot_notch {
@@ -188,6 +229,10 @@ impl FmChain {
             }
             a = self.deemph.process(a);
             a = self.audio_lp.process(a);
+            // Strip the sub-audible CTCSS tone from what the listener hears.
+            if let Some(hp) = &mut self.tone_hp {
+                a = hp.process(a);
+            }
             // pre-gate voice-band envelope, for the SNR estimate
             self.sig_env += (a.abs() - self.sig_env) * nk;
             self.squelch_gain += (target - self.squelch_gain) * ramp;
@@ -205,7 +250,92 @@ impl FmChain {
             snr_db,
             squelch_open: open,
             audio_dbfs: 20.0 * (peak + 1e-6).log10(),
+            ctcss_tone_hz: match &self.ctcss {
+                Some(d) if d.locked => d.tone_hz,
+                _ => 0.0,
+            },
         };
+    }
+}
+
+/// Sub-audible CTCSS tone-presence detector. Monitor-grade: pre-decimate the
+/// discriminator output to ~2 kHz, run a narrow biquad band-pass at the
+/// configured tone against a low-pass "reference band" envelope, and lock on
+/// a smoothed confidence with hysteresis (~0.2 s to make/break). It confirms
+/// "is *this* tone present", not "which of the 50 standard tones" — enough to
+/// gate squelch on a known repeater's tone, not a full decoder bank.
+struct CtcssDetector {
+    tone_hz: f32,
+    aa: Biquad,   // anti-alias LP before decimation
+    dec: usize,
+    cnt: usize,
+    bp: Biquad,   // narrow band-pass at tone_hz, at the decimated rate
+    ref_lp: Biquad, // ~230 Hz LP: the sub-audible/low-voice reference band
+    tone_env: f32,
+    ref_env: f32,
+    env_k: f32,
+    conf: f32,
+    conf_k: f32,
+    locked: bool,
+}
+
+impl CtcssDetector {
+    fn new(channel_rate: f64, tone_hz: f64) -> Self {
+        let dec = (channel_rate / 2_000.0).round().max(1.0) as usize;
+        let det_rate = channel_rate / dec as f64;
+        let env_tau = 0.05;
+        let conf_tau = 0.20;
+        Self {
+            tone_hz: tone_hz as f32,
+            aa: Biquad::lowpass(channel_rate, 400.0, 0.707),
+            dec,
+            cnt: 0,
+            bp: Biquad::bandpass(det_rate, tone_hz, 16.0),
+            ref_lp: Biquad::lowpass(det_rate, 230.0, 0.707),
+            tone_env: 0.0,
+            ref_env: 0.0,
+            env_k: (1.0 / (env_tau * det_rate)) as f32,
+            conf: 0.0,
+            conf_k: (1.0 / (conf_tau * det_rate)) as f32,
+            locked: false,
+        }
+    }
+
+    /// Feed one channel-rate discriminator sample (rad/sample, amplitude-
+    /// normalized — a CTCSS tone at ±700 Hz deviation lands near 0.09 here).
+    #[inline]
+    fn process(&mut self, raw: f32) {
+        let s = self.aa.process(raw);
+        self.cnt += 1;
+        if self.cnt < self.dec {
+            return;
+        }
+        self.cnt = 0;
+
+        let t = self.bp.process(s).abs();
+        let r = self.ref_lp.process(s).abs();
+        self.tone_env += (t - self.tone_env) * self.env_k;
+        self.ref_env += (r - self.ref_env) * self.env_k;
+
+        // Present when the tone band clears an absolute floor (rejects a
+        // quiet/dead channel where the ratio is only noise/noise) *and*
+        // carries a solid fraction of the low-band energy.
+        let present = self.tone_env > 0.010 && self.tone_env > 0.30 * self.ref_env;
+        let goal = if present { 1.0 } else { 0.0 };
+        self.conf += (goal - self.conf) * self.conf_k;
+        if self.conf > 0.6 {
+            self.locked = true;
+        } else if self.conf < 0.35 {
+            self.locked = false;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.cnt = 0;
+        self.tone_env = 0.0;
+        self.ref_env = 0.0;
+        self.conf = 0.0;
+        self.locked = false;
     }
 }
 
@@ -365,6 +495,7 @@ impl AmChain {
             snr_db,
             squelch_open: open,
             audio_dbfs: 20.0 * (peak + 1e-6).log10(),
+            ctcss_tone_hz: 0.0, // AM: not applicable
         };
     }
 }
@@ -524,6 +655,12 @@ impl Biquad {
     pub fn notch(fs: f64, fc: f64, q: f64) -> Self {
         let (cs, alpha) = Self::prewarp(fs, fc, q);
         Self::normalize(1.0, -2.0 * cs, 1.0, 1.0 + alpha, -2.0 * cs, 1.0 - alpha)
+    }
+
+    /// RBJ band-pass, constant 0 dB peak gain (unity at `fc`).
+    pub fn bandpass(fs: f64, fc: f64, q: f64) -> Self {
+        let (cs, alpha) = Self::prewarp(fs, fc, q);
+        Self::normalize(alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cs, 1.0 - alpha)
     }
 
     fn prewarp(fs: f64, fc: f64, q: f64) -> (f64, f64) {
@@ -772,6 +909,97 @@ mod tests {
         let off_tone = goertzel(tail, AUDIO_RATE, 400.0);
         assert!(at_tone > 0.15, "tone amplitude {at_tone}");
         assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");
+    }
+
+    /// FM carrier carrying a sub-audible CTCSS tone plus a "voice" tone.
+    #[cfg(test)]
+    fn fm_modulate_two_tone(
+        fs: f64,
+        n: usize,
+        (f1, dev1): (f64, f64),
+        (f2, dev2): (f64, f64),
+        lo_offset_hz: f64,
+    ) -> Vec<Complex32> {
+        let mut phase = 0.0f64;
+        let (mut p1, mut p2) = (0.0f64, 0.0f64);
+        let dt = 1.0 / fs;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let inst = lo_offset_hz
+                + dev1 * (2.0 * PI * p1).sin()
+                + dev2 * (2.0 * PI * p2).sin();
+            p1 += f1 * dt;
+            p2 += f2 * dt;
+            phase += 2.0 * PI * inst * dt;
+            out.push(Complex32::new(phase.cos() as f32, phase.sin() as f32));
+        }
+        out
+    }
+
+    #[test]
+    fn ctcss_gates_squelch_on_the_matching_tone() {
+        let fs = 2_000_000.0;
+        let tone = 100.0; // standard CTCSS
+        let voice = 1_200.0;
+        let iq = fm_modulate_two_tone(
+            fs,
+            2_000_000,
+            (tone, 700.0),
+            (voice, 3_000.0),
+            FmParams::default().lo_offset_hz,
+        );
+
+        // Correct tone -> unmutes, reports the tone.
+        let mut ok = FmChain::new(
+            fs,
+            FmParams { deemphasis_us: 0.0, ctcss_hz: tone, ..FmParams::default() },
+        );
+        let mut audio = Vec::new();
+        for block in iq.chunks(8192) {
+            ok.process(block, &mut audio);
+        }
+        assert!(ok.metrics().squelch_open, "matching CTCSS should open squelch");
+        assert!(
+            (ok.metrics().ctcss_tone_hz - tone as f32).abs() < 1.0,
+            "reported tone {}",
+            ok.metrics().ctcss_tone_hz
+        );
+        let tail = &audio[audio.len() / 2..];
+        let at_voice = goertzel(tail, AUDIO_RATE, voice);
+        assert!(at_voice > 0.1, "voice recovered through tone squelch: {at_voice}");
+        // The ~300 Hz output HPF should have knocked the sub-audible tone down.
+        let at_tone = goertzel(tail, AUDIO_RATE, tone);
+        assert!(at_tone < at_voice * 0.5, "tone {at_tone} vs voice {at_voice} — HPF");
+
+        // Wrong tone -> stays muted.
+        let mut nope = FmChain::new(
+            fs,
+            FmParams { deemphasis_us: 0.0, ctcss_hz: 123.0, ..FmParams::default() },
+        );
+        let mut muted = Vec::new();
+        for block in iq.chunks(8192) {
+            nope.process(block, &mut muted);
+        }
+        assert!(!nope.metrics().squelch_open, "non-matching CTCSS must keep squelch shut");
+        let peak = muted[muted.len() / 2..].iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        assert!(peak < 0.05, "muted audio peak {peak}");
+
+        // Monitor mode: detect + report, but never withhold audio.
+        let mut mon = FmChain::new(
+            fs,
+            FmParams {
+                deemphasis_us: 0.0,
+                ctcss_hz: tone,
+                ctcss_squelch: false,
+                ..FmParams::default()
+            },
+        );
+        let mut monaud = Vec::new();
+        for block in iq.chunks(8192) {
+            mon.process(block, &mut monaud);
+        }
+        assert!(mon.metrics().squelch_open);
+        assert!((mon.metrics().ctcss_tone_hz - tone as f32).abs() < 1.0);
     }
 
     #[test]

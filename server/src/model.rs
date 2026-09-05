@@ -322,6 +322,10 @@ pub struct DspStatus {
     pub snr_db: Option<f64>,
     pub squelch_open: bool,
     pub audio_level_dbfs: Option<f64>,
+    /// Configured CTCSS sub-audible tone (Hz) while it is currently detected
+    /// on the channel; `null` when CTCSS is disabled or the tone isn't
+    /// present. FM modes only.
+    pub ctcss_tone_hz: Option<f64>,
     pub sample_overruns: u64,
     pub pipeline_latency_ms: Option<f64>,
     /// Currently transmitting (push-to-talk keyed).

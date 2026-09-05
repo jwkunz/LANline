@@ -46,6 +46,9 @@ pub struct Telemetry {
     pub rssi_dbfs: Option<f32>,
     pub snr_db: Option<f32>,
     pub squelch_open: bool,
+    /// Configured CTCSS tone (Hz) while currently detected present; `None`
+    /// when CTCSS is off or the tone isn't locked.
+    pub ctcss_tone_hz: Option<f32>,
     pub overruns: u64,
     pub source: &'static str,
     /// Currently transmitting (push-to-talk keyed). See `PipelineCmd::Key`.
@@ -188,16 +191,19 @@ impl DemodParams {
 /// The two demod chains behind one `run_sdr` loop.
 #[cfg(feature = "soapy")]
 enum Chain {
-    Fm(FmChain),
-    Am(AmChain),
+    // Both boxed: `FmChain` grew (the optional CTCSS detector is several
+    // biquads) and the two variants are large and lopsided — keep the enum
+    // itself pointer-sized.
+    Fm(Box<FmChain>),
+    Am(Box<AmChain>),
 }
 
 #[cfg(feature = "soapy")]
 impl Chain {
     fn new(device_rate: f64, demod: DemodParams) -> Self {
         match demod {
-            DemodParams::Fm(p) => Chain::Fm(FmChain::new(device_rate, p)),
-            DemodParams::Am(p) => Chain::Am(AmChain::new(device_rate, p)),
+            DemodParams::Fm(p) => Chain::Fm(Box::new(FmChain::new(device_rate, p))),
+            DemodParams::Am(p) => Chain::Am(Box::new(AmChain::new(device_rate, p))),
         }
     }
     fn channel_rate(&self) -> f64 {
@@ -500,6 +506,9 @@ fn fm_params(cfg: &RadioConfig) -> dsp::FmParams {
         squelch_dbfs: p("squelch_db", -80.0),
         noise_squelch: p("noise_squelch", 0.18),
         lo_offset_hz: cfg.tuner.lo_offset_hz.abs().max(1.0),
+        ctcss_hz: p("ctcss_hz", 0.0),
+        // `ctcss_squelch` 0 = monitor only (detect + report, don't gate).
+        ctcss_squelch: p("ctcss_squelch", 1.0) != 0.0,
     }
 }
 
@@ -1213,6 +1222,7 @@ fn run_sdr(
                 t.rssi_dbfs = Some(m.rssi_dbfs);
                 t.snr_db = Some(m.snr_db);
                 t.squelch_open = m.squelch_open;
+                t.ctcss_tone_hz = (m.ctcss_tone_hz > 0.0).then_some(m.ctcss_tone_hz);
                 t.overruns = overruns;
             }
         }

@@ -399,6 +399,31 @@ h3.ham-sub {
   color: var(--ink);
   font-weight: 600;
 }
+.ham-ctcss {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.ham-ctcss select {
+  font-size: 15px;
+  padding: 6px 8px;
+}
+.ham-ck {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+#ham-ctcss-det {
+  font-variant-numeric: tabular-nums;
+}
+#ham-ctcss-det.ok {
+  color: var(--accent);
+  font-weight: 600;
+}
 
 #log {
   font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;

@@ -53,7 +53,7 @@ wrapper (`client/android`).
 | 2h | FRS receive mode (462/467 MHz, 22-channel plan), channel-picker wizard | ✅ |
 | 2i | Push-to-talk transmit (FRS only; FM modulator, half-duplex device switching, live mic-audio uplink over WebRTC, PTT protocol) — off by default (`--enable-tx`), personal-use only per FCC Part 95 | ✅ |
 | 2j | Multi-radio device picker (HackRF / ADALM-Pluto), TLS with a self-signed cert, Receiver Analysis waterfall | ✅ |
-| 2k | Amateur NBFM receive mode — band-plan-organized channel picker (6 m – 23 cm), simplex/calling frequencies, voluntary ARRL band-plan hints; repeater offsets + subaudible tones + TX to follow | ✅ |
+| 2k | Amateur NBFM receive mode — band-plan-organized channel picker (6 m – 23 cm), simplex/calling frequencies, voluntary ARRL band-plan hints, CTCSS tone squelch; repeater offsets + DCS + TX to follow | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -337,9 +337,16 @@ VHF/UHF bands. The picker is organized by **band** — 6 m, 2 m, 1.25 m,
 
 Every band here is open to **all U.S. license classes** (Technician and up)
 for FM voice; the panel notes the conventional repeater offset for the band.
-This first build is **receive-only** — repeater input/tone TX, a fetched
-repeater database, and manual repeater entry (offsets + CTCSS/DCS) come in
-later builds. The same UHF `freq_correction_ppm` note as FRS applies.
+
+A **CTCSS tone squelch** picker sits under the manual dial: choose the
+sub-audible tone ("PL") a repeater requires and the channel only unmutes
+while that tone is present (a "monitor only" checkbox detects and reports it
+without muting). It's a single-tone presence check keyed to your selection,
+not a full decoder bank.
+
+Still **receive-only** — repeater input/tone TX, DCS, a fetched repeater
+database, and manual repeater entry (offsets) come in later builds. The same
+UHF `freq_correction_ppm` note as FRS applies.
 
 ### Receiver Analysis (waterfall)
 

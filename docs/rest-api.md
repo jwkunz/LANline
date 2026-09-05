@@ -337,7 +337,9 @@ the client uses to render controls and the server uses to validate
       "deemphasis_us": { "type": "number", "default": 0, "enum": [0, 50, 75], "unit": "us" },
       "audio_lpf_hz":  { "type": "number", "default": 3400,  "min": 1000, "max": 8000,  "unit": "Hz" },
       "squelch_db":    { "type": "number", "default": -80, "min": -120, "max": 0, "unit": "dBFS" },
-      "noise_squelch": { "type": "number", "default": 0.35, "min": 0.02, "max": 2.0, "unit": "ratio" }
+      "noise_squelch": { "type": "number", "default": 0.35, "min": 0.02, "max": 2.0, "unit": "ratio" },
+      "ctcss_hz":      { "type": "number", "default": 0, "min": 0, "max": 260, "unit": "Hz" },
+      "ctcss_squelch": { "type": "number", "default": 1, "enum": [0, 1], "unit": "bool" }
     }
   },
   {
@@ -431,11 +433,23 @@ what this does or doesn't transmit.
 is just another FM mode; the band-plan structure (6 m – 23 cm, simplex/calling
 frequencies, and the voluntary ARRL segment map) lives entirely in the web
 client (`web/src/ham.ts`) — the API only sees `mode: "ham"` plus a
-`frequency_hz` anywhere in an amateur band. This first version is
-receive-only; repeater offsets, CTCSS/DCS subaudible tones, a fetched
-repeater database, and TX are planned follow-ups. Part 97 permits homebrew
-transmit equipment under an amateur licence, so a later TX build here is on
-firmer footing than `frs`'s.
+`frequency_hz` anywhere in an amateur band.
+
+`ctcss_hz` adds **sub-audible tone squelch** (CTCSS / "PL"). Set it to a
+standard tone (67.0–254.1 Hz) and the channel only unmutes while a
+[`CtcssDetector`](architecture.md#ctcss-tone-squelch) confirms that tone is
+present; the recovered audio is also high-passed ~300 Hz so the tone isn't
+an audible rumble. `ctcss_squelch: 0` detects and reports the tone (see
+`dsp.ctcss_tone_hz` in `GET /radio/status`) without ever withholding audio —
+"monitor" mode. `0` disables it (carrier squelch only). It's a single-tone
+*presence* check keyed to the tone you select, not a 50-tone decoder bank.
+Live-editable via `PATCH /api/v1/radio` (`mode_params` is deep-merged), so
+changing the tone or toggling monitor mode takes effect without a restart.
+
+Still receive-only; repeater offsets, DCS, a fetched repeater database, and
+TX are planned follow-ups. Part 97 permits homebrew transmit equipment under
+an amateur licence, so a later TX build here is on firmer footing than
+`frs`'s.
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end
@@ -790,6 +804,7 @@ Live telemetry, safe to poll at ~1 Hz.
     "snr_db": 22.5,
     "squelch_open": true,
     "audio_level_dbfs": -18.0,
+    "ctcss_tone_hz": null,
     "sample_overruns": 0,
     "pipeline_latency_ms": 62,
     "tx_keyed": false
@@ -807,7 +822,9 @@ Live telemetry, safe to poll at ~1 Hz.
 ```
 
 In `debug_tone` mode the `dsp` block reports synthetic values
-(`rssi_dbfs: null`, `squelch_open: true`).
+(`rssi_dbfs: null`, `squelch_open: true`). `ctcss_tone_hz` is the configured
+CTCSS tone while it is currently detected on-channel (FM modes with
+`ctcss_hz` set), else `null`.
 
 ### `POST /api/v1/radio/tx/key`
 

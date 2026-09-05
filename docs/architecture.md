@@ -217,14 +217,40 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   dial steps, since `structKey` only rebuilds the panel when the *band*
   changes). Every VHF/UHF FM band is open to all licence classes, so there's
   no privilege gating to enforce — the "privilege vs licence" hint is
-  informational. Receive-only for this build; repeater input/tone TX, a
-  fetched repeater DB (`scripts/fetch-repeaters.mjs` from RepeaterBook, the
+  informational. A second commit added **CTCSS tone squelch**
+  ([below](#ctcss-tone-squelch)). Still receive-only; repeater input/tone TX,
+  a fetched repeater DB (`scripts/fetch-repeaters.mjs` from RepeaterBook, the
   same pre-fetch-and-bundle pattern as the FM/AM station DBs), manual
-  repeater entry, and CTCSS/DCS subaudible-tone squelch (a Goertzel detector
-  in `FmChain` + a ~300 Hz audio HPF) are planned follow-up commits. Part 97
-  allows homebrew/experimental transmit gear under an amateur licence (the
-  operator holds Amateur Extra, KZ4AZ), so a `ham` TX path is on firmer
-  regulatory footing than `frs`'s.
+  repeater entry, and DCS are planned follow-up commits. Part 97 allows
+  homebrew/experimental transmit gear under an amateur licence (the operator
+  holds Amateur Extra, KZ4AZ), so a `ham` TX path is on firmer regulatory
+  footing than `frs`'s.
+
+### CTCSS tone squelch
+
+`FmParams::ctcss_hz` (0 = off) attaches a `CtcssDetector` to `FmChain`. It
+runs on the raw discriminator output (the amplitude-normalized instantaneous
+frequency, so it's independent of RF gain and total deviation): a cheap
+anti-alias low-pass, decimation to ~2 kHz, then a narrow RBJ band-pass
+(`Biquad::bandpass`, Q ≈ 16) at the selected tone versus a ~230 Hz low-pass
+"reference band" envelope. Presence = the band-pass envelope clears a small
+absolute floor **and** is a solid fraction of the reference envelope; a
+~200 ms confidence smoother with hysteresis (0.6 lock / 0.35 drop) turns
+that into a stable `locked` bit, which is AND-ed into the squelch-open
+decision the same way `noise_env` is. When CTCSS is active the recovered
+audio also gets a ~300 Hz high-pass so the sub-audible tone isn't a rumble
+under the voice. `ctcss_squelch: 0` keeps the detector running and reporting
+(`dsp.ctcss_tone_hz`) but never gates — "monitor" mode.
+
+Deliberately a single-tone *presence* check keyed to the tone the operator
+selects, not a 50-tone decoder bank: a repeater publishes its required tone,
+so that's the one you set. It won't reliably distinguish immediate CTCSS
+neighbours (they're ~2–3 % apart and adult male voice fundamentals overlap
+the low end), which is why the confidence smoother is slow and the band-pass
+is as narrow as settling time allows. `Chain`'s `Fm`/`Am` variants are both
+`Box`ed now — `FmChain` grew past the point where an unboxed enum variant
+tripped `clippy::large_enum_variant`. DCS (23-bit Golay code, ~134 Hz
+sub-carrier) is a different problem and stays deferred.
 
 ### AM and HackRF MF/LF sensitivity
 
