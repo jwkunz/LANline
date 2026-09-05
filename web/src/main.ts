@@ -1060,6 +1060,20 @@ function patchLive(): void {
   panels.querySelectorAll<HTMLButtonElement>(".station").forEach((b) => {
     b.classList.toggle("tuned", Number(b.dataset.hz) === freq);
   });
+
+  // Keep the manual-tune dial's number in sync as +/- and Seek move the
+  // frequency — structKey() ignores frequency_hz, so the panel isn't
+  // rebuilt. Don't stomp a value the user is mid-edit on.
+  const dial = q<HTMLInputElement>("#fm-freq, #am-freq, #apt-freq");
+  if (dial && dial !== document.activeElement) {
+    const v =
+      dial.id === "am-freq"
+        ? (freq / 1e3).toFixed(0)
+        : dial.id === "apt-freq"
+          ? (freq / 1e6).toFixed(4)
+          : (freq / 1e6).toFixed(1);
+    if (dial.value !== v) dial.value = v;
+  }
 }
 
 // --- delegated events (wired once) ----------------------------------
