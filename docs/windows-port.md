@@ -85,27 +85,28 @@ natural companion to a Windows port; it doesn't exist yet.
   it runs on a bare install). Required to pass on all three OSes; on a `v*`
   tag these are attached to a draft GitHub Release.
 - **`soapy`** — default features, linking libSoapySDR. Linux/macOS install it
-  from apt/brew and must pass. **Windows** pulls PothosSDR + NASM + pkgconf
-  and runs with `continue-on-error: true` — the job goes green with a warning
-  annotation whether or not the SDR link actually worked, so read its log to
-  see where a Windows soapy build currently stands. A single-file *soapy*
-  binary isn't possible anyway: SoapySDR loads its driver modules as separate
+  from apt/brew. **Windows** pulls PothosSDR (`2021.07.25-vc16-x64`) + NASM +
+  `pkgconfiglite`, with LLVM already on the runner. **As of v1.0.0 this leg
+  passes** — `cargo build --release` links `SoapySDR.dll` and produces the
+  binary. It's still marked `continue-on-error: true` until it's been run
+  against real hardware; drop that once it has. A single-file *soapy* binary
+  isn't possible regardless: SoapySDR loads its driver modules as separate
   shared libraries at runtime.
 
-So "does the Windows soapy build work" now has a live answer in every CI run,
-not just this document.
+So the Windows SoapySDR build is no longer hypothetical — it compiles in CI
+every run. What's unverified is only whether the resulting `.exe` actually
+drives a HackRF on Windows (CI has no radio).
 
 ## Recommendation for v1.0.0
 
-The code doesn't force the choice. Either:
+Shipped as **Linux-first**: the standalone (no-SDR) binaries are released for
+all three OSes; a real-radio Windows build is buildable but not yet
+hardware-tested. To promote Windows to first-class:
 
-1. **Linux-first release.** Tag v1.0.0, note "Windows: `--no-default-features`
-   builds in CI on `windows-latest`; the SoapySDR link is unverified — see
-   docs/windows-port.md." Least work, honest.
-2. **Claim Windows support.** Land the `hostname()` fix, add
-   `scripts/dev-env.ps1` + a `run-server.ps1`, get the `soapy` Windows CI leg
-   green (drop its `continue-on-error`), and smoke-test the binary on a real
-   Windows box with a HackRF. Then the claim is real.
+1. Land the `hostname()` fix.
+2. Add `scripts/dev-env.ps1` + a `run-server.ps1` for the manual path.
+3. Smoke-test a `soapy` Windows binary against a HackRF, then drop
+   `continue-on-error` from that CI leg.
 
-Given the Windows soapy path is still unproven, option 1 is the accurate
-story for a v1.0.0 cut today.
+Until step 3, "Windows can build the real thing, nobody's confirmed it runs"
+is the honest status.
