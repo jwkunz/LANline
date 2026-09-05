@@ -4,15 +4,19 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.http.SslError
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.view.WindowManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.net.InetAddress
+import java.net.URI
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -65,8 +69,9 @@ class MainActivity : AppCompatActivity() {
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             cacheMode = WebSettings.LOAD_DEFAULT
-            // The web app is a single local file that calls the plain-HTTP C2
-            // server on the LAN; allow cross-origin XHR/fetch from file://.
+            // The web app is a single local file that calls the C2 server on
+            // the LAN (http, or https with --tls); allow cross-origin
+            // XHR/fetch from file://.
             @Suppress("DEPRECATION")
             allowUniversalAccessFromFileURLs = true
             @Suppress("DEPRECATION")
@@ -74,7 +79,24 @@ class MainActivity : AppCompatActivity() {
         }
         WebView.setWebContentsDebuggingEnabled(true)
 
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            // A LANline server run with --tls serves a self-signed cert that
+            // chains to nothing. This app only ever talks to servers it found
+            // on the local network, so accept a bad cert from a private /
+            // link-local address or a *.local name, and reject everything
+            // else (a MITM on a routable address, say).
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: SslErrorHandler,
+                error: SslError,
+            ) {
+                if (isLocalHost(runCatching { URI(error.url).host }.getOrNull().orEmpty())) {
+                    handler.proceed()
+                } else {
+                    handler.cancel()
+                }
+            }
+        }
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
                 // FRS's push-to-talk mic is the only capture this app ever
@@ -130,6 +152,24 @@ class MainActivity : AppCompatActivity() {
         // `http://<lan>` API calls are not treated as mixed content.
         val url = BuildConfig.DEV_SERVER_URL.ifEmpty { "file:///android_asset/web/index.html" }
         webView.loadUrl(url)
+    }
+
+    /** A hostname/IP that can only be a machine on this LAN. */
+    private fun isLocalHost(host: String): Boolean {
+        if (host.isEmpty()) return false
+        if (host.equals("localhost", ignoreCase = true) ||
+            host.endsWith(".local", ignoreCase = true)
+        ) {
+            return true
+        }
+        // Only resolve IP literals (no DNS, so no blocking call on this
+        // thread). Servers come from the beacon with numeric c2_base_urls, so
+        // that's the realistic case anyway.
+        if (!host.matches(Regex("^[0-9.]+$|^[0-9a-fA-F:]+$"))) return false
+        return runCatching {
+            val a = InetAddress.getByName(host)
+            a.isSiteLocalAddress || a.isLinkLocalAddress || a.isLoopbackAddress
+        }.getOrDefault(false)
     }
 
     override fun onStart() {

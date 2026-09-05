@@ -112,21 +112,62 @@ reach it.
 
 ### Then
 
-The server prints the URLs it's listening on. Open one in a browser:
+The server prints the exact URLs it's listening on (`http://…`, or `https://…`
+with `--tls`). Open one in a browser:
 
-- **same machine:** `http://localhost:8730/`
-- **another device on the LAN:** `http://<server-ip>:8730/` (shown at startup),
-  or `http://lanline.local:8730/` where mDNS resolves
+- **same machine:** `localhost:8730`
+- **another device on the LAN:** `<server-ip>:8730` (shown at startup), or
+  `lanline.local:8730` where mDNS resolves
 - the **Android app** finds it over the LAN on its own
+
+The mic and the location button need `--tls` (or `localhost`) — see below.
 
 Stop it with Ctrl-C. Common flags (full list: `lanline-server --help`):
 
 | Flag | |
 |------|--|
 | `--debug-tone` | serve a 440 Hz test tone — proves the audio path with no SDR |
+| `--tls` | serve **HTTPS** (see below) — needed for the mic / location button off-box |
 | `--c2-port 9000` | change the web/REST port from 8730 |
 | `--no-mdns` / `--no-beacon` | disable a discovery mechanism |
 | `--bind 127.0.0.1` | listen on loopback only (default is all interfaces) |
+
+### HTTPS (`--tls`)
+
+Browsers only expose **`getUserMedia`** (the push-to-talk mic) and the
+**"📍 My location"** button on a *secure context*: `https://`, or
+`http://localhost`. Reached from another device over a plain-`http://` LAN
+address, those features silently do nothing. `--tls` fixes that.
+
+```sh
+lanline-server --tls                       # self-signed, auto-generated
+lanline-server --tls --tls-cert cert.pem --tls-key key.pem   # your own cert
+```
+
+With no cert given, the server generates a self-signed one on first run —
+SANs cover `localhost`, `lanline.local`, and every LAN IPv4 it sees — and
+caches it (`~/.local/state/lanline/tls/` on Linux, `Library/Application
+Support/lanline/tls/` on macOS, `%LOCALAPPDATA%\lanline\tls\` on Windows;
+override with `--tls-dir`). It logs the cert's SHA-256 fingerprint at startup.
+
+Because it's self-signed, each browser shows a one-time **"Your connection is
+not private"** warning — click **Advanced → Proceed**. After that the origin
+*is* a secure context and the mic / location work; the cached cert keeps that
+exception valid across restarts. The Android app trusts a self-signed cert
+from a LAN address automatically.
+
+For **zero warnings**, issue a locally-trusted cert with
+[`mkcert`](https://github.com/FiloSottile/mkcert) and pass it via
+`--tls-cert` / `--tls-key`:
+
+```sh
+mkcert -install                                   # once per device
+mkcert lanline.local localhost 192.168.1.234      # -> *.pem in the cwd
+lanline-server --tls --tls-cert ./lanline.local+2.pem --tls-key ./lanline.local+2-key.pem
+```
+
+`--tls` makes the C2 port HTTPS-only; plain-HTTP clients can't connect. The
+discovery beacon and mDNS advertise the `https://` URL automatically.
 
 ## Building the server
 

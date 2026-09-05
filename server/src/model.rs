@@ -50,6 +50,8 @@ pub struct ServerInfo {
     pub protocol_version: u32,
     pub version: &'static str,
     pub hostname: String,
+    /// `"http"` or `"https"` — the transport this C2 port is served over.
+    pub scheme: &'static str,
     #[serde(with = "time::serde::rfc3339")]
     pub time: OffsetDateTime,
     pub ports: Ports,

@@ -48,3 +48,11 @@ num-complex = "0.4"
 # Pure-Rust multicast-DNS responder: advertises `<name>.local` + an
 # `_lanline._tcp` service so a plain browser can reach the server by name.
 mdns-sd = "0.11"
+# TLS for the C2 port (--tls). `-no-provider` + an explicit rustls/ring
+# provider keeps aws-lc-rs (and its cmake/NASM build) out of the tree — ring
+# is already here via webrtc.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+sha2 = "0.10"

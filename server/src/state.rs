@@ -59,6 +59,12 @@ impl AppState {
         self.0.started.elapsed().as_secs_f64()
     }
 
+    /// `"https"` when the C2 port is served over TLS (`--tls`), else `"http"`.
+    /// Used to build the URLs advertised in the beacon and mDNS.
+    pub fn scheme(&self) -> &'static str {
+        crate::tls::scheme(&self.0.config)
+    }
+
     /// `["rx", "webrtc", "nbfm", "debug_tone"]` plus `"tx"` when the selected
     /// device can transmit, plus `"ptt"` when transmit is *also* actually
     /// enabled (`--enable-tx`) — a client uses this, not `"tx"` alone, to

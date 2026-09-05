@@ -21,9 +21,10 @@ mod radio;
 mod registry;
 mod sessions;
 mod state;
+mod tls;
 mod util;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use config::Config;
 use model::{Ports, RadioConfig};
@@ -42,6 +43,10 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::parse();
+    let scheme = tls::scheme(&config);
+    if tls::enabled(&config) {
+        tls::install_crypto_provider();
+    }
 
     // --- ports -----------------------------------------------------------
     let (tcp, c2_port) = net::bind_tcp(config.bind, config.c2_port)?;
@@ -143,15 +148,14 @@ async fn main() -> Result<()> {
     // `<name>.local` address on the C2 port. Held until shutdown.
     let _mdns = match (config.no_mdns, advertised_host) {
         (false, IpAddr::V4(ip)) if !ip.is_loopback() => {
-            mdns::spawn(&config.mdns_name, ip, ports.c2, state.server_id)
+            mdns::spawn(&config.mdns_name, ip, ports.c2, state.server_id, scheme)
         }
         _ => None,
     };
 
     // --- serve -------------------------------------------------------
-    let listener = tokio::net::TcpListener::from_std(tcp)?;
     tracing::info!(
-        "listening: C2 http://{host}:{c2}  audio_out udp/{ao}  audio_in udp/{ai}  beast tcp/{be}  ais tcp/{an}  beacon udp/{bp}",
+        "listening: C2 {scheme}://{host}:{c2}  audio_out udp/{ao}  audio_in udp/{ai}  beast tcp/{be}  ais tcp/{an}  beacon udp/{bp}",
         host = advertised_host,
         c2 = ports.c2,
         ao = ports.audio_out,
@@ -162,12 +166,12 @@ async fn main() -> Result<()> {
     );
     let name_url = match (config.no_mdns, advertised_host) {
         (false, IpAddr::V4(ip)) if !ip.is_loopback() => {
-            format!("  or  http://{}.local:{}/", config.mdns_name, ports.c2)
+            format!("  or  {scheme}://{}.local:{}/", config.mdns_name, ports.c2)
         }
         _ => String::new(),
     };
     tracing::info!(
-        "web client: open http://{}:{}/{name_url}  — connects with nothing to type",
+        "web client: open {scheme}://{}:{}/{name_url}  — connects with nothing to type",
         advertised_host,
         ports.c2,
     );
@@ -178,17 +182,47 @@ async fn main() -> Result<()> {
     }
 
     let app = api::router(state.clone());
-    let shutdown = {
-        let state = state.clone();
-        async move {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutdown: stopping pipeline and closing peers");
-            state.webrtc.close_all().await;
-            state.radio_mgr.stop();
-        }
-    };
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+
+    // Ctrl-C: stop the pipeline and close WebRTC peers before the HTTP server
+    // finishes draining. `axum::serve` takes the shutdown future directly;
+    // `axum_server` needs a `Handle`.
+    if tls::enabled(&config) {
+        let mats = tls::prepare(&config, &config.mdns_name)?;
+        tracing::info!("tls: {}", mats.source);
+        tracing::info!("tls: cert SHA-256 {}", mats.fingerprint_sha256);
+        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem(mats.cert_pem, mats.key_pem)
+            .await
+            .context("loading TLS cert/key")?;
+        let handle = axum_server::Handle::new();
+        tokio::spawn({
+            let handle = handle.clone();
+            let state = state.clone();
+            async move {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("shutdown: stopping pipeline and closing peers");
+                state.webrtc.close_all().await;
+                state.radio_mgr.stop();
+                handle.graceful_shutdown(Some(Duration::from_secs(3)));
+            }
+        });
+        axum_server::from_tcp_rustls(tcp, rustls)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        let listener = tokio::net::TcpListener::from_std(tcp)?;
+        let shutdown = {
+            let state = state.clone();
+            async move {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("shutdown: stopping pipeline and closing peers");
+                state.webrtc.close_all().await;
+                state.radio_mgr.stop();
+            }
+        };
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    }
     Ok(())
 }

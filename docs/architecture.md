@@ -52,8 +52,9 @@ Reaching the server:
 
 ```
 server/src/
-  main.rs              wiring: parse config, probe device, start beacon + mDNS + HTTP
+  main.rs              wiring: parse config, probe device, start beacon + mDNS + HTTP(S)
   config.rs            CLI (clap) + resolved runtime settings
+  tls.rs               --tls: load or self-sign (rcgen) the C2 cert, cache it
   mdns.rs              multicast-DNS responder: <name>.local + _lanline._tcp on the C2 port
   model.rs             all REST DTOs (serde), shared with handlers
   state.rs             AppState: Arc<...> handles to RadioManager, SessionStore, beacon info
@@ -378,6 +379,43 @@ audio without restarting anything.
 No privacy-code (CTCSS/DCS) tone gets added to the transmitted audio
 either — same reasoning as the receive side above; not implemented, not
 currently planned.
+
+### TLS and the secure-context problem
+
+`getUserMedia` (the push-to-talk mic) and `navigator.geolocation` (the
+"📍 My location" button) are gated by browsers to a **secure context** —
+`https://`, or `http://localhost` / `http://127.0.0.1`. Served over plain
+HTTP from a LAN address, both silently do nothing: no prompt, no error the
+UI can show. `--tls` makes the C2 port HTTPS so an off-box browser gets a
+secure context.
+
+`tls.rs` produces the cert. With `--tls-cert`/`--tls-key` it just reads
+those PEM files (for a `mkcert`-issued cert your devices already trust).
+Otherwise it self-signs with `rcgen` (ECDSA P-256, ~397-day validity), SANs
+= `localhost`, `<mdns-name>.local`, `127.0.0.1`, `::1`, and every
+non-loopback **IPv4** from `if-addrs` (global IPv6 is skipped — rotating
+privacy addresses would just bloat the cert). The pair is cached under a
+per-user state dir (`--tls-dir` to override) so the cert — and therefore the
+browser's "proceed anyway" exception, which is keyed to the exact cert —
+survives restarts. Regenerated only if the cache is missing or >300 days
+old. The SHA-256 fingerprint is logged at startup so you can match it
+against what the browser shows.
+
+Serving switches from `axum::serve` to `axum-server`
+(`from_tcp_rustls` + a `Handle` for graceful shutdown) on the `--tls` path;
+the plain-HTTP path is unchanged. `axum-server`'s `tls-rustls-no-provider`
+feature plus an explicit `rustls/ring` provider keeps `aws-lc-rs` (and its
+CMake/NASM build) out of the tree — `ring` is already here via `webrtc`.
+
+The scheme is threaded into everything that emits a URL: the startup log,
+the mDNS advertisement and its `scheme` TXT key, the discovery beacon's
+`scheme` field and `c2_base_url`, and `GET /api/v1/server`'s `scheme`. The
+web client picks it up for free — it derives its API base from
+`location.protocol`/`location.host` when served by the server, and a typed
+host inherits the page's scheme. The Android WebView adds an
+`onReceivedSslError` that accepts a bad cert only from a private/link-local
+address or a `*.local` name (the only things this app ever connects to),
+rejecting anything routable.
 
 ### HackRF frequency calibration
 

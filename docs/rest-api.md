@@ -132,8 +132,9 @@ Server identity and current capability summary.
 {
   "server_id": "5f2b8b0e-2c1a-4d7e-9a3e-1b6d9c0a77aa",
   "protocol_version": 1,
-  "version": "0.1.0",
+  "version": "1.1.0",
   "hostname": "bench-linux",
+  "scheme": "http",
   "time": "2026-09-03T17:04:11Z",
   "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005, "ais_nmea": 10110 },
   "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "am", "adsb", "ais", "debug_tone"],
@@ -148,6 +149,10 @@ Server identity and current capability summary.
 
 `capabilities` is dynamic: `"tx"` appears only when the selected device
 supports transmit. `selected_device` is `null` when none is selected.
+`scheme` is `"https"` when the server was started with `--tls` (the C2 port
+is then HTTPS-only); a browser served the client over HTTPS is a secure
+context, so `getUserMedia` (push-to-talk mic) and the geolocation button work
+from any LAN address, not just `localhost`.
 `ports.beast` is the TCP port of the [Beast Mode S feed](#adsb-track-export),
 `ports.ais_nmea` the TCP port of the [AIVDM feed](#ais-vessel-track-export);
 either is `0` when disabled (`--beast-port 0` / `--ais-nmea-port 0`).

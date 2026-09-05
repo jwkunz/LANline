@@ -36,6 +36,7 @@ packet):
   "hostname": "bench-linux",
   "advertised_host": "192.168.1.42",
   "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005, "ais_nmea": 10110 },
+  "scheme": "http",
   "c2_base_url": "http://192.168.1.42:8730",
   "device": {
     "driver": "hackrf",
@@ -60,7 +61,8 @@ packet):
 | `ports.audio_in` | UDP port reserved for the phase-2 transmit stream |
 | `ports.beast` | TCP port of the Beast Mode S feed (ADS-B); `0` when disabled |
 | `ports.ais_nmea` | TCP port of the AIVDM marine AIS feed; `0` when disabled |
-| `c2_base_url` | Convenience: `http://<advertised_host>:<c2>` |
+| `scheme` | `"http"`, or `"https"` when the server runs with `--tls` (C2 port is then HTTPS-only) |
+| `c2_base_url` | Convenience: `<scheme>://<advertised_host>:<c2>` |
 | `device` | `null` when no SDR is selected; `devices_available` still reports how many were enumerated |
 | `capabilities` | Mirrors `GET /api/v1/server.capabilities` |
 | `timestamp` | RFC 3339 UTC send time |

@@ -15,7 +15,13 @@ const SERVICE_TYPE: &str = "_lanline._tcp.local.";
 
 /// Register the service. The returned daemon must be kept alive for the
 /// advertisement to persist; drop it (or call `.shutdown()`) to stop.
-pub fn spawn(name: &str, ip: Ipv4Addr, c2_port: u16, server_id: Uuid) -> Option<ServiceDaemon> {
+pub fn spawn(
+    name: &str,
+    ip: Ipv4Addr,
+    c2_port: u16,
+    server_id: Uuid,
+    scheme: &str,
+) -> Option<ServiceDaemon> {
     let daemon = match ServiceDaemon::new() {
         Ok(d) => d,
         Err(e) => {
@@ -30,7 +36,7 @@ pub fn spawn(name: &str, ip: Ipv4Addr, c2_port: u16, server_id: Uuid) -> Option<
 
     let host = format!("{name}.local.");
     let sid = server_id.to_string();
-    let props = [("path", "/"), ("proto", "1"), ("id", sid.as_str())];
+    let props = [("path", "/"), ("proto", "1"), ("scheme", scheme), ("id", sid.as_str())];
 
     let addr = IpAddr::V4(ip);
     let info = match ServiceInfo::new(SERVICE_TYPE, name, &host, addr, c2_port, &props[..]) {
@@ -43,7 +49,7 @@ pub fn spawn(name: &str, ip: Ipv4Addr, c2_port: u16, server_id: Uuid) -> Option<
 
     match daemon.register(info) {
         Ok(()) => {
-            tracing::info!("mdns: advertising http://{name}.local:{c2_port}/  ({SERVICE_TYPE})");
+            tracing::info!("mdns: advertising {scheme}://{name}.local:{c2_port}/  ({SERVICE_TYPE})");
             Some(daemon)
         }
         Err(e) => {

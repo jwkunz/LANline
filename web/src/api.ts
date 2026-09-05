@@ -27,10 +27,16 @@ export class ApiError extends Error {
 }
 
 /** Turn a user-entered host ("192.168.1.5:41785", "http://host:8080") into a
- *  base URL with no trailing slash. */
+ *  base URL with no trailing slash. A bare host with no scheme inherits the
+ *  page's own scheme, so opening the client over https keeps typed hosts on
+ *  https too (the server serves one or the other, not both — see `--tls`). */
 export function normalizeBase(host: string): string {
   let h = host.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//i.test(h)) h = "http://" + h;
+  if (!/^https?:\/\//i.test(h)) {
+    const scheme =
+      typeof location !== "undefined" && location.protocol === "https:" ? "https" : "http";
+    h = `${scheme}://${h}`;
+  }
   return h;
 }
 
