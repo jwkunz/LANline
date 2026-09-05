@@ -1,11 +1,12 @@
 # LANline — web client
 
 Vanilla TypeScript + Vite. Mode-selection wizard (NOAA Weather / FM Broadcast /
-AM Radio / NOAA APT / ADS-B / AIS / Debug Tone), nearest-station finders, seek,
-a shared radar scope for the ADS-B + AIS traffic trackers (canvas, no map
-tiles), a canvas renderer for the NOAA APT satellite image, REST session with
-heartbeat, live radio/telemetry display, and received-audio playback over
-WebRTC/Opus (Play button — a user gesture is required to start audio).
+AM Radio / NOAA APT / FRS / ADS-B / AIS / Debug Tone), nearest-station
+finders, seek, a shared radar scope for the ADS-B + AIS traffic trackers
+(canvas, no map tiles), a canvas renderer for the NOAA APT satellite image,
+REST session with heartbeat, live radio/telemetry display, and received-audio
+playback over WebRTC/Opus (Play button — a user gesture is required to start
+audio).
 
 `npm run build` produces a **single self-contained `dist/index.html`** (all
 JS/CSS inlined, via `vite-plugin-singlefile`). That bundle plus the three
@@ -41,6 +42,7 @@ npm run preview    # serve the built bundle
 | `src/discovery.ts` | `window.LanlineNative` bridge (Android beacon discovery) |
 | `src/geo.ts` | haversine nearest-N + `lat, lon` parse + XHR JSON loader (works from `file://`) |
 | `src/nwr.ts` / `src/fm.ts` / `src/am.ts` | NOAA Weather Radio + FM broadcast + AM broadcast station directories, nearest-station search |
+| `src/frs.ts` | the fixed 22-channel FRS frequency table (no station database — it's a hardcoded FCC channel plan, not fetched data) |
 | `src/adsb.ts` / `src/ais.ts` | ADS-B + AIS track types + the equirectangular projection the shared radar scope uses |
 | `src/apt.ts` | NOAA APT status/image types, binary raster decode, the NOAA-15/18/19 satellite frequency table, and local SGP4 pass prediction (`satellite.js`) against the bundled TLE |
 | `public/nwr-stations.json` / `public/fm-stations.json` / `public/am-stations.json` | the bundled directories (served by the server too) |

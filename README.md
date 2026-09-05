@@ -11,7 +11,8 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
   `http://<host>:8730/` (or `http://lanline.local:8730/`) and it connects with
   nothing to type,
 - a **WebRTC Opus audio stream** of the demodulated RF (receive path) —
-  NOAA Weather Radio, FM broadcast, and **AM** (mediumwave/shortwave),
+  NOAA Weather Radio, FM broadcast, **AM** (mediumwave/shortwave), and
+  **FRS** (462/467 MHz walkie-talkie channels, receive-only for now),
 - **traffic trackers** — **ADS-B** aircraft (1090 MHz) and **AIS** vessels
   (162 MHz): decoded tracks over REST + a raw TCP feed (Beast / AIVDM), plotted
   on a self-contained radar scope in the web client,
@@ -41,7 +42,8 @@ wrapper (`client/android`).
 | 2e | AIS tracker mode (162 MHz GMSK/ITU-R M.1371 decode), AIVDM feed, shared scope | ✅ |
 | 2f | AM receive mode (mediumwave/shortwave), station-picker wizard | ✅ |
 | 2g | NOAA APT receive mode (137 MHz weather satellite image), canvas rendering | ✅ |
-| 2h | Transmit / modulate path (the reserved `audio_in` port + `radio/tx*` endpoints) | |
+| 2h | FRS receive mode (462/467 MHz, 22-channel plan), channel-picker wizard | ✅ |
+| 2i | Push-to-talk transmit path (FM modulator, half-duplex device switching, mic-audio uplink, PTT protocol) — FRS receive above is the first step toward this | |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -146,6 +148,20 @@ Pass predictions are computed **locally in the browser** via SGP4
 (`GET /apt-tle.json`) — no live tracking API call, works offline. That
 snapshot goes stale faster than the station directories (accurate for
 roughly 1–2 weeks); regenerate it with `node scripts/fetch-apt-tle.mjs`.
+
+### FRS (walkie-talkie channels)
+
+Pick **FRS** in the mode strip — a fixed picker for all 22 FRS channels
+(462/467 MHz), each labeled with its FCC power limit and whether it's
+FRS-exclusive (channels 8–14) or shared with GMRS (1–7, 15–22). There's no
+station directory here — anyone could be transmitting on any channel from
+anywhere — so Seek in "Now playing" is the closest thing to browsing: it
+steps channel-by-channel looking for squelch-open traffic. **Receive-only**:
+this is the first step toward the push-to-talk radio emulation that's the
+actual goal, but transmitting on FRS requires FCC Part 95 type-accepted
+equipment, which a general-purpose SDR like a HackRF isn't — see
+[architecture.md](docs/architecture.md#frs-and-the-transmit-question) for
+what the transmit side will actually need.
 
 ## Building the Android client
 

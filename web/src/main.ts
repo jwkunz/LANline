@@ -34,6 +34,7 @@ import {
   type AptPass,
   type AptStatus,
 } from "./apt";
+import { FRS_CHANNELS, FRS_DEFAULT_FREQ_HZ, frsChannelAt, stepFrsChannel } from "./frs";
 import type {
   AudioStateResponse,
   CreateSessionResponse,
@@ -106,6 +107,14 @@ const MODE_META: Record<string, ModeMeta> = {
     band: "137 MHz",
     defaultFreqHz: 137_100_000,
     loOffsetHz: 25_000,
+    wantSampleRateHz: 2_000_000,
+  },
+  frs: {
+    label: "FRS",
+    icon: "🎙️",
+    band: "462/467 MHz",
+    defaultFreqHz: FRS_DEFAULT_FREQ_HZ,
+    loOffsetHz: 250_000,
     wantSampleRateHz: 2_000_000,
   },
   debug_tone: {
@@ -593,6 +602,10 @@ async function switchMode(id: string): Promise<void> {
 /** MHz (4 digits, 1 for wbfm) or kHz (am) label for a frequency in a mode. */
 function freqLabel(mode: string, hz: number): string {
   if (mode === "am") return `${(hz / 1e3).toFixed(0)} kHz`;
+  if (mode === "frs") {
+    const c = frsChannelAt(hz);
+    return c ? `Ch ${c.channel}` : `${(hz / 1e6).toFixed(4)} MHz`;
+  }
   return `${(hz / 1e6).toFixed(mode === "wbfm" ? 1 : 4)} MHz`;
 }
 
@@ -616,15 +629,16 @@ async function tuneFrequency(hz: number, label?: string): Promise<void> {
 async function seek(dir: 1 | -1): Promise<void> {
   if (!state.client || !state.radio || state.seeking) return;
   const mode = state.radio.mode;
-  if (mode !== "wbfm" && mode !== "nbfm" && mode !== "am") return;
+  if (mode !== "wbfm" && mode !== "nbfm" && mode !== "am" && mode !== "frs") return;
 
-  // Scan the actual broadcast band (not the wider manual-tune range).
+  // Scan the actual broadcast band (not the wider manual-tune range). `frs`
+  // steps by channel number, not frequency — see `stepFrsChannel`.
   const step = mode === "wbfm" ? 200_000 : mode === "am" ? 10_000 : 25_000;
   const lo = mode === "wbfm" ? 87_700_000 : mode === "am" ? 530_000 : 162_400_000;
   const hi = mode === "wbfm" ? 108_100_000 : mode === "am" ? 1_700_000 : 162_550_000;
-  const rssiGate = mode === "wbfm" ? -48 : mode === "am" ? -55 : -75;
-  const settleMs = mode === "wbfm" ? 220 : mode === "am" ? 220 : 200;
-  const steps = Math.round((hi - lo) / step) + 1;
+  const rssiGate = mode === "wbfm" ? -48 : mode === "am" ? -55 : mode === "frs" ? -70 : -75;
+  const settleMs = mode === "wbfm" || mode === "am" ? 220 : 200;
+  const steps = mode === "frs" ? FRS_CHANNELS.length : Math.round((hi - lo) / step) + 1;
 
   setState({ seeking: true });
   logLine(`seek ${dir > 0 ? "up" : "down"}…`);
@@ -632,15 +646,20 @@ async function seek(dir: 1 | -1): Promise<void> {
   let f = start;
   try {
     for (let i = 0; i < steps; i++) {
-      f += dir * step;
-      if (f > hi) f = lo;
-      if (f < lo) f = hi;
+      if (mode === "frs") {
+        f = stepFrsChannel(f, dir);
+      } else {
+        f += dir * step;
+        if (f > hi) f = lo;
+        if (f < lo) f = hi;
+      }
       if (f === start) break; // wrapped all the way around
       await state.client.patchRadio({ frequency_hz: f });
       await sleep(settleMs);
       const s = await state.client.radioStatus().catch(() => null);
       const rssi = s?.dsp.rssi_dbfs ?? -200;
-      const open = mode === "nbfm" ? (s?.dsp.squelch_open ?? false) && rssi > rssiGate : rssi > rssiGate;
+      const open =
+        mode === "nbfm" || mode === "frs" ? (s?.dsp.squelch_open ?? false) && rssi > rssiGate : rssi > rssiGate;
       if (open) break;
     }
     localStorage.setItem(freqKey(mode), String(f));
@@ -733,6 +752,10 @@ function tunedStationLabel(): string | null {
   if (r.mode === "apt") {
     const s = APT_SATELLITES.find((x) => x.freq_hz === r.frequency_hz);
     return s ? s.name : null;
+  }
+  if (r.mode === "frs") {
+    const c = frsChannelAt(r.frequency_hz);
+    return c ? `${c.shared_gmrs ? "FRS/GMRS shared" : "FRS only"} · ${c.max_power_w} W max` : null;
   }
   return null;
 }
@@ -1072,6 +1095,8 @@ function wizardHtml(): string {
       return amWizardHtml();
     case "apt":
       return aptWizardHtml();
+    case "frs":
+      return frsWizardHtml();
     case "adsb":
     case "ais":
       return scopeWizardHtml();
@@ -1191,6 +1216,30 @@ function amWizardHtml(): string {
              </div>
              <p class="note" style="margin:8px 0 0">${AM_MIN_HZ / 1e3}–${AM_MAX_HZ / 1e3} kHz · 10 kHz steps · use Seek in “Now playing”.</p>`
       }
+    </section>`;
+}
+
+function frsWizardHtml(): string {
+  const r = state.radio!;
+  const rows = FRS_CHANNELS.map((c) =>
+    stationRow(
+      c.freq_hz,
+      `Ch ${c.channel}`,
+      `${(c.freq_hz / 1e6).toFixed(4)} MHz`,
+      `${c.shared_gmrs ? "FRS/GMRS shared" : "FRS only"} · ${c.max_power_w} W max`,
+      c.freq_hz === r.frequency_hz,
+      `Ch ${c.channel}`,
+    ),
+  ).join("");
+  return `
+    <section class="card">
+      <h2>FRS — pick a channel</h2>
+      <p class="note" style="margin:0 0 10px">Receive-only for now: this
+      monitors the 22 fixed FRS channels (462/467 MHz), it doesn't key up a
+      transmission. Anyone could be on any channel at any time — there's no
+      station directory to browse, just the channel plan itself. Use Seek in
+      “Now playing” to scan for the next active channel.</p>
+      <div class="stations">${rows}</div>
     </section>`;
 }
 
@@ -1696,7 +1745,7 @@ function nowPlayingInner(): string {
   }
 
   const ident = tunedStationLabel();
-  const canSeek = r.mode === "wbfm" || r.mode === "nbfm" || r.mode === "am";
+  const canSeek = r.mode === "wbfm" || r.mode === "nbfm" || r.mode === "am" || r.mode === "frs";
   return `
     <h2>Now playing</h2>
     <div class="mode-line">
