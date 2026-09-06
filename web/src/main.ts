@@ -506,6 +506,18 @@ async function connect(hostRaw: string): Promise<void> {
     logLine(
       `connected to ${server.hostname} · session ${session.session_id.slice(0, 8)}`,
     );
+    // Tell the Android wrapper which radio we landed on, so its native radio
+    // chooser doesn't pop over an already-connected page and its toolbar shows
+    // the right label.
+    try {
+      (
+        window as unknown as {
+          LanlineNative?: { onConnected?: (base: string, label: string, fleetUrl: string) => void };
+        }
+      ).LanlineNative?.onConnected?.(base, server.instance_label ?? "", server.fleet_url ?? "");
+    } catch {
+      /* not in the wrapper */
+    }
     startTimers();
 
     if (state.loc) void refreshStations();

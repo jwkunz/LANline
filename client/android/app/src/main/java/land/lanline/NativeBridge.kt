@@ -7,7 +7,10 @@ import android.webkit.JavascriptInterface
  * this object; on a plain browser it is absent and the app falls back to manual
  * host entry.
  */
-class NativeBridge(private val beacon: BeaconListener) {
+class NativeBridge(
+    private val beacon: BeaconListener,
+    private val onConnectedCb: (base: String, label: String, fleetUrl: String) -> Unit,
+) {
 
     @JavascriptInterface
     fun platform(): String = "android"
@@ -21,4 +24,11 @@ class NativeBridge(private val beacon: BeaconListener) {
      *  uses the typed snapshot directly. */
     @JavascriptInterface
     fun fleets(): String = beacon.fleetsJson()
+
+    /** Called by the web client once it has connected to a server, so the
+     *  wrapper can stop auto-popping the radio chooser and sync its toolbar. */
+    @JavascriptInterface
+    fun onConnected(base: String, label: String, fleetUrl: String) {
+        onConnectedCb(base, label, fleetUrl)
+    }
 }

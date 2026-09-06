@@ -37,8 +37,8 @@ import androidx.core.content.ContextCompat
  * Wi-Fi multicast lock while visible so broadcast beacons are delivered.
  *
  * When a `lanline-hypervisor` fleet is on the LAN it also shows a small native
- * chooser (a toolbar + "Switch radio" menu) so the user picks which radio /
- * port the WebView points at, and can switch later.
+ * chooser (a toolbar + "Radios" menu) so the user picks which radio / port
+ * the WebView points at, and can switch later.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -51,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
     private var autoChooserDone = false
     private var pickedRadio = false
+    private var chooserDialog: AlertDialog? = null
 
     private var pendingGeo: Pair<String, GeolocationPermissions.Callback>? = null
     private val locationPermission =
@@ -170,7 +171,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.addJavascriptInterface(NativeBridge(beacon), "LanlineNative")
+        webView.addJavascriptInterface(
+            NativeBridge(beacon) { base, label, _ -> ui.post { onWebConnected(base, label) } },
+            "LanlineNative",
+        )
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -197,16 +201,18 @@ class MainActivity : AppCompatActivity() {
                 webView.loadUrl(savedUrl)
             }
             else -> {
-                // Show the bundled UI (it has its own manual/discovery picker),
-                // and pop the native chooser once a fleet becomes visible.
+                // Show the bundled UI (it has its own manual/discovery picker,
+                // and auto-connects to its last host). Pop the native chooser
+                // only if a fleet is visible and the web client hasn't already
+                // connected somewhere (onWebConnected cancels this).
                 webView.loadUrl(BUNDLED_URL)
-                ui.postDelayed(autoChooserPoll, 1_500)
+                ui.postDelayed(autoChooserPoll, 2_500)
             }
         }
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, MENU_SWITCH, 0, "Switch radio").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        menu.add(0, MENU_SWITCH, 0, "Radios").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
         menu.add(0, MENU_RELOAD, 1, "Reload")
         return true
     }
@@ -242,7 +248,7 @@ class MainActivity : AppCompatActivity() {
         for (fleet in beacon.fleetSnapshot()) {
             for (r in fleet.radios.sortedBy { it.idx }) {
                 val dot = if (r.running) "●" else "○"
-                val dev = r.device?.let { " · $it" } ?: ""
+                val dev = shortDevice(r.device)?.let { " · $it" } ?: ""
                 val port = runCatching { URI(r.c2BaseUrl).port }.getOrNull()?.takeIf { it > 0 }
                 val portStr = port?.let { " · :$it" } ?: ""
                 entries.add(Entry("$dot ${fleet.hostname} / ${r.label}$dev$portStr", r.c2BaseUrl))
@@ -250,7 +256,7 @@ class MainActivity : AppCompatActivity() {
         }
         for (s in beacon.standaloneServers()) {
             val name = s.label ?: s.hostname
-            val dev = s.device?.let { " · $it" } ?: ""
+            val dev = shortDevice(s.device)?.let { " · $it" } ?: ""
             entries.add(Entry("$name$dev · :${s.c2}", s.baseUrl.ifEmpty { "http://${s.hostname}:${s.c2}/" }))
         }
 
@@ -263,16 +269,37 @@ class MainActivity : AppCompatActivity() {
             builder.setItems(labels) { _, i -> loadRadio(entries[i].label, entries[i].url) }
                 .setNegativeButton("Cancel", null)
         }
-        builder.show()
+        chooserDialog?.dismiss()
+        chooserDialog = builder.create().also { it.show() }
     }
+
+    /** "HackRF One #0 f77c…" -> "HackRF One"; blank/empty -> null. */
+    private fun shortDevice(d: String?): String? =
+        d?.substringBefore(" #")?.trim()?.ifEmpty { null }
 
     private fun loadRadio(label: String, url: String) {
         pickedRadio = true
         autoChooserDone = true
+        chooserDialog = null
         // Strip the leading run/stop dot from the toolbar title.
         toolbar.title = label.trimStart('●', '○', ' ')
         prefs.edit().putString(KEY_RADIO_URL, url).putString(KEY_RADIO_LABEL, toolbar.title.toString()).apply()
         webView.loadUrl(url)
+    }
+
+    /** The web client connected to a server on its own (e.g. its saved host).
+     *  Stop nagging with the auto-chooser and sync the toolbar / saved pick. */
+    private fun onWebConnected(base: String, label: String) {
+        autoChooserDone = true
+        pickedRadio = true
+        ui.removeCallbacks(autoChooserPoll)
+        chooserDialog?.dismiss()
+        chooserDialog = null
+        val title = label.ifEmpty {
+            runCatching { URI(base).host }.getOrNull()?.ifEmpty { null } ?: "LANline"
+        }
+        toolbar.title = title
+        prefs.edit().putString(KEY_RADIO_URL, base).putString(KEY_RADIO_LABEL, title).apply()
     }
 
     /** A hostname/IP that can only be a machine on this LAN. */
@@ -312,6 +339,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
+        chooserDialog?.dismiss()
+        chooserDialog = null
         webView.destroy()
         super.onDestroy()
     }
