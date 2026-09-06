@@ -336,6 +336,28 @@ pub struct DspStatus {
     pub tx_keyed: bool,
 }
 
+/// One entry in the transmit audit log (`GET /api/v1/radio/tx/log`) — a
+/// station log of every push-to-talk key, kept in memory (bounded ring).
+#[derive(Serialize, Clone, Debug)]
+pub struct TxLogEntry {
+    #[serde(with = "time::serde::rfc3339")]
+    pub keyed_at: OffsetDateTime,
+    /// The keying client's declared name (`ClientInfo.name`).
+    pub client: String,
+    pub mode: String,
+    /// Actual transmit frequency (RX frequency + `offset_hz`).
+    pub tx_frequency_hz: u64,
+    pub offset_hz: i64,
+    /// Encoded CTCSS uplink tone (Hz), 0 = none.
+    pub tone_hz: f64,
+    pub gain_db: f64,
+    /// `null` if the transmission was still open / auto-released at the
+    /// server cap when the log was read (no explicit `unkey` recorded).
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub released_at: Option<OffsetDateTime>,
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct AudioStatus {
     pub encoder: &'static str,

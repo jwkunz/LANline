@@ -885,6 +885,32 @@ currently keyed — always safe to call on PTT release.
 { "keyed": false }
 ```
 
+### `GET /api/v1/radio/tx/log`
+
+The transmit audit log — a station-log-adjacent record of every push-to-talk
+key this server has served, kept in memory (bounded ring, ~200 entries),
+newest first. Auth required.
+
+```json
+[
+  {
+    "keyed_at": "2026-09-06T00:31:12Z",
+    "client": "laptop",
+    "mode": "ham",
+    "tx_frequency_hz": 146340000,
+    "offset_hz": -600000,
+    "tone_hz": 100.0,
+    "gain_db": 6,
+    "released_at": "2026-09-06T00:31:19Z",
+    "duration_ms": 6700
+  }
+]
+```
+
+`released_at`/`duration_ms` are `null` when no explicit `unkey` was recorded
+for that key — the transmission was auto-released at the server's 10 s cap,
+or the client vanished. The log is not persisted across a server restart.
+
 ---
 
 ## Sessions

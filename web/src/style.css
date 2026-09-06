@@ -431,6 +431,22 @@ h3.ham-sub {
   padding: 2px 8px;
   margin-left: 4px;
 }
+.tx-log {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tx-log summary {
+  cursor: pointer;
+}
+.tx-log ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.tx-log li {
+  margin: 2px 0;
+}
 .station.repeater {
   position: relative;
 }

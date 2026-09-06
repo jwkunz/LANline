@@ -121,7 +121,7 @@ pub async fn stop(State(st): State<AppState>, _auth: AuthedSession) -> ApiResult
 /// tx-capable device, and the radio already running.
 pub async fn key_tx(
     State(st): State<AppState>,
-    _auth: AuthedSession,
+    auth: AuthedSession,
     body: Option<Json<Value>>,
 ) -> ApiResult<Json<Value>> {
     // Server policy first, ahead of any other check — a consistent 403
@@ -129,13 +129,13 @@ pub async fn key_tx(
     if !st.radio_mgr.tx_enabled() {
         return Err(ApiError::forbidden("transmit is disabled on this server — see --enable-tx"));
     }
-    let (mode, running, deviation_hz, mic_gain) = {
+    let (mode, running, freq_hz, deviation_hz, mic_gain) = {
         let r = st.radio.lock().unwrap();
         let deviation_hz =
             r.mode_params.get("deviation_hz").and_then(Value::as_f64).unwrap_or(2_500.0);
         let mic_gain =
             r.mode_params.get("tx_mic_gain").and_then(Value::as_f64).unwrap_or(1.0).clamp(1.0, 32.0);
-        (r.mode.clone(), r.running, deviation_hz, mic_gain)
+        (r.mode.clone(), r.running, r.frequency_hz, deviation_hz, mic_gain)
     };
     if mode != "frs" && mode != "ham" {
         return Err(ApiError::bad_request(
@@ -168,6 +168,18 @@ pub async fn key_tx(
     st.radio_mgr
         .key(gain_db, deviation_hz, mic_gain, offset_hz, tone_hz)
         .map_err(ApiError::forbidden)?;
+
+    let client = st.sessions.get(auth.id).map(|s| s.client.name).unwrap_or_default();
+    let tx_frequency_hz = (freq_hz as f64 + offset_hz).round().max(0.0) as u64;
+    st.radio_mgr.tx_log_key(
+        client,
+        mode,
+        tx_frequency_hz,
+        offset_hz as i64,
+        tone_hz,
+        gain_db,
+    );
+
     Ok(Json(serde_json::json!({
         "keyed": true,
         "gain_db": gain_db,
@@ -180,9 +192,21 @@ pub async fn key_tx(
 /// End the current transmission early (a no-op if nothing is keyed —
 /// including after it's already auto-unkeyed at the server's safety
 /// timeout, so a client is always safe to call this on release).
-pub async fn unkey_tx(State(st): State<AppState>, _auth: AuthedSession) -> ApiResult<Json<Value>> {
+pub async fn unkey_tx(State(st): State<AppState>, auth: AuthedSession) -> ApiResult<Json<Value>> {
     st.radio_mgr.unkey();
+    if let Some(client) = st.sessions.get(auth.id).map(|s| s.client.name) {
+        st.radio_mgr.tx_log_release(&client);
+    }
     Ok(Json(serde_json::json!({ "keyed": false })))
+}
+
+/// The transmit audit log — every push-to-talk key this server has served
+/// (bounded, in-memory), newest first.
+pub async fn tx_log(
+    State(st): State<AppState>,
+    _auth: AuthedSession,
+) -> Json<Vec<crate::model::TxLogEntry>> {
+    Json(st.radio_mgr.tx_log())
 }
 
 pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {

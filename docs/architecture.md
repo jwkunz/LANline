@@ -492,6 +492,19 @@ button FRS uses; the "Now playing" card shows the actual TX frequency and
 encoded tone. `ham` also has its own `tx_mic_gain` (default 2.5, same meaning
 as `frs`'s). DCS encode is still deferred.
 
+**Transmit audit log.** Every `tx/key` (any mode) appends to a bounded
+in-memory ring (`RadioManager`'s `TxAudit`, ~200 entries) — client name,
+mode, actual TX frequency, offset, encoded tone, gain, keyed-at; `tx/unkey`
+closes the matching open entry with a release time and duration. Served
+newest-first at `GET /api/v1/radio/tx/log` and shown as a collapsible list
+under the PTT button. An auto-release at the 10 s cap leaves `released_at`
+null (the API layer, where the audit lives, never sees it) — read as "held
+to the cap or the client vanished". Not persisted across a restart. This is
+deliberately just a log, not an authorization gate: `--enable-tx` is already
+an explicit operator opt-in and this is a single-operator box; a per-session
+TX-arm step was considered and left out as friction without a matching
+threat.
+
 ### TLS and the secure-context problem
 
 `getUserMedia` (the push-to-talk mic) and `navigator.geolocation` (the

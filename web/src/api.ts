@@ -13,6 +13,7 @@ import type {
   RadioStatus,
   SdpMessage,
   ServerInfo,
+  TxLogEntry,
 } from "./types";
 import { parseAptImage, type AptImage, type AptStatus } from "./apt";
 
@@ -236,6 +237,10 @@ export class Client {
 
   unkeyTx = () =>
     this.request<{ keyed: boolean }>("POST", "/api/v1/radio/tx/unkey", { auth: true });
+
+  /** The transmit audit log (every push-to-talk key this server served,
+   *  bounded, newest first). */
+  txLog = () => this.request<TxLogEntry[]>("GET", "/api/v1/radio/tx/log", { auth: true });
 
   audioOffer = (id: string, sdp: string) =>
     this.request<SdpMessage>("POST", `/api/v1/sessions/${id}/audio/offer`, {

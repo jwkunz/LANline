@@ -71,6 +71,18 @@ export interface DspStatus {
   tx_keyed: boolean;
 }
 
+export interface TxLogEntry {
+  keyed_at: string;
+  client: string;
+  mode: string;
+  tx_frequency_hz: number;
+  offset_hz: number;
+  tone_hz: number;
+  gain_db: number;
+  released_at: string | null;
+  duration_ms: number | null;
+}
+
 export interface RadioStatus {
   running: boolean;
   mode: string;

@@ -57,7 +57,7 @@ wrapper (`client/android`).
 | 2i | Push-to-talk transmit (FRS only; FM modulator, half-duplex device switching, live mic-audio uplink over WebRTC, PTT protocol) — off by default (`--enable-tx`), personal-use only per FCC Part 95 | ✅ |
 | 2j | Multi-radio device picker (HackRF / ADALM-Pluto), TLS with a self-signed cert, Receiver Analysis waterfall | ✅ |
 | 2k | Amateur NBFM — band-plan-organized channel picker (6 m – 23 cm), simplex/calling, voluntary ARRL band-plan hints, CTCSS tone squelch + always-on tone identifier, regional repeater directory + manual entry | ✅ |
-| 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97; DCS encode to follow | ✅ |
+| 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97, transmit audit log; DCS encode to follow | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -363,9 +363,11 @@ uplink tone are remembered for transmit. **+ Add repeater** stores your own
 FRS uses appears in *Now playing*. On simplex it keys the tuned frequency;
 with a repeater selected it keys the **input** (output ± offset) and encodes
 the repeater's **uplink CTCSS tone**, so one hold gets you through the
-machine. Part 97 permits homebrew gear under an amateur licence — you are the
-control operator (KZ4AZ). DCS encode is deferred. The same UHF
-`freq_correction_ppm` note as FRS applies.
+machine. Every key is written to a **transmit audit log**
+(`GET /api/v1/radio/tx/log`, and a collapsible list under the PTT button) —
+time, frequency, offset, tone, duration. Part 97 permits homebrew gear under
+an amateur licence — you are the control operator (KZ4AZ). DCS encode is
+deferred. The same UHF `freq_correction_ppm` note as FRS applies.
 
 ### Receiver Analysis (waterfall)
 

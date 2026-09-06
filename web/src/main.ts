@@ -58,6 +58,7 @@ import type {
   RadioConfig,
   RadioStatus,
   ServerInfo,
+  TxLogEntry,
 } from "./types";
 
 const HOST_KEY = "lanline.host";
@@ -204,6 +205,7 @@ interface State {
   manualRepeaters: Repeater[];
   activeRepeater: Repeater | null;
   rpAddOpen: boolean;
+  txLog: TxLogEntry[];
   seeking: boolean;
   pttHeld: boolean;
   adsb: AdsbSnapshot | null;
@@ -244,6 +246,7 @@ const state: State = {
   manualRepeaters: readManualRepeaters(),
   activeRepeater: null,
   rpAddOpen: false,
+  txLog: [],
   seeking: false,
   pttHeld: false,
   adsb: null,
@@ -768,6 +771,7 @@ async function switchMode(id: string): Promise<void> {
     setState({ radio, adsb: null, ais: null, apt: null, scopeSel: null, activeRepeater: null });
     logLine(`mode → ${meta?.label ?? id}`);
     void refreshStations();
+    if (id === "frs" || id === "ham") void refreshTxLog();
     if (radio.running || NATIVE) {
       if (!radio.running) radio = await state.client.startRadio();
       setState({ radio });
@@ -925,6 +929,15 @@ async function pttDown(): Promise<void> {
   }
 }
 
+async function refreshTxLog(): Promise<void> {
+  if (!state.client) return;
+  try {
+    setState({ txLog: (await state.client.txLog()).slice(0, 8) });
+  } catch {
+    /* audit log is best-effort UI sugar */
+  }
+}
+
 async function pttUp(): Promise<void> {
   if (pttTimer) {
     window.clearTimeout(pttTimer);
@@ -940,6 +953,7 @@ async function pttUp(): Promise<void> {
   } catch (e) {
     logLine(`PTT unkey failed — ${(e as ApiError).message}`);
   }
+  void refreshTxLog();
 }
 
 // --- station finders --------------------------------------------------
@@ -2646,7 +2660,27 @@ function pttInner(st: RadioStatus | null): string {
             : ""
         }
       </p>
+      ${txLogHtml()}
     </div>`;
+}
+
+function txLogHtml(): string {
+  if (state.txLog.length === 0) return "";
+  const rows = state.txLog
+    .map((e) => {
+      const t = new Date(e.keyed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      const dur = e.duration_ms != null ? `${(e.duration_ms / 1000).toFixed(1)}s` : "open";
+      const bits = [
+        t,
+        e.mode,
+        `${(e.tx_frequency_hz / 1e6).toFixed(4)}${e.offset_hz ? ` ${offsetLabel(e.offset_hz)}` : ""}`,
+        e.tone_hz ? `${e.tone_hz.toFixed(1)} Hz` : null,
+        dur,
+      ].filter(Boolean);
+      return `<li>${esc(bits.join(" · "))}</li>`;
+    })
+    .join("");
+  return `<details class="tx-log"><summary>Transmit log (${state.txLog.length})</summary><ul>${rows}</ul></details>`;
 }
 
 function audioInner(): string {

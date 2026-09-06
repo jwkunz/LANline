@@ -15,8 +15,10 @@ use crate::ais::AisShared;
 use crate::analysis::AnalysisShared;
 use crate::apt::AptShared;
 use crate::audio::{rms_dbfs, AudioFrame};
-use crate::model::RadioConfig;
+use crate::model::{RadioConfig, TxLogEntry};
 use crate::registry::DeviceRegistry;
+use std::collections::VecDeque;
+use time::OffsetDateTime;
 use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate};
 use bytes::Bytes;
@@ -148,6 +150,61 @@ pub struct RadioManager {
     /// explicit opt-in rather than working out of the box.
     enable_tx: bool,
     audio_in: Arc<TxAudioSource>,
+    /// In-memory station log of push-to-talk keys, served by
+    /// `GET /api/v1/radio/tx/log`.
+    tx_audit: TxAudit,
+}
+
+/// How many transmit-log entries to keep.
+const TX_AUDIT_CAP: usize = 200;
+
+/// Bounded in-memory ring of push-to-talk keyings — an amateur-station-log
+/// -adjacent record of what this server transmitted, when, and for how long.
+#[derive(Default)]
+struct TxAudit(Mutex<VecDeque<TxLogEntry>>);
+
+impl TxAudit {
+    #[allow(clippy::too_many_arguments)]
+    fn key(
+        &self,
+        client: String,
+        mode: String,
+        tx_frequency_hz: u64,
+        offset_hz: i64,
+        tone_hz: f64,
+        gain_db: f64,
+    ) {
+        let mut log = self.0.lock().unwrap();
+        if log.len() >= TX_AUDIT_CAP {
+            log.pop_front();
+        }
+        log.push_back(TxLogEntry {
+            keyed_at: OffsetDateTime::now_utc(),
+            client,
+            mode,
+            tx_frequency_hz,
+            offset_hz,
+            tone_hz,
+            gain_db,
+            released_at: None,
+            duration_ms: None,
+        });
+    }
+
+    /// Close out this client's most recent still-open entry.
+    fn release(&self, client: &str) {
+        let now = OffsetDateTime::now_utc();
+        let mut log = self.0.lock().unwrap();
+        if let Some(e) = log.iter_mut().rev().find(|e| e.client == client && e.released_at.is_none())
+        {
+            e.released_at = Some(now);
+            e.duration_ms = Some(((now - e.keyed_at).whole_milliseconds().max(0)) as u64);
+        }
+    }
+
+    fn snapshot(&self) -> Vec<TxLogEntry> {
+        self.0.lock().unwrap().iter().rev().cloned().collect()
+    }
 }
 
 #[derive(Default)]
@@ -263,11 +320,36 @@ impl RadioManager {
             analysis: Arc::new(AnalysisShared::new(iq_dir)),
             enable_tx,
             audio_in: TxAudioSource::new(),
+            tx_audit: TxAudit::default(),
         })
     }
 
     pub fn tx_enabled(&self) -> bool {
         self.enable_tx
+    }
+
+    /// Append a "keyed" entry to the transmit audit log.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tx_log_key(
+        &self,
+        client: String,
+        mode: String,
+        tx_frequency_hz: u64,
+        offset_hz: i64,
+        tone_hz: f64,
+        gain_db: f64,
+    ) {
+        self.tx_audit.key(client, mode, tx_frequency_hz, offset_hz, tone_hz, gain_db);
+    }
+
+    /// Close out this client's most recent still-open transmit-log entry.
+    pub fn tx_log_release(&self, client: &str) {
+        self.tx_audit.release(client);
+    }
+
+    /// The transmit audit log, newest first.
+    pub fn tx_log(&self) -> Vec<TxLogEntry> {
+        self.tx_audit.snapshot()
     }
 
     /// The mic-audio bridge — pushed into by the WebRTC layer as it decodes
@@ -1992,7 +2074,33 @@ fn run_analysis(
 
 #[cfg(all(test, feature = "soapy"))]
 mod tests {
-    use super::{apply_ppm, TxAudioSource};
+    use super::{apply_ppm, TxAudit, TxAudioSource, TX_AUDIT_CAP};
+
+    #[test]
+    fn tx_audit_pairs_key_with_release_and_bounds_the_ring() {
+        let a = TxAudit::default();
+        a.key("HT".into(), "ham".into(), 146_340_000, -600_000, 100.0, 6.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        a.release("HT");
+
+        let log = a.snapshot();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].tx_frequency_hz, 146_340_000);
+        assert_eq!(log[0].offset_hz, -600_000);
+        assert!(log[0].released_at.is_some(), "release should close the open entry");
+        assert!(log[0].duration_ms.unwrap() >= 5, "duration {:?}", log[0].duration_ms);
+
+        // A release with no matching open key is a no-op, not a panic.
+        a.release("nobody");
+
+        // Ring stays bounded, newest-first ordering holds.
+        for i in 0..TX_AUDIT_CAP + 20 {
+            a.key(format!("c{i}"), "frs".into(), 462_562_500, 0, 0.0, 0.0);
+        }
+        let log = a.snapshot();
+        assert_eq!(log.len(), TX_AUDIT_CAP);
+        assert_eq!(log[0].client, format!("c{}", TX_AUDIT_CAP + 19), "newest first");
+    }
 
     #[test]
     fn tx_audio_source_pulls_fifo_and_pads_silence_on_underrun() {
