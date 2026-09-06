@@ -68,6 +68,7 @@ wrapper (`client/android`).
 | 2p | DCS (Digital Coded Squelch) — decode (134.4 bps Golay(23,12), transition-locked bit clock) + encode in the TX modulator, `dcs_code`/`dcs_invert`/`dcs_squelch` params, wizard picker | ✅ |
 | 2q | APRS receive mode — 1200-baud AFSK/AX.25 decode (position / MIC-E / status / message), per-callsign station tracker on the shared radar scope, `GET /aprs/stations` + `/aprs/packets`, TNC2 TCP feed | ✅ |
 | 2r | Concurrent radios — `lanline-hypervisor` runs one server per SDR (server split into lib + bin), collision-free port blocks + `serial=`-resolved devices + backoff supervision, aggregated discovery (`LANLINE-FLEET-BEACON`, `GET /api/v1/fleet`, per-child mDNS), native Android radio chooser | ✅ |
+| 2s | APRS transmit — `POST /aprs/tx` (message / position / raw), half-duplex burst in `run_aprs` reusing the demod's modulator, `--enable-tx`-gated, local TNC echo + audit log; web `aprs` panel messaging card → two browser tabs = an APRS chat room between the fleet's two radios | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel

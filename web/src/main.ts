@@ -7,7 +7,7 @@ import { nativeDiscovery, serverHost } from "./discovery";
 import { haversineMi, parseLatLon, type Located } from "./geo";
 import { altLabel, offsetNm, type AdsbSnapshot } from "./adsb";
 import { type AisSnapshot } from "./ais";
-import { aprsSymbolGlyph, type AprsSnapshot } from "./aprs";
+import { aprsSymbolGlyph, parseAprsMessages, type AprsSnapshot } from "./aprs";
 import { loadNwrStations, nearestNwr, NWR_CHANNELS, type NwrStation } from "./nwr";
 import {
   FM_MAX_HZ,
@@ -222,6 +222,7 @@ interface State {
   adsb: AdsbSnapshot | null;
   ais: AisSnapshot | null;
   aprs: AprsSnapshot | null;
+  aprsPackets: string[];
   apt: AptStatus | null;
   scopeSel: string | null;
   scopeRangeNm: number | "auto";
@@ -264,6 +265,7 @@ const state: State = {
   adsb: null,
   ais: null,
   aprs: null,
+  aprsPackets: [],
   apt: null,
   scopeSel: null,
   scopeRangeNm: "auto",
@@ -1257,6 +1259,7 @@ async function poll(): Promise<void> {
     let adsb = state.adsb;
     let ais = state.ais;
     let aprs = state.aprs;
+    let aprsPackets = state.aprsPackets;
     let apt = state.apt;
     if (radio.mode === "adsb") {
       adsb = await state.client.adsbAircraft().catch(() => state.adsb);
@@ -1264,6 +1267,10 @@ async function poll(): Promise<void> {
       ais = await state.client.aisVessels().catch(() => state.ais);
     } else if (radio.mode === "aprs") {
       aprs = await state.client.aprsStations().catch(() => state.aprs);
+      aprsPackets = await state.client
+        .aprsPackets()
+        .then((r) => r.packets)
+        .catch(() => state.aprsPackets);
     } else if (radio.mode === "apt") {
       apt = await state.client.aptStatus().catch(() => state.apt);
       // The raster can grow to a couple MB; refetch it far less often than
@@ -1273,7 +1280,7 @@ async function poll(): Promise<void> {
         void refreshAptImage();
       }
     }
-    setState({ server, radio, status, audioStats, adsb, ais, aprs, apt });
+    setState({ server, radio, status, audioStats, adsb, ais, aprs, aprsPackets, apt });
   } catch (e) {
     pollFails += 1;
     if (pollFails >= 3) loopFailed(e as ApiError, "poll");
@@ -1420,6 +1427,17 @@ function patchLive(): void {
   if (state.radio.mode === "adsb" || state.radio.mode === "ais" || state.radio.mode === "aprs") {
     setHTML("#scope-list", scopeListInner());
     drawScope();
+    if (state.radio.mode === "aprs") {
+      const log = q<HTMLElement>("#aprs-log");
+      if (log) {
+        const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+        const html = aprsLogInner();
+        if (log.innerHTML !== html) {
+          log.innerHTML = html;
+          if (atBottom) log.scrollTop = log.scrollHeight;
+        }
+      }
+    }
   } else if (state.radio.mode === "apt") {
     setHTML("#apt-status", aptStatusInner());
     setHTML("#apt-sat-rows", aptSatRowsInner());
@@ -1499,6 +1517,8 @@ function installDelegates(): void {
     if (mode) return void switchMode(mode.dataset.mode!);
     if (hit("#radio-toggle")) return void toggleRadio();
     if (hit("#radio-options")) return void openRadioOptionsPanel();
+    if (hit("#aprs-send")) return void sendAprsMsg();
+    if (hit("#aprs-beacon")) return void beaconAprs();
     if (hit("#audio-toggle")) return void toggleAudio();
     if (hit("#audio-rec")) return void toggleAudioRecord();
     if (hit("#loc-find")) return findFromInput();
@@ -1584,6 +1604,12 @@ function installDelegates(): void {
     if (el.id === "ham-ctcss") void applyHamSquelch("ctcss");
     if (el.id === "ham-dcs") void applyHamSquelch("dcs");
     if (el.id === "ham-dcs-inv" || el.id === "ham-ctcss-mon") void applyHamSquelch();
+    if (el.id === "aprs-mycall") {
+      setAprsCall("my", (el as HTMLInputElement).value);
+      const log = q<HTMLElement>("#aprs-log");
+      if (log) log.innerHTML = aprsLogInner(); // re-classify own vs. others
+    }
+    if (el.id === "aprs-tocall") setAprsCall("to", (el as HTMLInputElement).value);
     if (el.id === "scope-range") {
       const v = (el as HTMLSelectElement).value;
       setState({ scopeRangeNm: v === "auto" ? "auto" : Number(v) });
@@ -1599,6 +1625,7 @@ function installDelegates(): void {
     else if (id === "apt-freq") aptManualGo();
     else if (id === "ham-freq") hamManualGo();
     else if (id === "rp-paste") fillRepeaterFromShorthand();
+    else if (id === "aprs-msg") void sendAprsMsg();
   });
 
   // Press-and-hold, not click: pointerdown keys, pointerup/cancel unkeys.
@@ -1747,6 +1774,105 @@ function stationRow(hz: number, freqLabel: string, name: string, meta: string, t
   </button>`;
 }
 
+// --- APRS messaging (chat between two radios) ----------------------
+
+function aprsCallKey(which: "my" | "to"): string {
+  return `lanline.aprs.${which}call.${state.base}`;
+}
+function aprsCall(which: "my" | "to"): string {
+  try {
+    return localStorage.getItem(aprsCallKey(which)) ?? "";
+  } catch {
+    return "";
+  }
+}
+function setAprsCall(which: "my" | "to", v: string): void {
+  try {
+    localStorage.setItem(aprsCallKey(which), v.trim().toUpperCase());
+  } catch {
+    /* private mode */
+  }
+}
+
+function aprsLogInner(): string {
+  const msgs = parseAprsMessages(state.aprsPackets);
+  if (!msgs.length) return `<div class="note" style="padding:8px 4px">No messages yet.</div>`;
+  const mine = aprsCall("my").toUpperCase();
+  return msgs
+    .slice(-50)
+    .map((m) => {
+      const out = mine !== "" && m.from.toUpperCase() === mine;
+      return `<div class="aprs-msg ${out ? "out" : "in"}">
+        <span class="aprs-msg-who">${esc(out ? `→ ${m.to}` : m.from)}</span>
+        <span class="aprs-msg-text">${esc(m.text)}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+function aprsChatHtml(): string {
+  const mp = state.radio?.mode_params ?? {};
+  const hasRef = Number(mp.reference_lat ?? 0) !== 0 || Number(mp.reference_lon ?? 0) !== 0;
+  const tx = state.server?.capabilities.includes("ptt") ?? false;
+  return `
+    <section class="card" id="aprs-chat">
+      <h2>APRS messaging</h2>
+      ${
+        tx
+          ? ""
+          : `<p class="note warn" style="margin:0 0 10px">transmit is disabled on this server (—enable-tx) — receive only</p>`
+      }
+      <div class="aprs-calls">
+        <input id="aprs-mycall" type="text" spellcheck="false" autocapitalize="characters"
+          placeholder="your call e.g. KZ4AZ-1" value="${esc(aprsCall("my"))}" />
+        <span class="dial-unit">→</span>
+        <input id="aprs-tocall" type="text" spellcheck="false" autocapitalize="characters"
+          placeholder="their call" value="${esc(aprsCall("to"))}" />
+      </div>
+      <div id="aprs-log" class="stations aprs-log">${aprsLogInner()}</div>
+      <div class="aprs-send-row">
+        <input id="aprs-msg" type="text" maxlength="67" placeholder="message…" ${tx ? "" : "disabled"} />
+        <button id="aprs-send" ${tx ? "" : "disabled"}>Send</button>
+        <button id="aprs-beacon" class="secondary" ${tx && hasRef ? "" : "disabled"}
+          title="${hasRef ? "beacon your reference position" : "set a reference position first"}">Beacon</button>
+      </div>
+    </section>`;
+}
+
+async function sendAprsMsg(): Promise<void> {
+  if (!state.client) return;
+  const my = (q<HTMLInputElement>("#aprs-mycall")?.value ?? "").trim().toUpperCase();
+  const to = (q<HTMLInputElement>("#aprs-tocall")?.value ?? "").trim().toUpperCase();
+  const inp = q<HTMLInputElement>("#aprs-msg");
+  const text = (inp?.value ?? "").trim();
+  if (!my) return void logLine("APRS: set your callsign first");
+  if (!to) return void logLine("APRS: set the destination callsign");
+  if (!text) return;
+  try {
+    const r = await state.client.aprsTx({ source: my, message_to: to, message_text: text });
+    logLine(`APRS TX: ${r.tnc2}`);
+    if (inp) inp.value = "";
+  } catch (e) {
+    logLine(`APRS TX failed: ${e instanceof ApiError ? e.message : String(e)}`);
+  }
+}
+
+async function beaconAprs(): Promise<void> {
+  if (!state.client || !state.radio) return;
+  const my = (q<HTMLInputElement>("#aprs-mycall")?.value ?? "").trim().toUpperCase();
+  if (!my) return void logLine("APRS: set your callsign first");
+  const mp = state.radio.mode_params;
+  const lat = Number(mp.reference_lat ?? 0);
+  const lon = Number(mp.reference_lon ?? 0);
+  if (lat === 0 && lon === 0) return void logLine("APRS: no reference position set");
+  try {
+    const r = await state.client.aprsTx({ source: my, lat, lon, comment: "LANline" });
+    logLine(`APRS beacon: ${r.tnc2}`);
+  } catch (e) {
+    logLine(`APRS beacon failed: ${e instanceof ApiError ? e.message : String(e)}`);
+  }
+}
+
 function wizardHtml(): string {
   switch (state.radio?.mode) {
     case "nbfm":
@@ -1763,8 +1889,9 @@ function wizardHtml(): string {
       return hamWizardHtml();
     case "adsb":
     case "ais":
-    case "aprs":
       return scopeWizardHtml();
+    case "aprs":
+      return scopeWizardHtml() + aprsChatHtml();
     case "analysis":
       return `<section class="card"><h2>Receiver Analysis</h2><div id="analysis-host"></div></section>`;
     case "debug_tone":

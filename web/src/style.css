@@ -454,6 +454,55 @@ h3.ham-sub {
   padding: 2px 8px;
   margin-left: 4px;
 }
+/* --- APRS messaging -------------------------------------------------- */
+.aprs-calls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.aprs-calls input {
+  flex: 1 1 0;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+}
+.aprs-log {
+  max-height: min(42vh, 320px);
+  gap: 4px;
+}
+.aprs-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-width: 85%;
+}
+.aprs-msg.out {
+  align-self: flex-end;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.aprs-msg-who {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.aprs-msg-text {
+  word-break: break-word;
+}
+.aprs-send-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.aprs-send-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .tx-log {
   margin-top: 10px;
   font-size: 12px;

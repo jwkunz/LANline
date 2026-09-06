@@ -722,6 +722,36 @@ Ring buffer of recent decoded frames as TNC2 monitor lines
 { "time": "…", "count": 512, "packets": ["KZ4AZ-9>APRS,WIDE1-1:>mobile", "…"] }
 ```
 
+### `POST /api/v1/aprs/tx`
+
+Transmit one APRS packet — a **half-duplex burst** (RX drops for ~1 s). Needs
+`--enable-tx` on the server, `aprs` mode, a tx-capable device, and the radio
+running. `aprs` is now `tx_capable` with two extra mode params: `tx_gain_db`
+(default 30) and `tx_deviation_hz` (default 3000).
+
+Session-authenticated. Body: `source` (required callsign). Optional `dest`
+(default `APZLNL` — the APRS experimental tocall space), `path` (digipeater
+aliases, default direct), `gain_db`, `deviation_hz`. Exactly one payload form:
+
+| Form | Fields | Builds |
+|------|--------|--------|
+| Raw | `info` | the info field verbatim |
+| Message | `message_to`, `message_text` | `:<addressee padded to 9>:text` (unnumbered) |
+| Position | `lat`, `lon`, `symbol`?, `comment`? | `!DDMM.hhN/DDDMM.hhW>comment` |
+
+```json
+// request
+{ "source": "KZ4AZ-1", "message_to": "KZ4AZ-2", "message_text": "hi" }
+// response
+{ "transmitted": true, "tnc2": "KZ4AZ-1>APZLNL::KZ4AZ-2  :hi", "bytes": 30 }
+```
+
+The sender echoes its own packet into its `GET /aprs/packets` ring, tracker
+and TNC2 feed (like a real TNC), and appends a `mode: "aprs"` entry (with the
+TNC2 line in `detail`) to [`GET /api/v1/radio/tx/log`](#radio-configuration--control).
+`403` when `--enable-tx` is off, `409` when the mode isn't `aprs` or the radio
+isn't running.
+
 ### TNC2 feed (TCP `ports.aprs`, default `10152`)
 
 A line stream of the same TNC2 monitor lines (CRLF-terminated). Point Xastir,

@@ -405,6 +405,10 @@ pub struct TxLogEntry {
     #[serde(with = "time::serde::rfc3339::option")]
     pub released_at: Option<OffsetDateTime>,
     pub duration_ms: Option<u64>,
+    /// Free-form detail — the APRS TNC2 line for an `aprs` burst; `null` for
+    /// a voice key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]

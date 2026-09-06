@@ -223,6 +223,29 @@ impl TxAudit {
             gain_db,
             released_at: None,
             duration_ms: None,
+            detail: None,
+        });
+    }
+
+    /// A one-shot transmission (no key/release pair) — an APRS packet burst.
+    /// `detail` is the TNC2 monitor line.
+    fn burst(&self, client: String, mode: String, tx_frequency_hz: u64, detail: String) {
+        let now = OffsetDateTime::now_utc();
+        let mut log = self.0.lock().unwrap();
+        if log.len() >= TX_AUDIT_CAP {
+            log.pop_front();
+        }
+        log.push_back(TxLogEntry {
+            keyed_at: now,
+            client,
+            mode,
+            tx_frequency_hz,
+            offset_hz: 0,
+            tone_hz: 0.0,
+            gain_db: 0.0,
+            released_at: Some(now),
+            duration_ms: Some(0),
+            detail: Some(detail),
         });
     }
 
@@ -265,6 +288,21 @@ enum PipelineCmd {
     /// Start (`Some`) or stop (`None`) a channel scan (`run_sdr` only). A
     /// manual `Retune` while scanning also stops it.
     Scan(Option<ScanConfig>),
+    /// Transmit one APRS packet then return to RX (`run_aprs` only).
+    AprsTx(AprsTxSpec),
+}
+
+/// One APRS transmit burst: a ready-built AX.25 UI frame (no FCS) plus the
+/// RF knobs. `run_aprs` drops RX, keys 144.390 MHz straight, modulates the
+/// frame via [`crate::aprs::tx::modulate`], then resumes RX.
+#[cfg(feature = "soapy")]
+struct AprsTxSpec {
+    /// AX.25 UI-frame octets, no FCS (the modulator appends it).
+    frame: Vec<u8>,
+    /// TNC2 monitor line, for the log + local echo.
+    tnc2: String,
+    gain_db: f64,
+    deviation_hz: f64,
 }
 
 /// One channel in a scan list.
@@ -486,6 +524,12 @@ impl RadioManager {
     }
 
     /// Close out this client's most recent still-open transmit-log entry.
+    /// Record a one-shot burst (an APRS packet) in the audit log. `detail` is
+    /// the TNC2 line.
+    pub fn tx_log_burst(&self, client: String, mode: String, tx_frequency_hz: u64, detail: String) {
+        self.tx_audit.burst(client, mode, tx_frequency_hz, detail);
+    }
+
     pub fn tx_log_release(&self, client: &str) {
         self.tx_audit.release(client);
     }
@@ -544,6 +588,38 @@ impl RadioManager {
                 let _ = cmd_tx.send(PipelineCmd::Unkey);
             }
         }
+    }
+
+    /// Transmit one APRS packet on the running `aprs` pipeline (a half-duplex
+    /// burst — RX drops for ~1 s). `frame` is the AX.25 UI-frame body without
+    /// FCS. Gated by `--enable-tx`; the API handler checks the mode.
+    #[cfg(feature = "soapy")]
+    pub fn aprs_tx(
+        &self,
+        frame: Vec<u8>,
+        tnc2: String,
+        gain_db: f64,
+        deviation_hz: f64,
+    ) -> Result<(), &'static str> {
+        if !self.enable_tx {
+            return Err("transmit is disabled on this server — see --enable-tx");
+        }
+        let run = self.run.lock().unwrap();
+        let cmd_tx = run.cmd_tx.as_ref().ok_or("radio is not running")?;
+        cmd_tx
+            .send(PipelineCmd::AprsTx(AprsTxSpec { frame, tnc2, gain_db, deviation_hz }))
+            .map_err(|_| "pipeline is not accepting commands")
+    }
+
+    #[cfg(not(feature = "soapy"))]
+    pub fn aprs_tx(
+        &self,
+        _frame: Vec<u8>,
+        _tnc2: String,
+        _gain_db: f64,
+        _deviation_hz: f64,
+    ) -> Result<(), &'static str> {
+        Err("built without SDR support")
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
@@ -1546,6 +1622,8 @@ fn run_sdr(
                 // or arrived after `key_tx` already returned) is a no-op —
                 // the real unkey path is the `cmd_rx` check inside `key_tx`.
                 PipelineCmd::Unkey => {}
+                // APRS bursts are `run_aprs` only.
+                PipelineCmd::AprsTx(_) => {}
             }
         }
 
@@ -2171,16 +2249,31 @@ fn run_aprs(
 
     while !stop.load(Ordering::SeqCst) {
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if let PipelineCmd::Gain { agc, overall, elements } = cmd {
-                log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
-                if !agc {
-                    if let Some(g) = overall {
-                        log_set("gain", dev.set_gain(dir, ch, g));
-                    }
-                    for (name, v) in &elements {
-                        log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+            match cmd {
+                PipelineCmd::Gain { agc, overall, elements } => {
+                    log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
+                    if !agc {
+                        if let Some(g) = overall {
+                            log_set("gain", dev.set_gain(dir, ch, g));
+                        }
+                        for (name, v) in &elements {
+                            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+                        }
                     }
                 }
+                PipelineCmd::AprsTx(spec) => {
+                    if aprs_tx_burst(&dev, ch, &log_set, &p, center, &spec, &mut stream, telemetry)
+                        .is_err()
+                    {
+                        // RX could not be brought back up — let the pipeline
+                        // die and be restarted.
+                        return;
+                    }
+                    // Local echo: the sender sees its own packet in the ring,
+                    // the tracker and the TNC2 feed (like a real TNC).
+                    shared.record(&spec.frame, 0.0);
+                }
+                _ => {}
             }
         }
 
@@ -2221,6 +2314,78 @@ fn run_aprs(
     }
 
     let _ = stream.deactivate(None);
+}
+
+/// One half-duplex APRS transmit burst: drop RX, key 144.390 MHz straight (no
+/// LO offset — like [`key_tx`]), modulate `spec.frame` via
+/// [`crate::aprs::tx::modulate`] and write it, then retune + reactivate RX.
+/// `Err(())` means RX could not be brought back — the caller lets the pipeline
+/// restart.
+#[cfg(feature = "soapy")]
+#[allow(clippy::too_many_arguments)]
+fn aprs_tx_burst(
+    dev: &soapysdr::Device,
+    ch: usize,
+    log_set: &dyn Fn(&str, Result<(), soapysdr::Error>),
+    p: &AprsSdrParams,
+    rx_center_hz: f64,
+    spec: &AprsTxSpec,
+    rx_stream: &mut soapysdr::RxStream<num_complex::Complex32>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+) -> Result<(), ()> {
+    use crate::aprs::APRS_HZ;
+    use num_complex::Complex32;
+    use soapysdr::Direction;
+
+    let _ = rx_stream.deactivate(None);
+    telemetry.lock().unwrap().tx_keyed = true;
+    tracing::info!(
+        "aprs: TX — {} ({} bytes, {:.0} Hz dev, {:.1} dB gain)",
+        spec.tnc2,
+        spec.frame.len(),
+        spec.deviation_hz,
+        spec.gain_db,
+    );
+
+    let txdir = Direction::Tx;
+    log_set(
+        "tx frequency",
+        dev.set_frequency(txdir, ch, apply_ppm(APRS_HZ, p.freq_correction_ppm), ""),
+    );
+    log_set("tx gain", dev.set_gain(txdir, ch, spec.gain_db));
+
+    let tx_result = (|| -> Result<(), soapysdr::Error> {
+        let mut txs = dev.tx_stream::<Complex32>(&[ch])?;
+        txs.activate(None)?;
+        // ~64 leading flags of TXDelay (~0.4 s at 1200 baud).
+        let iq = crate::aprs::tx::modulate(p.device_rate, spec.deviation_hz, &spec.frame, 64);
+        let mtu = txs.mtu().unwrap_or(65_536).max(1);
+        let mut off = 0;
+        while off < iq.len() {
+            let end = (off + mtu).min(iq.len());
+            let w = txs.write(&[&iq[off..end]], None, false, 500_000)?;
+            off += w.max(1);
+        }
+        // Flush before tearing the stream down so the tail isn't truncated.
+        let _ = txs.write(&[&[Complex32::new(0.0, 0.0); 256][..]], None, true, 500_000);
+        txs.deactivate(None)
+    })();
+    if let Err(e) = tx_result {
+        tracing::error!("aprs: TX: {e}");
+    }
+
+    telemetry.lock().unwrap().tx_keyed = false;
+
+    // Back to RX.
+    log_set(
+        "frequency",
+        dev.set_frequency(Direction::Rx, ch, apply_ppm(rx_center_hz, p.freq_correction_ppm), ""),
+    );
+    if let Err(e) = rx_stream.activate(None) {
+        tracing::error!("aprs: RX reactivate after TX: {e}");
+        return Err(());
+    }
+    Ok(())
 }
 
 /// NOAA APT pipeline: tunes 137 MHz, feeds the [`crate::apt`] demod, and
@@ -2333,7 +2498,10 @@ fn run_apt(
                 PipelineCmd::Demod(_) => {}
                 // apt has no TX support (and no antenna-sharing concern —
                 // it never transmits); a stray key/unkey/scan is a no-op here.
-                PipelineCmd::Key(_) | PipelineCmd::Unkey | PipelineCmd::Scan(_) => {}
+                PipelineCmd::Key(_)
+                | PipelineCmd::Unkey
+                | PipelineCmd::Scan(_)
+                | PipelineCmd::AprsTx(_) => {}
             }
         }
 
@@ -2502,7 +2670,8 @@ fn run_analysis(
                 PipelineCmd::Demod(_)
                 | PipelineCmd::Key(_)
                 | PipelineCmd::Unkey
-                | PipelineCmd::Scan(_) => {}
+                | PipelineCmd::Scan(_)
+                | PipelineCmd::AprsTx(_) => {}
             }
         }
 

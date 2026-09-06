@@ -132,6 +132,28 @@ export class Client {
   adsbAircraft = () => this.request<import("./adsb").AdsbSnapshot>("GET", "/api/v1/adsb/aircraft");
   aisVessels = () => this.request<import("./ais").AisSnapshot>("GET", "/api/v1/ais/vessels");
   aprsStations = () => this.request<import("./aprs").AprsSnapshot>("GET", "/api/v1/aprs/stations");
+  aprsPackets = () =>
+    this.request<{ time: string; count: number; packets: string[] }>("GET", "/api/v1/aprs/packets");
+  /** Transmit one APRS packet (needs `--enable-tx` + `aprs` mode + running).
+   *  Supply `info`, or `message_to`+`message_text`, or `lat`+`lon`. */
+  aprsTx = (body: {
+    source: string;
+    dest?: string;
+    path?: string[];
+    gain_db?: number;
+    deviation_hz?: number;
+    info?: string;
+    message_to?: string;
+    message_text?: string;
+    lat?: number;
+    lon?: number;
+    symbol?: string;
+    comment?: string;
+  }) =>
+    this.request<{ transmitted: boolean; tnc2: string; bytes: number }>("POST", "/api/v1/aprs/tx", {
+      auth: true,
+      body,
+    });
   aptStatus = () => this.request<AptStatus>("GET", "/api/v1/apt/status");
 
   /** Binary raster, not JSON — fetched and parsed separately from `request()`.

@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ais/messages", get(ais::sentences))
         .route("/aprs/stations", get(aprs::stations))
         .route("/aprs/packets", get(aprs::packets))
+        .route("/aprs/tx", post(aprs::tx))
         .route("/apt/image", get(apt::image))
         .route("/apt/status", get(apt::status))
         .route("/analysis/spectrum", get(analysis::spectrum))

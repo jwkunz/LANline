@@ -15,8 +15,8 @@ use num_complex::Complex32;
 use std::f64::consts::PI;
 
 pub const BAUD: f64 = 1200.0;
-const MARK_HZ: f64 = 1200.0;
-const SPACE_HZ: f64 = 2200.0;
+pub(crate) const MARK_HZ: f64 = 1200.0;
+pub(crate) const SPACE_HZ: f64 = 2200.0;
 /// Decimated working rate (Hz), picked near this.
 const TARGET_RATE: f64 = 22_050.0;
 const FIR_TAPS: usize = 121;
@@ -371,83 +371,11 @@ fn validate(frame: Vec<bool>, mag: f32) -> Option<RawFrame> {
 
 /// Build the AFSK IQ for an AX.25 frame body (no FCS — this appends it):
 /// HDLC flags + NRZI + bit-stuffing + Bell 202 tones on an FM carrier.
+/// Thin wrapper kept for the demod round-trip test — the real modulator now
+/// lives in [`crate::aprs::tx::modulate`].
 #[cfg(test)]
 pub fn synth_packet(fs: f64, octets_no_fcs: &[u8], lead_flags: usize) -> Vec<Complex32> {
-    // 1. FCS (CRC-16/X.25) over the frame, appended little-endian, complemented.
-    let mut crc: u16 = 0xFFFF;
-    for &b in octets_no_fcs {
-        crc ^= b as u16;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8408 } else { crc >> 1 };
-        }
-    }
-    let fcs = !crc;
-    let mut framed = octets_no_fcs.to_vec();
-    framed.push((fcs & 0xFF) as u8);
-    framed.push((fcs >> 8) as u8);
-
-    // 2. data bits LSB-first, with bit-stuffing.
-    let mut data_bits: Vec<bool> = Vec::new();
-    let mut ones = 0;
-    for &byte in &framed {
-        for i in 0..8 {
-            let bit = (byte >> i) & 1 == 1;
-            data_bits.push(bit);
-            if bit {
-                ones += 1;
-                if ones == 5 {
-                    data_bits.push(false);
-                    ones = 0;
-                }
-            } else {
-                ones = 0;
-            }
-        }
-    }
-
-    // 3. flags + data, then NRZI encode (0 -> transition, 1 -> hold).
-    let mut wire: Vec<bool> = Vec::new();
-    for _ in 0..lead_flags {
-        for i in 0..8u8 {
-            wire.push((0x7Eu8 >> i) & 1 == 1);
-        }
-    }
-    wire.extend_from_slice(&data_bits);
-    // Closing flag + a few trailing flags so the closing one flushes through
-    // the demod's group delay (a real channel is never silent right after).
-    for _ in 0..5 {
-        for i in 0..8u8 {
-            wire.push((0x7Eu8 >> i) & 1 == 1);
-        }
-    }
-    let mut level = true;
-    let mut nrzi: Vec<bool> = Vec::with_capacity(wire.len());
-    for b in wire {
-        if !b {
-            level = !level;
-        }
-        nrzi.push(level);
-    }
-
-    // 4. Bell 202 AFSK → FM.
-    let sps = fs / BAUD;
-    let mut out = Vec::new();
-    let mut afsk_phase = 0.0f64;
-    let mut fm_phase = 0.0f64;
-    let dev = 3_000.0; // Hz peak deviation
-    let mut t = 0.0f64;
-    for &lvl in &nrzi {
-        let tone = if lvl { MARK_HZ } else { SPACE_HZ };
-        let n = ((t + sps).floor() - t.floor()) as usize;
-        for _ in 0..n {
-            afsk_phase += 2.0 * PI * tone / fs;
-            let audio = afsk_phase.sin();
-            fm_phase += 2.0 * PI * dev * audio / fs;
-            out.push(Complex32::new(fm_phase.cos() as f32, fm_phase.sin() as f32));
-        }
-        t += sps;
-    }
-    out
+    crate::aprs::tx::modulate(fs, 3_000.0, octets_no_fcs, lead_flags)
 }
 
 #[cfg(test)]

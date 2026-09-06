@@ -8,6 +8,7 @@ pub mod demod;
 pub mod feed;
 pub mod parse;
 pub mod tracker;
+pub mod tx;
 
 pub use tracker::{Snapshot, Tracker};
 

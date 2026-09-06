@@ -92,10 +92,9 @@ impl Ax25Frame {
     }
 }
 
-/// Encode one address field into 7 octets. (Test-only — the receiver never
-/// builds AX.25.)
-#[cfg(test)]
-fn encode_addr(call: &str, last: bool) -> [u8; 7] {
+/// Encode one address field into 7 octets. Used by the transmit path
+/// (`crate::aprs::tx`) and the demod round-trip test.
+pub(crate) fn encode_addr(call: &str, last: bool) -> [u8; 7] {
     let (name, ssid) = match call.split_once('-') {
         Some((n, s)) => (n, s.parse::<u8>().unwrap_or(0) & 0x0F),
         None => (call, 0),
@@ -108,10 +107,8 @@ fn encode_addr(call: &str, last: bool) -> [u8; 7] {
     out
 }
 
-/// Build an AX.25 UI frame body (no FCS) for `dest`/`source`/`path`/`info` —
-/// used by the demod round-trip test.
-#[cfg(test)]
-pub fn encode_ui(dest: &str, source: &str, path: &[&str], info: &[u8]) -> Vec<u8> {
+/// Build an AX.25 UI frame body (no FCS) for `dest`/`source`/`path`/`info`.
+pub(crate) fn encode_ui(dest: &str, source: &str, path: &[&str], info: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&encode_addr(dest, false));
     out.extend_from_slice(&encode_addr(source, path.is_empty()));

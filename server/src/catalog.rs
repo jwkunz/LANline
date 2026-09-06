@@ -137,13 +137,15 @@ pub fn modes() -> Vec<ModeInfo> {
         ModeInfo {
             id: "aprs",
             name: "APRS (144.390 MHz packet — position/status/message)",
-            tx_capable: false,
+            tx_capable: true,
             params: BTreeMap::from([
                 ("reference_lat", num(0.0, -90.0, 90.0, "deg")),
                 ("reference_lon", num(0.0, -180.0, 180.0, "deg")),
                 ("max_range_km", num(300.0, 10.0, 2000.0, "km")),
                 ("trail_seconds", num(1800.0, 60.0, 21600.0, "s")),
                 ("forget_seconds", num(3600.0, 300.0, 86400.0, "s")),
+                ("tx_gain_db", num(30.0, 0.0, 89.0, "dB")),
+                ("tx_deviation_hz", num(3000.0, 1000.0, 5000.0, "Hz")),
             ]),
         },
         ModeInfo {

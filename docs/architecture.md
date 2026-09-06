@@ -443,6 +443,28 @@ uncompressed and base-91 compressed position, MIC-E (latitude in the AX.25
 destination field, longitude/course/speed/symbol in the info body), status,
 and `:addressee:text` messages.
 
+### APRS transmit (`aprs/tx.rs`)
+
+`POST /api/v1/aprs/tx` (behind `--enable-tx`) sends one packet as a
+half-duplex burst inside `run_aprs`: `PipelineCmd::AprsTx` → `aprs_tx_burst`
+deactivates the RX stream, tunes the device straight to 144.390 MHz (no LO
+offset, like voice `key_tx`), opens a TX stream, and writes the IQ from
+`aprs::tx::modulate` — the exact inverse of the demod: FCS (CRC-16/X.25) →
+LSB-first bit-stuffing → ~64 leading `0x7E` flags of TXDelay → NRZI →
+Bell 202 AFSK → FM. Then it retunes and reactivates RX. `aprs::tx` also
+builds the AX.25 UI frame (`encode_ui`, promoted out of the demod's
+`#[cfg(test)]`) and the APRS payload: `message_info` (`:addr:text`),
+`position_info` (`!DDMM.hhN/...`). The sender feeds its own frame back through
+`AprsShared::record`, so it shows in its own packet ring / tracker / TNC2
+feed (a real TNC echoes what it keys), and the API logs a `mode:"aprs"`
+entry in the transmit audit with the TNC2 line.
+
+Two radios under `lanline-hypervisor` can exchange packets on 144.390 — the
+first use of the concurrent-radio work as a cross-radio link. The web `aprs`
+panel has a messaging card (my-call / to-call, a text field, a chat log built
+from the TNC2 ring); pointing two browser tabs at the two child servers is an
+APRS chat room, each side driving its own radio.
+
 ### AM and HackRF MF/LF sensitivity
 
 The HackRF's front end has no dedicated preselection filtering or LNA below

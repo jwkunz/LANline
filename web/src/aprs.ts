@@ -68,3 +68,29 @@ export function aprsSymbolGlyph(sym: string | null): string {
   const code = sym[1]!;
   return PRIMARY[code] ?? "📍";
 }
+
+export interface AprsMsg {
+  from: string;
+  to: string;
+  text: string;
+}
+
+/** Pull APRS text messages out of a list of TNC2 monitor lines
+ *  (`SRC>DEST[,path]::ADDRESSEE :text`). Non-message lines are skipped. */
+export function parseAprsMessages(lines: string[]): AprsMsg[] {
+  const out: AprsMsg[] = [];
+  for (const line of lines) {
+    const sep = line.indexOf(":");
+    if (sep < 0) continue;
+    const head = line.slice(0, sep); // SRC>DEST[,path]
+    const info = line.slice(sep + 1); // APRS info
+    if (info[0] !== ":" || info.length < 11 || info[10] !== ":") continue;
+    const from = head.split(">")[0] ?? "";
+    const to = info.slice(1, 10).trim();
+    let text = info.slice(11);
+    const brace = text.lastIndexOf("{"); // strip a message sequence number
+    if (brace >= 0) text = text.slice(0, brace);
+    out.push({ from, to, text });
+  }
+  return out;
+}
