@@ -810,6 +810,7 @@ Live telemetry, safe to poll at ~1 Hz.
     "squelch_open": true,
     "audio_level_dbfs": -18.0,
     "ctcss_tone_hz": null,
+    "ctcss_scan_hz": null,
     "sample_overruns": 0,
     "pipeline_latency_ms": 62,
     "tx_keyed": false
@@ -829,7 +830,10 @@ Live telemetry, safe to poll at ~1 Hz.
 In `debug_tone` mode the `dsp` block reports synthetic values
 (`rssi_dbfs: null`, `squelch_open: true`). `ctcss_tone_hz` is the configured
 CTCSS tone while it is currently detected on-channel (FM modes with
-`ctcss_hz` set), else `null`.
+`ctcss_hz` set), else `null`. `ctcss_scan_hz` is the strongest *standard*
+CTCSS tone the receiver sees regardless of what's configured — an always-on
+Goertzel bank on narrowband FM, for identifying an unknown repeater's tone —
+or `null` when none stands out.
 
 ### `POST /api/v1/radio/tx/key`
 

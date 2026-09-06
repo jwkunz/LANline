@@ -61,6 +61,14 @@ impl Default for FmParams {
     }
 }
 
+/// The 50 standard EIA/TIA-603 CTCSS tones, Hz (matches `web/src/ham.ts`).
+pub const CTCSS_STD_TONES: [f32; 50] = [
+    67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2,
+    110.9, 114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 159.8, 162.2,
+    165.5, 167.9, 171.3, 173.8, 177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6, 199.5, 203.5,
+    206.5, 210.7, 218.1, 225.7, 229.1, 233.6, 241.8, 250.3, 254.1,
+];
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChainMetrics {
     pub rssi_dbfs: f32,
@@ -70,6 +78,10 @@ pub struct ChainMetrics {
     /// The configured CTCSS tone (Hz) while it is currently detected as
     /// present, else `0.0` (disabled, or not locked).
     pub ctcss_tone_hz: f32,
+    /// The strongest standard CTCSS tone the scanner currently sees on the
+    /// channel (Hz), regardless of what's configured — `0.0` if none stands
+    /// out. Lets the client identify an unknown repeater's tone.
+    pub ctcss_scan_hz: f32,
 }
 
 pub struct FmChain {
@@ -90,6 +102,7 @@ pub struct FmChain {
     ctcss: Option<CtcssDetector>,
     ctcss_gates: bool,
     tone_hp: Option<Biquad>,
+    ctcss_scan: Option<CtcssScanner>,
     metrics: ChainMetrics,
     resamp: LinearResampler,
     scratch_iq: Vec<Complex32>,
@@ -138,6 +151,10 @@ impl FmChain {
         let tone_hp = ctcss
             .is_some()
             .then(|| Biquad::highpass(channel_rate, 300.0, 0.707));
+        // Always-on tone identifier for narrowband voice channels (skip
+        // broadcast FM — no sub-audible tones there, and it'd be wasted work).
+        let ctcss_scan =
+            (p.channel_bw_hz <= 30_000.0).then(|| CtcssScanner::new(channel_rate));
 
         Self {
             nco: Nco::new(-p.lo_offset_hz / device_rate),
@@ -157,6 +174,7 @@ impl FmChain {
             ctcss,
             ctcss_gates: p.ctcss_squelch,
             tone_hp,
+            ctcss_scan,
             metrics: ChainMetrics::default(),
             resamp: LinearResampler::new(channel_rate, AUDIO_RATE),
             scratch_iq: Vec::new(),
@@ -179,6 +197,9 @@ impl FmChain {
         self.noise_env = 1.0;
         if let Some(d) = &mut self.ctcss {
             d.reset();
+        }
+        if let Some(s) = &mut self.ctcss_scan {
+            s.reset();
         }
     }
 
@@ -222,6 +243,9 @@ impl FmChain {
             if let Some(d) = &mut self.ctcss {
                 d.process(raw);
             }
+            if let Some(s) = &mut self.ctcss_scan {
+                s.process(raw);
+            }
 
             let mut a = raw * self.disc_gain;
             if let Some(notch) = &mut self.pilot_notch {
@@ -254,6 +278,7 @@ impl FmChain {
                 Some(d) if d.locked => d.tone_hz,
                 _ => 0.0,
             },
+            ctcss_scan_hz: self.ctcss_scan.as_ref().map_or(0.0, |s| s.best_hz),
         };
     }
 }
@@ -336,6 +361,100 @@ impl CtcssDetector {
         self.ref_env = 0.0;
         self.conf = 0.0;
         self.locked = false;
+    }
+}
+
+/// Always-on CTCSS tone *identifier* — a bank of block Goertzels, one per
+/// standard tone, over a ~2 s window of the discriminator output decimated to
+/// ~2 kHz. Reports the strongest standard tone that clearly stands out
+/// (`best_hz`, 0 = none), so the client can tell you what an unknown repeater
+/// is sending without sweeping `ctcss_hz` by hand. This only *identifies*;
+/// `CtcssDetector` (fast, single-tone, hysteretic) still does squelch gating.
+struct CtcssScanner {
+    aa: Biquad,
+    dec: usize,
+    cnt: usize,
+    coeff: [f32; 50], // 2·cos(2π f / det_rate) per tone
+    win: Vec<f32>,
+    n: usize,
+    best_hz: f32,
+}
+
+impl CtcssScanner {
+    const WIN: usize = 4096; // ~2 s at ~2 kHz -> ~0.5 Hz bins, separates neighbours
+
+    fn new(channel_rate: f64) -> Self {
+        let dec = (channel_rate / 2_000.0).round().max(1.0) as usize;
+        let det_rate = channel_rate / dec as f64;
+        let mut coeff = [0.0f32; 50];
+        for (c, f) in coeff.iter_mut().zip(CTCSS_STD_TONES) {
+            *c = 2.0 * (2.0 * PI * f as f64 / det_rate).cos() as f32;
+        }
+        Self {
+            aa: Biquad::lowpass(channel_rate, 400.0, 0.707),
+            dec,
+            cnt: 0,
+            coeff,
+            win: vec![0.0; Self::WIN],
+            n: 0,
+            best_hz: 0.0,
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, raw: f32) {
+        let s = self.aa.process(raw);
+        self.cnt += 1;
+        if self.cnt < self.dec {
+            return;
+        }
+        self.cnt = 0;
+        self.win[self.n] = s;
+        self.n += 1;
+        if self.n < Self::WIN {
+            return;
+        }
+        self.n = 0;
+        self.evaluate();
+    }
+
+    fn evaluate(&mut self) {
+        let n = Self::WIN as f32;
+        let mut mag = [0.0f32; 50];
+        for (k, m) in mag.iter_mut().enumerate() {
+            let c = self.coeff[k];
+            let (mut s1, mut s2) = (0.0f32, 0.0f32);
+            for (i, &x) in self.win.iter().enumerate() {
+                // Hann window to keep adjacent-tone leakage down
+                let w = 0.5 - 0.5 * (2.0 * PI * i as f64 / (n as f64 - 1.0)).cos() as f32;
+                let s0 = x * w + c * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            let power = s1 * s1 + s2 * s2 - c * s1 * s2;
+            *m = (power.max(0.0)).sqrt() / (n / 2.0);
+        }
+        let (best, peak) =
+            mag.iter().enumerate().fold((0usize, 0.0f32), |(bi, bv), (i, &v)| {
+                if v > bv {
+                    (i, v)
+                } else {
+                    (bi, bv)
+                }
+            });
+        let mean_others = (mag.iter().sum::<f32>() - peak) / 49.0;
+        // Clear peak, well above the rest and above an absolute floor.
+        self.best_hz = if peak > 0.004 && peak > 6.0 * mean_others {
+            CTCSS_STD_TONES[best]
+        } else {
+            0.0
+        };
+    }
+
+    fn reset(&mut self) {
+        self.cnt = 0;
+        self.n = 0;
+        self.best_hz = 0.0;
     }
 }
 
@@ -496,6 +615,7 @@ impl AmChain {
             squelch_open: open,
             audio_dbfs: 20.0 * (peak + 1e-6).log10(),
             ctcss_tone_hz: 0.0, // AM: not applicable
+            ctcss_scan_hz: 0.0,
         };
     }
 }
@@ -1000,6 +1120,51 @@ mod tests {
         }
         assert!(mon.metrics().squelch_open);
         assert!((mon.metrics().ctcss_tone_hz - tone as f32).abs() < 1.0);
+    }
+
+    #[test]
+    fn ctcss_scanner_identifies_an_unknown_tone() {
+        let fs = 2_000_000.0;
+        let pl = 103.5; // a standard tone the receiver hasn't been told about
+        let voice = 900.0;
+        // ~3 s so the scanner's ~2 s Goertzel window completes at least once.
+        let iq = fm_modulate_two_tone(
+            fs,
+            6_000_000,
+            (pl, 700.0),
+            (voice, 2_500.0),
+            FmParams::default().lo_offset_hz,
+        );
+        let mut chain =
+            FmChain::new(fs, FmParams { deemphasis_us: 0.0, ..FmParams::default() });
+        let mut audio = Vec::new();
+        for block in iq.chunks(8192) {
+            chain.process(block, &mut audio);
+        }
+        assert!(
+            (chain.metrics().ctcss_scan_hz - pl as f32).abs() < 1.0,
+            "scanner said {} Hz, expected {pl}",
+            chain.metrics().ctcss_scan_hz
+        );
+
+        // Pure noise (open squelch, no tone): the scanner must not name one.
+        let mut st = 424242u64;
+        let noise: Vec<Complex32> = (0..6_000_000)
+            .map(|_| {
+                st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let r = ((st >> 33) as f32 / u32::MAX as f32 - 0.5) * 0.3;
+                st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let i = ((st >> 33) as f32 / u32::MAX as f32 - 0.5) * 0.3;
+                Complex32::new(r, i)
+            })
+            .collect();
+        let mut nchain =
+            FmChain::new(fs, FmParams { deemphasis_us: 0.0, ..FmParams::default() });
+        let mut naudio = Vec::new();
+        for block in noise.chunks(8192) {
+            nchain.process(block, &mut naudio);
+        }
+        assert_eq!(nchain.metrics().ctcss_scan_hz, 0.0, "scanner named a tone in noise");
     }
 
     #[test]

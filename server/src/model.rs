@@ -326,6 +326,10 @@ pub struct DspStatus {
     /// on the channel; `null` when CTCSS is disabled or the tone isn't
     /// present. FM modes only.
     pub ctcss_tone_hz: Option<f64>,
+    /// Strongest standard CTCSS tone the receiver sees on the channel (Hz),
+    /// independent of `ctcss_hz` — for identifying an unknown repeater's
+    /// tone. `null` when none stands out. Narrowband FM only.
+    pub ctcss_scan_hz: Option<f64>,
     pub sample_overruns: u64,
     pub pipeline_latency_ms: Option<f64>,
     /// Currently transmitting (push-to-talk keyed).

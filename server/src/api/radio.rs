@@ -191,6 +191,7 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
             squelch_open: tele.squelch_open,
             audio_level_dbfs: tele.audio_level_dbfs.map(f64::from),
             ctcss_tone_hz: tele.ctcss_tone_hz.map(f64::from),
+            ctcss_scan_hz: tele.ctcss_scan_hz.map(f64::from),
             sample_overruns: tele.overruns,
             pipeline_latency_ms: running.then_some(20.0),
             tx_keyed: tele.tx_keyed,

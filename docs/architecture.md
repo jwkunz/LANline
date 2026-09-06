@@ -246,7 +246,18 @@ selects, not a 50-tone decoder bank: a repeater publishes its required tone,
 so that's the one you set. It won't reliably distinguish immediate CTCSS
 neighbours (they're ~2–3 % apart and adult male voice fundamentals overlap
 the low end), which is why the confidence smoother is slow and the band-pass
-is as narrow as settling time allows. `Chain`'s `Fm`/`Am` variants are both
+is as narrow as settling time allows.
+
+For the *unknown*-tone case there's a separate always-on `CtcssScanner` on
+narrowband FM (`channel_bw_hz ≤ 30 kHz`): the same anti-alias + decimation to
+~2 kHz feeding a **bank of 50 block Goertzels**, one per standard tone, over
+a Hann-windowed ~2 s window (~0.5 Hz bins — enough to separate neighbours).
+It reports the peak bin as `dsp.ctcss_scan_hz` when it clears an absolute
+floor and sits ≥ 6× the mean of the rest, else `null`. The ham wizard shows
+it live ("On air: 103.5 Hz") with a one-tap **use it** that copies it into
+`ctcss_hz` — this replaced a painfully slow client-side sweep (50 `ctcss_hz`
+PATCHes, each rebuilding the chain). The scanner only *identifies*; the
+hysteretic single-tone `CtcssDetector` still does the actual gating. `Chain`'s `Fm`/`Am` variants are both
 `Box`ed now — `FmChain` grew past the point where an unboxed enum variant
 tripped `clippy::large_enum_variant`. DCS (23-bit Golay code, ~134 Hz
 sub-carrier) is a different problem and stays deferred.

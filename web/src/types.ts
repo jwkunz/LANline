@@ -63,6 +63,9 @@ export interface DspStatus {
   /** Configured CTCSS tone (Hz) while it's currently detected on-channel;
    *  null when CTCSS is off or the tone isn't present. FM modes only. */
   ctcss_tone_hz?: number | null;
+  /** Strongest standard CTCSS tone the receiver sees (Hz), independent of the
+   *  configured one — for identifying an unknown repeater. null if none. */
+  ctcss_scan_hz?: number | null;
   sample_overruns: number;
   pipeline_latency_ms: number | null;
   tx_keyed: boolean;

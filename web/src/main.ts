@@ -1286,6 +1286,19 @@ function patchLive(): void {
       det.textContent = d != null ? `detected ${d.toFixed(1)} Hz ✓` : "not detected";
       det.classList.toggle("ok", d != null);
     }
+    const scanEl = q("#ham-scan");
+    const useBtn = q<HTMLButtonElement>("#ham-ctcss-use");
+    const scan = state.status?.dsp.ctcss_scan_hz ?? null;
+    const cfg = Number(state.radio.mode_params.ctcss_hz ?? 0);
+    if (scanEl) {
+      scanEl.textContent = scan != null ? `${scan.toFixed(1)} Hz` : "no tone";
+      scanEl.classList.toggle("ok", scan != null);
+    }
+    if (useBtn) {
+      const offer = scan != null && Math.abs(scan - cfg) > 0.05;
+      useBtn.hidden = !offer;
+      if (offer) useBtn.dataset.hz = String(scan);
+    }
   }
 }
 
@@ -1331,6 +1344,15 @@ function installDelegates(): void {
     if (hit("#rp-add-toggle")) return setState({ rpAddOpen: true });
     if (hit("#rp-add-cancel")) return setState({ rpAddOpen: false });
     if (hit("#rp-add-save")) return saveManualRepeater();
+    if (hit("#ham-ctcss-use")) {
+      const sel = panels.querySelector<HTMLSelectElement>("#ham-ctcss");
+      const hz = (t.closest<HTMLElement>("#ham-ctcss-use")?.dataset.hz ?? "").trim();
+      if (sel && hz) {
+        sel.value = hz;
+        void applyHamCtcss();
+      }
+      return;
+    }
 
     const rpDel = t.closest<HTMLElement>("[data-rpdel]");
     if (rpDel) {
@@ -1807,6 +1829,10 @@ function hamWizardHtml(): string {
         <label class="ham-ck"><input type="checkbox" id="ham-ctcss-mon"${toneMonitor ? " checked" : ""} /> monitor only</label>
       </div>
       <p class="note" style="margin:6px 0 0">
+        On air: <span id="ham-scan">—</span>
+        <button id="ham-ctcss-use" class="secondary" hidden>use it</button>
+      </p>
+      <p class="note" style="margin:4px 0 0">
         ${
           cfgTone > 0
             ? `Requiring <strong>${cfgTone.toFixed(1)} Hz</strong>${toneMonitor ? " (detect only — audio not muted)" : ""} —

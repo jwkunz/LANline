@@ -342,7 +342,9 @@ A **CTCSS tone squelch** picker sits under the manual dial: choose the
 sub-audible tone ("PL") a repeater requires and the channel only unmutes
 while that tone is present (a "monitor only" checkbox detects and reports it
 without muting). It's a single-tone presence check keyed to your selection,
-not a full decoder bank.
+not a full decoder bank. The panel also shows the **tone actually on the
+air** (an always-on 50-tone Goertzel scanner) with a one-tap "use it" — so
+an unknown repeater's tone identifies itself.
 
 A **Simplex / Repeaters** toggle switches the channel list to a regional
 repeater directory (bundled from [hearham.com](https://hearham.com); regenerate

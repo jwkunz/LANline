@@ -417,12 +417,19 @@ h3.ham-sub {
   color: var(--muted);
   font-size: 13px;
 }
-#ham-ctcss-det {
+#ham-ctcss-det,
+#ham-scan {
   font-variant-numeric: tabular-nums;
 }
-#ham-ctcss-det.ok {
+#ham-ctcss-det.ok,
+#ham-scan.ok {
   color: var(--accent);
   font-weight: 600;
+}
+#ham-ctcss-use {
+  font-size: 12px;
+  padding: 2px 8px;
+  margin-left: 4px;
 }
 .station.repeater {
   position: relative;

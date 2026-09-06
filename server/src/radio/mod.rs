@@ -49,6 +49,9 @@ pub struct Telemetry {
     /// Configured CTCSS tone (Hz) while currently detected present; `None`
     /// when CTCSS is off or the tone isn't locked.
     pub ctcss_tone_hz: Option<f32>,
+    /// Strongest standard CTCSS tone seen on the channel (Hz), whatever is
+    /// configured; `None` when none stands out. Narrowband FM only.
+    pub ctcss_scan_hz: Option<f32>,
     pub overruns: u64,
     pub source: &'static str,
     /// Currently transmitting (push-to-talk keyed). See `PipelineCmd::Key`.
@@ -1223,6 +1226,7 @@ fn run_sdr(
                 t.snr_db = Some(m.snr_db);
                 t.squelch_open = m.squelch_open;
                 t.ctcss_tone_hz = (m.ctcss_tone_hz > 0.0).then_some(m.ctcss_tone_hz);
+                t.ctcss_scan_hz = (m.ctcss_scan_hz > 0.0).then_some(m.ctcss_scan_hz);
                 t.overruns = overruns;
             }
         }
