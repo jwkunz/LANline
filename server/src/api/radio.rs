@@ -115,8 +115,10 @@ pub async fn stop(State(st): State<AppState>, _auth: AuthedSession) -> ApiResult
 /// over the session's WebRTC connection (see docs/architecture.md's PTT
 /// section) — silence if none has arrived yet by the time this returns.
 /// Body is optional: `{"gain_db": 10}` overrides the (deliberately
-/// conservative) default of 0 dB. Requires `--enable-tx` on the server,
-/// `frs` mode, a tx-capable device, and the radio already running.
+/// conservative) default of 0 dB; `{"offset_hz": -600000, "tone_hz": 100.0}`
+/// key a repeater through its input with an encoded CTCSS uplink tone (`ham`
+/// mode). Requires `--enable-tx` on the server, `frs` or `ham` mode, a
+/// tx-capable device, and the radio already running.
 pub async fn key_tx(
     State(st): State<AppState>,
     _auth: AuthedSession,
@@ -135,8 +137,10 @@ pub async fn key_tx(
             r.mode_params.get("tx_mic_gain").and_then(Value::as_f64).unwrap_or(1.0).clamp(1.0, 32.0);
         (r.mode.clone(), r.running, deviation_hz, mic_gain)
     };
-    if mode != "frs" {
-        return Err(ApiError::bad_request("push-to-talk transmit is only supported in `frs` mode"));
+    if mode != "frs" && mode != "ham" {
+        return Err(ApiError::bad_request(
+            "push-to-talk transmit is only supported in `frs` and `ham` modes",
+        ));
     }
     if !running {
         return Err(ApiError::conflict("start the radio before keying"));
@@ -148,9 +152,29 @@ pub async fn key_tx(
 
     let body = body.map(|Json(v)| v).unwrap_or(Value::Null);
     let gain_db = body.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 61.0);
+    // Repeater split + uplink tone (ham only; ignored/zeroed for frs, a
+    // simplex Part 95 service).
+    let (offset_hz, tone_hz) = if mode == "ham" {
+        let off = body.get("offset_hz").and_then(Value::as_f64).unwrap_or(0.0).clamp(-30e6, 30e6);
+        let tone = match body.get("tone_hz").and_then(Value::as_f64).unwrap_or(0.0) {
+            t if (60.0..=260.0).contains(&t) => t,
+            _ => 0.0,
+        };
+        (off, tone)
+    } else {
+        (0.0, 0.0)
+    };
 
-    st.radio_mgr.key(gain_db, deviation_hz, mic_gain).map_err(ApiError::forbidden)?;
-    Ok(Json(serde_json::json!({ "keyed": true, "gain_db": gain_db, "mic_gain": mic_gain })))
+    st.radio_mgr
+        .key(gain_db, deviation_hz, mic_gain, offset_hz, tone_hz)
+        .map_err(ApiError::forbidden)?;
+    Ok(Json(serde_json::json!({
+        "keyed": true,
+        "gain_db": gain_db,
+        "mic_gain": mic_gain,
+        "offset_hz": offset_hz,
+        "tone_hz": tone_hz,
+    })))
 }
 
 /// End the current transmission early (a no-op if nothing is keyed —

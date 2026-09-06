@@ -16,9 +16,12 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
   NOAA Weather Radio, FM broadcast, **AM** (mediumwave/shortwave),
   **FRS** (462/467 MHz walkie-talkie channels), and **Amateur FM**
   (VHF/UHF NBFM, band-plan-organized channel picker for 6 m – 23 cm),
-- **FRS push-to-talk transmit** — live mic audio up the same WebRTC
-  connection, FM-modulated onto the channel; off by default (`--enable-tx`),
-  personal-use only (see [docs/architecture.md](docs/architecture.md#frs-and-the-transmit-question)),
+- **push-to-talk transmit** — live mic audio up the same WebRTC connection,
+  FM-modulated; **FRS** (personal-use only — a HackRF isn't Part 95
+  type-accepted) and **amateur** (simplex or through a repeater's
+  input+offset with an encoded CTCSS uplink tone; Part 97, licensed control
+  operator). Off by default (`--enable-tx`); see
+  [docs/architecture.md](docs/architecture.md#frs-and-the-transmit-question),
 - **traffic trackers** — **ADS-B** aircraft (1090 MHz) and **AIS** vessels
   (162 MHz): decoded tracks over REST + a raw TCP feed (Beast / AIVDM), plotted
   on a self-contained radar scope in the web client,
@@ -53,7 +56,8 @@ wrapper (`client/android`).
 | 2h | FRS receive mode (462/467 MHz, 22-channel plan), channel-picker wizard | ✅ |
 | 2i | Push-to-talk transmit (FRS only; FM modulator, half-duplex device switching, live mic-audio uplink over WebRTC, PTT protocol) — off by default (`--enable-tx`), personal-use only per FCC Part 95 | ✅ |
 | 2j | Multi-radio device picker (HackRF / ADALM-Pluto), TLS with a self-signed cert, Receiver Analysis waterfall | ✅ |
-| 2k | Amateur NBFM receive mode — band-plan-organized channel picker (6 m – 23 cm), simplex/calling frequencies, voluntary ARRL band-plan hints, CTCSS tone squelch, regional repeater directory + manual repeater entry (offset + tones); repeater TX + DCS to follow | ✅ |
+| 2k | Amateur NBFM — band-plan-organized channel picker (6 m – 23 cm), simplex/calling, voluntary ARRL band-plan hints, CTCSS tone squelch + always-on tone identifier, regional repeater directory + manual entry | ✅ |
+| 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97; DCS encode to follow | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -355,9 +359,13 @@ transmits a tone, sets that as your receive tone squelch; the offset and
 uplink tone are remembered for transmit. **+ Add repeater** stores your own
 (offset + tones) in the browser.
 
-Still **receive-only** — keying a repeater through its input with the uplink
-tone, and DCS, come in later builds. The same UHF `freq_correction_ppm` note
-as FRS applies.
+**Transmit** (`--enable-tx`, off by default): the same hold-to-talk button
+FRS uses appears in *Now playing*. On simplex it keys the tuned frequency;
+with a repeater selected it keys the **input** (output ± offset) and encodes
+the repeater's **uplink CTCSS tone**, so one hold gets you through the
+machine. Part 97 permits homebrew gear under an amateur licence — you are the
+control operator (KZ4AZ). DCS encode is deferred. The same UHF
+`freq_correction_ppm` note as FRS applies.
 
 ### Receiver Analysis (waterfall)
 

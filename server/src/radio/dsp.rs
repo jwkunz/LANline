@@ -868,28 +868,52 @@ pub struct TxModulator {
     phase: f64,
     device_rate: f64,
     deviation_hz: f64,
+    /// CTCSS uplink tone (Hz), 0 = none. Summed onto the voice at a fixed
+    /// fraction of full deviation (`CTCSS_TX_DEV_FRAC`), with the voice scaled
+    /// down by the same fraction so peak deviation still can't exceed
+    /// `deviation_hz`.
+    tone_hz: f64,
+    tone_phase: f64,
     scratch: Vec<f32>,
 }
 
+/// Sub-audible tone deviation as a fraction of the voice's peak deviation —
+/// ~0.75 kHz of a 5 kHz system, the usual amateur figure.
+const CTCSS_TX_DEV_FRAC: f32 = 0.15;
+
 impl TxModulator {
-    pub fn new(device_rate: f64, deviation_hz: f64) -> Self {
+    pub fn new(device_rate: f64, deviation_hz: f64, tone_hz: f64) -> Self {
         Self {
             resamp: LinearResampler::new(48_000.0, device_rate),
             phase: 0.0,
             device_rate,
             deviation_hz,
+            tone_hz: if (60.0..=260.0).contains(&tone_hz) { tone_hz } else { 0.0 },
+            tone_phase: 0.0,
             scratch: Vec::new(),
         }
     }
 
     /// Append modulated IQ for this chunk of audio (±1.0-ish range; silence
     /// — all zeros — is a perfectly valid chunk, and produces an unmodulated
-    /// carrier, not silence-detection or a gap in transmission).
+    /// carrier (plus the CTCSS tone, if set), not silence-detection or a gap
+    /// in transmission).
     pub fn process(&mut self, audio: &[f32], out: &mut Vec<Complex32>) {
         self.scratch.clear();
         self.resamp.process(audio, &mut self.scratch);
+        let has_tone = self.tone_hz > 0.0;
+        let voice_scale = if has_tone { 1.0 - CTCSS_TX_DEV_FRAC } else { 1.0 };
+        let tone_step = 2.0 * PI * self.tone_hz / self.device_rate;
         for &a in &self.scratch {
-            self.phase += 2.0 * PI * self.deviation_hz * a as f64 / self.device_rate;
+            let mut m = a.clamp(-1.0, 1.0) * voice_scale;
+            if has_tone {
+                m += CTCSS_TX_DEV_FRAC * self.tone_phase.sin() as f32;
+                self.tone_phase += tone_step;
+                if self.tone_phase > 1e6 {
+                    self.tone_phase %= 2.0 * PI;
+                }
+            }
+            self.phase += 2.0 * PI * self.deviation_hz * m as f64 / self.device_rate;
             if self.phase.abs() > 1e6 {
                 self.phase %= 2.0 * PI;
             }
@@ -997,7 +1021,7 @@ mod tests {
         let device_rate = 2_000_000.0;
         let tone = 1_200.0;
         let deviation_hz = 5_000.0;
-        let mut txmod = TxModulator::new(device_rate, deviation_hz);
+        let mut txmod = TxModulator::new(device_rate, deviation_hz, 0.0);
 
         // 48kHz tone, delivered in ragged ~20ms-ish chunks of varying size.
         let mut iq = Vec::new();
@@ -1029,6 +1053,54 @@ mod tests {
         let off_tone = goertzel(tail, AUDIO_RATE, 400.0);
         assert!(at_tone > 0.15, "tone amplitude {at_tone}");
         assert!(at_tone > off_tone * 5.0, "tone {at_tone} vs off {off_tone}");
+    }
+
+    /// `TxModulator` with a CTCSS uplink tone: the far-end receiver both
+    /// recovers the voice *and* can tone-squelch on the encoded PL — the
+    /// repeater-access path (offset aside, which is an LO retune, not DSP).
+    #[test]
+    fn tx_modulator_encodes_ctcss() {
+        let device_rate = 2_000_000.0;
+        let voice = 1_000.0;
+        let pl = 131.8;
+        let deviation_hz = 5_000.0;
+        let mut txmod = TxModulator::new(device_rate, deviation_hz, pl);
+
+        let mut iq = Vec::new();
+        let mut mp = 0.0f64;
+        for _ in 0..1400 {
+            let audio: Vec<f32> = (0..960)
+                .map(|_| {
+                    let v = 0.7 * (2.0 * PI * mp).sin() as f32;
+                    mp += voice / 48_000.0;
+                    v
+                })
+                .collect();
+            txmod.process(&audio, &mut iq);
+        }
+
+        let params = FmParams {
+            deviation_hz,
+            deemphasis_us: 0.0,
+            lo_offset_hz: 1.0,
+            ctcss_hz: pl,
+            ..FmParams::default()
+        };
+        let mut chain = FmChain::new(device_rate, params);
+        let mut audio = Vec::new();
+        for block in iq.chunks(8192) {
+            chain.process(block, &mut audio);
+        }
+
+        let tail = &audio[audio.len() / 2..];
+        let at_voice = goertzel(tail, AUDIO_RATE, voice);
+        assert!(at_voice > 0.1, "voice through the tone-encoded uplink: {at_voice}");
+        assert!(
+            (chain.metrics().ctcss_tone_hz - pl as f32).abs() < 1.0,
+            "receiver locked {} Hz, expected {pl}",
+            chain.metrics().ctcss_tone_hz
+        );
+        assert!(chain.metrics().squelch_open, "tone squelch should pass the encoded PL");
     }
 
     /// FM carrier carrying a sub-audible CTCSS tone plus a "voice" tone.

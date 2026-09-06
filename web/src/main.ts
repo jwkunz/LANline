@@ -521,13 +521,14 @@ async function autoListen(): Promise<void> {
   }
 }
 
-/** Mic permission is requested only for `frs` (the one PTT-capable mode),
+/** Mic permission is requested only for the PTT-capable modes (`frs`, `ham`),
  *  and only when the server actually offers `ptt` — no point prompting for
  *  a mic that has nowhere to go. Failure (denied, no device) degrades to
- *  receive-only, not a hard error: normal FRS listening still works, PTT
- *  just won't have real audio behind it (silence — see `TxAudioSource`). */
+ *  receive-only, not a hard error: normal listening still works, PTT just
+ *  won't have real audio behind it (silence — see `TxAudioSource`). */
 async function acquireMicIfNeeded(): Promise<MediaStream | null> {
-  if (state.radio?.mode !== "frs" || !state.server?.capabilities.includes("ptt")) return null;
+  const m = state.radio?.mode;
+  if ((m !== "frs" && m !== "ham") || !state.server?.capabilities.includes("ptt")) return null;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
     const track = stream.getAudioTracks()[0];
@@ -897,11 +898,21 @@ async function pttDown(): Promise<void> {
   // waiting on the key round-trip.
   micStream?.getAudioTracks().forEach((t) => (t.enabled = true));
   try {
-    const r = await state.client.keyTx();
+    const rp =
+      state.radio?.mode === "ham" &&
+      state.activeRepeater?.output_hz === state.radio.frequency_hz
+        ? state.activeRepeater
+        : null;
+    const r = await state.client.keyTx(
+      rp ? { offsetHz: rp.offset_hz, toneHz: rp.tone_hz } : undefined,
+    );
+    const via = r.offset_hz
+      ? ` via repeater (${offsetLabel(r.offset_hz)}${r.tone_hz ? `, ${r.tone_hz.toFixed(1)} Hz` : ""})`
+      : "";
     logLine(
       micStream
-        ? `PTT keyed — mic live, ${r.gain_db} dB`
-        : `PTT keyed — no mic granted, transmitting silence (${r.gain_db} dB)`,
+        ? `PTT keyed — mic live, ${r.gain_db} dB${via}`
+        : `PTT keyed — no mic granted, transmitting silence (${r.gain_db} dB)${via}`,
     );
     pttTimer = window.setTimeout(() => {
       logLine("PTT auto-released (max hold time)");
@@ -1434,11 +1445,12 @@ function installDelegates(): void {
 
   // Spacebar mirrors the "Hold to talk" button — hold to key, release to
   // stop. Ignored while typing in a field, while the Radio options modal is
-  // open, and unless FRS PTT is actually available.
+  // open, and unless PTT is actually available (frs / ham).
   const pttHotkeyOk = (t: EventTarget | null): boolean => {
+    const m = state.radio?.mode;
     if (
-      state.radio?.mode !== "frs" ||
-      !state.radio.running ||
+      (m !== "frs" && m !== "ham") ||
+      !state.radio?.running ||
       !state.server?.capabilities.includes("ptt") ||
       radioOptionsOpen()
     ) {
@@ -2586,7 +2598,13 @@ function nowPlayingInner(): string {
       <button id="radio-options" class="secondary">⚙ Radio options</button>
       ${state.seeking ? `<span class="note" style="align-self:center">seeking…</span>` : ""}
     </div>
-    ${r.mode === "frs" && r.running && state.server?.capabilities.includes("ptt") ? pttInner(st) : ""}`;
+    ${
+      (r.mode === "frs" || r.mode === "ham") &&
+      r.running &&
+      state.server?.capabilities.includes("ptt")
+        ? pttInner(st)
+        : ""
+    }`;
 }
 
 /** Push-to-talk block for the FRS "Now playing" card — only rendered when
@@ -2597,11 +2615,23 @@ function nowPlayingInner(): string {
 function pttInner(st: RadioStatus | null): string {
   const keyed = st?.dsp.tx_keyed ?? false;
   const hasMic = !!micStream;
+  const r = state.radio!;
+  const rp =
+    r.mode === "ham" && state.activeRepeater?.output_hz === r.frequency_hz
+      ? state.activeRepeater
+      : null;
+  const txHz = rp ? rp.output_hz + rp.offset_hz : r.frequency_hz;
+  const txLine =
+    r.mode === "ham"
+      ? `TX ${(txHz / 1e6).toFixed(4)} MHz${rp && rp.offset_hz ? ` (repeater input, ${offsetLabel(rp.offset_hz)})` : " (simplex)"}` +
+        (rp && rp.tone_hz ? ` · encoding ${rp.tone_hz.toFixed(1)} Hz` : "")
+      : null;
   return `
     <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--line)">
       <button id="ptt-button" class="ptt-btn${state.pttHeld ? " ptt-active" : ""}">
         ${state.pttHeld ? "🔴 Transmitting — release to stop" : "🎙️ Hold to talk"}
       </button>
+      ${txLine ? `<p class="note" style="margin:8px 0 0"><strong>${esc(txLine)}</strong></p>` : ""}
       <p class="note" style="margin:8px 0 0">
         ${
           keyed
@@ -2609,6 +2639,11 @@ function pttInner(st: RadioStatus | null): string {
             : hasMic
               ? "Mic ready — hold the button (or the spacebar) to transmit."
               : "No mic granted — holding will key up but transmit silence."
+        }
+        ${
+          r.mode === "ham"
+            ? " Amateur transmit under KZ4AZ (Part 97); homebrew gear is permitted, you are the control operator."
+            : ""
         }
       </p>
     </div>`;

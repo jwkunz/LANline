@@ -77,6 +77,12 @@ struct TxKeySpec {
     mic_gain: f64,
     gain_db: f64,
     max_secs: f64,
+    /// Transmit-frequency offset from the current RX frequency, Hz (repeater
+    /// split; 0 for simplex). Applied as a plain LO retune for the key.
+    offset_hz: f64,
+    /// CTCSS uplink tone to encode onto the transmission, Hz (0 = none) —
+    /// what a repeater needs to hear to key up.
+    tone_hz: f64,
 }
 
 /// Bridges live mic audio from the (async, tokio) WebRTC receive task to the
@@ -278,7 +284,14 @@ impl RadioManager {
     /// the caller (the API handler) is responsible for checking that before
     /// calling this.
     #[cfg(feature = "soapy")]
-    pub fn key(&self, gain_db: f64, deviation_hz: f64, mic_gain: f64) -> Result<(), &'static str> {
+    pub fn key(
+        &self,
+        gain_db: f64,
+        deviation_hz: f64,
+        mic_gain: f64,
+        offset_hz: f64,
+        tone_hz: f64,
+    ) -> Result<(), &'static str> {
         if !self.enable_tx {
             return Err("transmit is disabled on this server — see --enable-tx");
         }
@@ -291,12 +304,21 @@ impl RadioManager {
                 mic_gain,
                 gain_db,
                 max_secs: MAX_TX_SECS,
+                offset_hz,
+                tone_hz,
             }))
             .map_err(|_| "pipeline is not accepting commands")
     }
 
     #[cfg(not(feature = "soapy"))]
-    pub fn key(&self, _gain_db: f64, _deviation_hz: f64, _mic_gain: f64) -> Result<(), &'static str> {
+    pub fn key(
+        &self,
+        _gain_db: f64,
+        _deviation_hz: f64,
+        _mic_gain: f64,
+        _offset_hz: f64,
+        _tone_hz: f64,
+    ) -> Result<(), &'static str> {
         Err("built without SDR support")
     }
 
@@ -1164,8 +1186,11 @@ fn run_sdr(
                     chain = Chain::new(sp.device_rate, params);
                 }
                 PipelineCmd::Key(spec) => {
+                    // Repeater split: transmit on RX freq + offset (a plain LO
+                    // retune, restored to `lo` for RX below).
+                    let tx_freq_hz = cur_freq_hz + spec.offset_hz;
                     key_tx(
-                        &dev, ch, &log_set, &sp, cur_freq_hz, &spec, &cmd_rx, stop, telemetry, label,
+                        &dev, ch, &log_set, &sp, tx_freq_hz, &spec, &cmd_rx, stop, telemetry, label,
                         &mut stream, audio_in,
                     );
                     // The device was retuned to the TX frequency for the
@@ -1271,8 +1296,12 @@ fn key_tx(
     let _ = rx_stream.deactivate(None);
     telemetry.lock().unwrap().tx_keyed = true;
     tracing::info!(
-        "{label}: TX key — {:.0} Hz deviation, {:.1} dB gain, max {:.0}s",
+        "{label}: TX key — {:.4} MHz ({:+.0} kHz offset), {:.0} Hz deviation, \
+         {:.1} dB gain, CTCSS {}, max {:.0}s",
+        tx_freq_hz / 1e6,
+        spec.offset_hz / 1e3,
         spec.deviation_hz,
+        if spec.tone_hz > 0.0 { format!("{:.1} Hz", spec.tone_hz) } else { "off".into() },
         spec.gain_db,
         spec.max_secs
     );
@@ -1288,7 +1317,7 @@ fn key_tx(
         let mut txs = dev.tx_stream::<Complex32>(&[ch])?;
         txs.activate(None)?;
 
-        let mut modulator = TxModulator::new(sp.device_rate, spec.deviation_hz);
+        let mut modulator = TxModulator::new(sp.device_rate, spec.deviation_hz, spec.tone_hz);
         // 20ms @ 48kHz — matches the Opus frame size used elsewhere in this
         // app, though nothing here actually depends on that; it's just a
         // reasonable poll granularity for pulling from `audio_in`.

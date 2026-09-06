@@ -88,10 +88,11 @@ pub fn modes() -> Vec<ModeInfo> {
         ModeInfo {
             id: "ham",
             name: "Amateur NBFM (VHF/UHF FM simplex & repeaters)",
-            // Part 97 homebrew/experimental gear is allowed under an amateur
-            // licence (the operator holds Amateur Extra, KZ4AZ), but TX for
-            // this mode is deferred to a later commit — receive only for now.
-            tx_capable: false,
+            // Part 97 permits homebrew/experimental gear under an amateur
+            // licence (the operator holds Amateur Extra, KZ4AZ). PTT is still
+            // gated by `--enable-tx` + a tx-capable device; simplex or through
+            // a repeater's input+offset with an encoded CTCSS uplink tone.
+            tx_capable: true,
             params: BTreeMap::from([
                 // 5 kHz deviation / 16 kHz channel is the de-facto VHF/UHF
                 // amateur "narrow-ish" FM (wider than Part 95 FRS, narrower
@@ -103,6 +104,9 @@ pub fn modes() -> Vec<ModeInfo> {
                 ("audio_lpf_hz", num(3400.0, 1000.0, 8000.0, "Hz")),
                 ("squelch_db", num(-80.0, -120.0, 0.0, "dBFS")),
                 ("noise_squelch", num(0.35, 0.02, 2.0, "ratio")),
+                // TX-only, same meaning as `frs`'s: linear gain on decoded mic
+                // PCM before FM modulation, hard-limited to full scale after.
+                ("tx_mic_gain", num(2.5, 1.0, 32.0, "x")),
                 // CTCSS sub-audible tone squelch. 0 = off (carrier squelch
                 // only). When set to a standard tone (67.0–254.1 Hz), the
                 // channel only unmutes while that tone is present and the

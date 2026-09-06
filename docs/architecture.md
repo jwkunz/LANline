@@ -356,14 +356,15 @@ requires deliberate opt-in.
 
 #### Push-to-talk transmit
 
-`frs` is the one mode with `tx_capable: true`. `POST /api/v1/radio/tx/key`
+`frs` and `ham` are the `tx_capable: true` modes. `POST /api/v1/radio/tx/key`
 (see [rest-api.md](rest-api.md#post-apiv1radiotxkey)) begins a
 transmission; `POST /api/v1/radio/tx/unkey` ends it early (a hard 10s
 server-side cap ends it regardless, so a lost `unkey` request can't leave
 the transmitter keyed indefinitely). Both are gated behind `--enable-tx` +
-`frs` mode + a tx-capable device + the radio already running, checked in
-that order so the server-policy gate always answers first regardless of
-anything else.
+`frs`/`ham` mode + a tx-capable device + the radio already running, checked
+in that order so the server-policy gate always answers first regardless of
+anything else. `ham` adds a repeater offset + CTCSS uplink tone — see
+[Amateur transmit](#amateur-transmit-repeater--simplex) below.
 
 **Half-duplex hand-off.** HackRF (like most low-cost SDRs) can't RX and TX
 at once — confirmed directly against this project's own unit
@@ -461,9 +462,35 @@ original "too quiet", 2.5× sat right. Both `deviation_hz` and `tx_mic_gain`
 are read fresh at each key-up, so `PATCH /api/v1/radio` retunes the transmit
 audio without restarting anything.
 
-No privacy-code (CTCSS/DCS) tone gets added to the transmitted audio
-either — same reasoning as the receive side above; not implemented, not
-currently planned.
+No privacy-code tone gets added to a `frs` transmission (same reasoning as
+its receive side). `ham` transmit *does* encode CTCSS — see below.
+
+#### Amateur transmit (repeater + simplex)
+
+`ham` is `tx_capable: true` too, and the regulatory footing is different: FCC
+Part 97 explicitly permits homebrew and experimental equipment operated
+under an amateur licence, and this project's owner holds Amateur Extra
+(KZ4AZ) and is the control operator. It's still behind `--enable-tx` and a
+tx-capable device, and `POST /api/v1/radio/tx/key` now accepts two extra
+body fields for `ham`:
+
+- `offset_hz` — the repeater split. `key_tx` already retunes straight to a TX
+  frequency; for a repeater it's `RX frequency + offset_hz` (e.g. −600 kHz on
+  2 m, ±5 MHz on 70 cm), restored to the RX LO on unkey like any other key.
+  0 = simplex.
+- `tone_hz` — the CTCSS **uplink** tone the repeater needs to hear. Encoded
+  in `dsp::TxModulator`: a sub-audible sine summed onto the mic audio at a
+  fixed `CTCSS_TX_DEV_FRAC` (0.15) of full deviation, with the voice scaled
+  down by the same fraction so peak deviation still can't exceed
+  `deviation_hz`. `tx_modulator_encodes_ctcss` round-trips it back through
+  `FmChain` and confirms the far end both recovers the voice and can
+  tone-squelch on the encoded PL.
+
+The web client fills both from `state.activeRepeater` (set when you tap a
+repeater in the picker), so keying a repeater is one hold of the same PTT
+button FRS uses; the "Now playing" card shows the actual TX frequency and
+encoded tone. `ham` also has its own `tx_mic_gain` (default 2.5, same meaning
+as `frs`'s). DCS encode is still deferred.
 
 ### TLS and the secure-context problem
 

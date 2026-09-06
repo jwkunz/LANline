@@ -331,7 +331,7 @@ the client uses to render controls and the server uses to validate
   {
     "id": "ham",
     "name": "Amateur NBFM (VHF/UHF FM simplex & repeaters)",
-    "tx_capable": false,
+    "tx_capable": true,
     "params": {
       "deviation_hz":  { "type": "number", "default": 5000,  "min": 1000, "max": 8000,  "unit": "Hz" },
       "channel_bw_hz": { "type": "number", "default": 16000, "min": 8000, "max": 25000, "unit": "Hz" },
@@ -339,6 +339,7 @@ the client uses to render controls and the server uses to validate
       "audio_lpf_hz":  { "type": "number", "default": 3400,  "min": 1000, "max": 8000,  "unit": "Hz" },
       "squelch_db":    { "type": "number", "default": -80, "min": -120, "max": 0, "unit": "dBFS" },
       "noise_squelch": { "type": "number", "default": 0.35, "min": 0.02, "max": 2.0, "unit": "ratio" },
+      "tx_mic_gain":   { "type": "number", "default": 2.5, "min": 1.0, "max": 32.0, "unit": "x" },
       "ctcss_hz":      { "type": "number", "default": 0, "min": 0, "max": 260, "unit": "Hz" },
       "ctcss_squelch": { "type": "number", "default": 1, "enum": [0, 1], "unit": "bool" }
     }
@@ -449,12 +450,13 @@ changing the tone or toggling monitor mode takes effect without a restart.
 
 The repeater picker (a bundled regional directory at `GET /repeaters.json`
 plus browser-stored manual entries) is entirely client-side: selecting a
-repeater just issues a `PATCH /api/v1/radio` that sets `frequency_hz` to the
-repeater's output and `mode_params.ctcss_hz` to its transmitted tone, if
-any. The offset and uplink tone are held in the client for the future TX
-path. Still receive-only; keying a repeater through its input, and DCS, are
-planned follow-ups. Part 97 permits homebrew transmit equipment under an
-amateur licence, so a later TX build here is on firmer footing than `frs`'s.
+repeater issues a `PATCH /api/v1/radio` that sets `frequency_hz` to the
+repeater's output and `mode_params.ctcss_hz` to its transmitted tone, if any.
+`ham` is `tx_capable` — Part 97 permits homebrew transmit equipment under an
+amateur licence (firmer footing than `frs`'s Part 95 situation). PTT is still
+`--enable-tx`-gated; `POST /api/v1/radio/tx/key` takes `offset_hz` + `tone_hz`
+to key a repeater through its input with an encoded CTCSS uplink tone (the
+web client fills both from the selected repeater). DCS encode is deferred.
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end
@@ -839,11 +841,19 @@ or `null` when none stands out.
 
 Push-to-talk: begin transmitting live mic audio streamed up over the
 session's WebRTC connection (silence if none has arrived yet). Body
-optional: `{"gain_db": 10}` overrides the default of `0` (HackRF's TX chain
-runs 0–61 dB across its VGA + AMP elements; deliberately conservative — this
-is real RF, not a simulation).
+optional:
 
-Audio conditioning comes from the current `frs` `mode_params`, read at
+- `{"gain_db": 10}` overrides the default of `0` (HackRF's TX chain runs
+  0–61 dB across its VGA + AMP elements; deliberately conservative — this is
+  real RF, not a simulation).
+- `{"offset_hz": -600000, "tone_hz": 100.0}` (`ham` mode only) key a repeater
+  through its input: `offset_hz` (±30 MHz) shifts the transmit frequency from
+  the current RX frequency (a plain LO retune, restored on unkey), and
+  `tone_hz` (a standard 67.0–254.1 Hz CTCSS value, else ignored) is encoded
+  onto the transmission as the uplink tone. Both default to `0`
+  (simplex/none) and are ignored for `frs`.
+
+Audio conditioning comes from the current mode's `mode_params`, read at
 key-up: `deviation_hz` sets the peak FM deviation, and `tx_mic_gain` (a
 linear multiplier, default `2.5`) boosts the decoded mic PCM before
 modulation — getUserMedia audio, especially from an Android WebView, arrives
@@ -853,13 +863,13 @@ capped at `deviation_hz` however hot `tx_mic_gain` is set. Change either with
 `PATCH /api/v1/radio` and it takes effect on the next key-up.
 
 Requires, in order: `--enable-tx` on the server (else `403 forbidden`
-regardless of anything else below), `mode: "frs"` (else `400 bad_request`),
-the radio already running (else `409 conflict`), and a tx-capable device
-(else `503 device_unavailable`).
+regardless of anything else below), `mode: "frs"` or `"ham"` (else `400
+bad_request`), the radio already running (else `409 conflict`), and a
+tx-capable device (else `503 device_unavailable`).
 
 Response:
 ```json
-{ "keyed": true, "gain_db": 10, "mic_gain": 2.5 }
+{ "keyed": true, "gain_db": 10, "mic_gain": 2.5, "offset_hz": -600000, "tone_hz": 100.0 }
 ```
 
 Auto-unkeys after a hard 10s server-side cap regardless of whether

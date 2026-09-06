@@ -216,15 +216,23 @@ export class Client {
   stopRadio = () =>
     this.request<RadioConfig>("POST", "/api/v1/radio/stop", { auth: true });
 
-  /** Push-to-talk: begins a transmission (currently a synthesized test
-   *  tone only, not live mic audio — see docs/architecture.md). Server-side
-   *  gated behind `--enable-tx` + `frs` mode + a tx-capable device, and
-   *  auto-unkeys after a hard server-side cap regardless of `unkeyTx`. */
-  keyTx = (gainDb?: number) =>
-    this.request<{ keyed: boolean; gain_db: number }>("POST", "/api/v1/radio/tx/key", {
-      auth: true,
-      body: gainDb != null ? { gain_db: gainDb } : {},
-    });
+  /** Push-to-talk: begins a transmission of live mic audio streamed up over
+   *  the session's WebRTC connection. Server-side gated behind `--enable-tx`
+   *  + `frs`/`ham` mode + a tx-capable device, and auto-unkeys after a hard
+   *  server-side cap regardless of `unkeyTx`. `offsetHz`/`toneHz` key a
+   *  repeater through its input with an encoded CTCSS uplink tone (`ham`). */
+  keyTx = (opts?: { gainDb?: number; offsetHz?: number; toneHz?: number }) => {
+    const body: Record<string, number> = {};
+    if (opts?.gainDb != null) body.gain_db = opts.gainDb;
+    if (opts?.offsetHz) body.offset_hz = opts.offsetHz;
+    if (opts?.toneHz) body.tone_hz = opts.toneHz;
+    return this.request<{
+      keyed: boolean;
+      gain_db: number;
+      offset_hz?: number;
+      tone_hz?: number;
+    }>("POST", "/api/v1/radio/tx/key", { auth: true, body });
+  };
 
   unkeyTx = () =>
     this.request<{ keyed: boolean }>("POST", "/api/v1/radio/tx/unkey", { auth: true });

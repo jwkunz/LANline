@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tx_key_requires_frs_mode() {
+    async fn tx_key_requires_a_tx_mode() {
         // TX enabled here specifically so this test isolates the mode check
         // from the (separately tested) --enable-tx gate.
         let app = app_tx_enabled().await;
@@ -471,6 +471,17 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert_eq!(b["error"]["code"], "bad_request");
+
+        // `ham` clears the mode check — it falls through to the
+        // no-tx-capable-device check instead (the test harness has none).
+        send(&app, json_req("PATCH", "/api/v1/radio", Some(&token), json!({ "mode": "ham" }))).await;
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/tx/key", Some(&token), Value::Null),
+        )
+        .await;
+        assert_ne!(s, StatusCode::BAD_REQUEST, "ham should pass the mode check");
+        assert_ne!(b["error"]["code"], "bad_request");
     }
 
     #[tokio::test]
