@@ -285,6 +285,34 @@ account, hence hearham; its coverage is thinner, so `HAM_REPEATER_REGIONS`
 takes a comma list and the wizard leans on manual entry. `build.rs` +
 `webui.rs` embed the file the same way as the FM/AM/NWR station DBs.
 
+### Server-side channel scan
+
+Phase 2b's **seek** is client-driven — the browser PATCHes the frequency one
+step at a time, waits, reads `/radio/status`, repeats. That's fine for a
+single "find the next signal" but wasteful for continuous monitoring
+(a PATCH + poll round-trip per channel). The **scan** (`POST /radio/scan`)
+moves the loop into the pipeline thread, where a retune is a bare
+`dev.set_frequency` and the squelch decision is the same `FmChain`
+metric the live path already computes every block.
+
+`run_sdr` gets a `PipelineCmd::Scan(Option<ScanConfig>)` and an
+`Option<ScanRun>` local. **Sweeping:** dwell `dwell` (~150 ms — long enough
+for the retune's `chain.on_retune()` reset to settle the noise envelope)
+then check `squelch_open && rssi ≥ gate`: park if open, else `sdr_retune`
+(shared with the `Retune` handler) to the next channel and reset the dwell
+clock. **Parked:** audio flows normally; once the squelch has been closed
+for `hang` (~2.5 s), advance and resume sweeping. A manual `Retune` (from a
+`PATCH /radio` frequency change) cancels the scan — manual tune wins. Scan
+progress and the parked channel ride in `Telemetry` → `RadioStatus.scan`
+(with the live `frequency_hz`, since the config one is stale mid-scan).
+
+Deliberately carrier/noise-squelch only for now: CTCSS-gated dwell would
+need ~1.5 s per channel (the detector's lock time) versus the ~150 ms
+sweep, so per-channel tone gating is a later refinement. The web client
+builds the channel list from what it already has — the 22 FRS channels,
+nearby NWR transmitters, a ham band's simplex + repeater outputs — or sends
+a `{lo_hz, hi_hz, step_hz}` range for the broadcast bands.
+
 ### AM and HackRF MF/LF sensitivity
 
 The HackRF's front end has no dedicated preselection filtering or LNA below

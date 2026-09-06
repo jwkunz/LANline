@@ -255,9 +255,113 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
             active: st.radio_mgr.audio_rec().is_active(),
             last: st.radio_mgr.audio_rec().last(),
         },
+        scan: ScanStatus {
+            active: tele.scanning,
+            parked: tele.scan_parked,
+            frequency_hz: tele.scan_freq_hz.map(|f| f.round().max(0.0) as u64),
+            label: tele.scan_label.clone(),
+            index: tele.scan_index,
+            total: tele.scan_total,
+        },
         clients: st.webrtc.peer_count(),
         time: now_utc(),
     })
+}
+
+#[derive(serde::Deserialize)]
+pub struct ScanChannelIn {
+    frequency_hz: f64,
+    label: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ScanRangeIn {
+    lo_hz: f64,
+    hi_hz: f64,
+    step_hz: f64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ScanBody {
+    /// `"start"` or `"stop"`.
+    action: String,
+    /// Explicit channel list. Combined with `range` if both are given.
+    #[serde(default)]
+    channels: Vec<ScanChannelIn>,
+    /// Shorthand: expand `[lo_hz, hi_hz]` on `step_hz` into channels.
+    range: Option<ScanRangeIn>,
+    /// Milliseconds to dwell on each channel before deciding (default 150).
+    dwell_ms: Option<u64>,
+    /// Milliseconds to stay parked after the signal drops (default 2500).
+    hang_ms: Option<u64>,
+    /// RSSI floor (dBFS) a channel must clear to park on it (default -75).
+    rssi_gate_dbfs: Option<f64>,
+}
+
+const SCAN_MAX_CHANNELS: usize = 4000;
+
+/// Start or stop a server-side channel scan on the running SDR pipeline.
+pub async fn scan(
+    State(st): State<AppState>,
+    _auth: AuthedSession,
+    body: Option<Json<ScanBody>>,
+) -> ApiResult<Json<Value>> {
+    let body = body.map(|Json(b)| b).ok_or_else(|| ApiError::bad_request("body required"))?;
+    match body.action.as_str() {
+        "stop" => {
+            st.radio_mgr.scan_stop();
+            Ok(Json(serde_json::json!({ "scanning": false })))
+        }
+        "start" => {
+            let (mode, running) = {
+                let r = st.radio.lock().unwrap();
+                (r.mode.clone(), r.running)
+            };
+            if !running || !matches!(mode.as_str(), "nbfm" | "wbfm" | "am" | "frs" | "ham") {
+                return Err(ApiError::conflict(
+                    "start an audio mode (nbfm/wbfm/am/frs/ham) before scanning",
+                ));
+            }
+            let mut chans: Vec<(f64, String)> = body
+                .channels
+                .into_iter()
+                .filter(|c| c.frequency_hz.is_finite() && c.frequency_hz > 0.0)
+                .map(|c| {
+                    let label = c
+                        .label
+                        .unwrap_or_else(|| format!("{:.4} MHz", c.frequency_hz / 1e6));
+                    (c.frequency_hz, label)
+                })
+                .collect();
+            if let Some(r) = body.range {
+                let (lo, hi, step) = (r.lo_hz, r.hi_hz, r.step_hz);
+                if step <= 0.0 || !(lo.is_finite() && hi.is_finite()) || hi <= lo {
+                    return Err(ApiError::bad_request("invalid scan range"));
+                }
+                if ((hi - lo) / step) as usize > SCAN_MAX_CHANNELS {
+                    return Err(ApiError::bad_request("scan range too wide for the step"));
+                }
+                let mut f = lo;
+                while f <= hi + 1.0 {
+                    chans.push((f, format!("{:.4} MHz", f / 1e6)));
+                    f += step;
+                }
+            }
+            if chans.is_empty() {
+                return Err(ApiError::bad_request("no scan channels"));
+            }
+            chans.truncate(SCAN_MAX_CHANNELS);
+            let n = chans.len();
+            let dwell_ms = body.dwell_ms.unwrap_or(150);
+            let hang_ms = body.hang_ms.unwrap_or(2500);
+            let gate = body.rssi_gate_dbfs.unwrap_or(-75.0) as f32;
+            st.radio_mgr
+                .scan_start(chans, dwell_ms, hang_ms, gate)
+                .map_err(ApiError::conflict)?;
+            Ok(Json(serde_json::json!({ "scanning": true, "channels": n })))
+        }
+        other => Err(ApiError::bad_request(format!("unknown action `{other}`"))),
+    }
 }
 
 /// Modes whose pipeline produces the 48 kHz demod audio a recording captures.

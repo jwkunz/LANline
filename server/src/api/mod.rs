@@ -38,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .route("/radio/status", get(radio::status))
         .route("/radio/record", post(radio::record))
         .route("/radio/recording", get(radio::download))
+        .route("/radio/scan", post(radio::scan))
         .route("/radio/tx/key", post(radio::key_tx))
         .route("/radio/tx/unkey", post(radio::unkey_tx))
         .route("/radio/tx/log", get(radio::tx_log))
@@ -531,6 +532,45 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(b["keyed"], false);
+    }
+
+    #[tokio::test]
+    async fn scan_start_needs_a_running_audio_mode_stop_is_a_no_op() {
+        let app = app().await;
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        // Nothing running -> 409, whatever channels are passed.
+        let (s, b) = send(
+            &app,
+            json_req(
+                "POST",
+                "/api/v1/radio/scan",
+                Some(&token),
+                json!({ "action": "start", "channels": [{ "frequency_hz": 462_562_500.0 }] }),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert_eq!(b["error"]["code"], "conflict");
+
+        // Stop is always safe.
+        let (s, b) = send(
+            &app,
+            json_req("POST", "/api/v1/radio/scan", Some(&token), json!({ "action": "stop" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["scanning"], false);
+
+        // status carries a scan block.
+        let (_, b) = send(&app, get("/api/v1/radio/status")).await;
+        assert_eq!(b["scan"]["active"], false);
+        assert_eq!(b["scan"]["total"], 0);
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ import { nativeDiscovery, serverHost } from "./discovery";
 import { haversineMi, parseLatLon, type Located } from "./geo";
 import { altLabel, offsetNm, type AdsbSnapshot } from "./adsb";
 import { type AisSnapshot } from "./ais";
-import { loadNwrStations, nearestNwr, type NwrStation } from "./nwr";
+import { loadNwrStations, nearestNwr, NWR_CHANNELS, type NwrStation } from "./nwr";
 import {
   FM_MAX_HZ,
   FM_MIN_HZ,
@@ -890,6 +890,67 @@ async function seek(dir: 1 | -1): Promise<void> {
   }
 }
 
+/** Build the channel list for a server-side scan of the current mode. Returns
+ *  `{channels}` or `{range}` for `client.scan("start", …)`. */
+function scanListForMode(): {
+  channels?: { frequency_hz: number; label?: string }[];
+  range?: { lo_hz: number; hi_hz: number; step_hz: number };
+  rssi_gate_dbfs: number;
+} {
+  const mode = state.radio?.mode;
+  if (mode === "frs") {
+    return {
+      channels: FRS_CHANNELS.map((c) => ({ frequency_hz: c.freq_hz, label: `Ch ${c.channel}` })),
+      rssi_gate_dbfs: -70,
+    };
+  }
+  if (mode === "nbfm") {
+    const near = state.nwrNearby;
+    const channels = near.length
+      ? near.map((s) => ({ frequency_hz: s.freq_hz, label: `${s.callsign} · ${s.site}` }))
+      : NWR_CHANNELS.map((hz) => ({ frequency_hz: hz, label: `${(hz / 1e6).toFixed(3)} MHz` }));
+    return { channels, rssi_gate_dbfs: -75 };
+  }
+  if (mode === "ham") {
+    const band = hamBandContaining(state.radio!.frequency_hz) ?? hamBand(state.hamBand);
+    const simplex = hamSimplexChannels(band).map((c) => ({ frequency_hz: c.hz, label: c.name }));
+    const rpts = state.repeaters.map((rp) => ({
+      frequency_hz: rp.output_hz,
+      label: `${rp.call} ${offsetLabel(rp.offset_hz)}`,
+    }));
+    return { channels: [...simplex, ...rpts], rssi_gate_dbfs: -78 };
+  }
+  if (mode === "wbfm") {
+    return { range: { lo_hz: 87_900_000, hi_hz: 107_900_000, step_hz: 200_000 }, rssi_gate_dbfs: -40 };
+  }
+  // am
+  return { range: { lo_hz: 530_000, hi_hz: 1_700_000, step_hz: 10_000 }, rssi_gate_dbfs: -55 };
+}
+
+async function toggleScan(): Promise<void> {
+  if (!state.client) return;
+  const active = state.status?.scan.active ?? false;
+  try {
+    if (active) {
+      await state.client.scan("stop");
+      logLine("scan stopped");
+      // Adopt whatever frequency the scan left us on.
+      setState({ radio: await state.client.radio() });
+    } else {
+      const list = scanListForMode();
+      const n = await state.client.scan("start", list);
+      logLine(`scanning ${n.channels ?? "band"} channels…`);
+    }
+  } catch (e) {
+    logLine(`scan — ${(e as ApiError).message}`);
+  }
+  try {
+    setState({ status: await state.client.radioStatus() });
+  } catch {
+    /* next poll catches up */
+  }
+}
+
 // --- push-to-talk (FRS transmit, live mic audio — see docs/architecture.md) -
 
 // Slightly under the server's own hard cap (10s) so the client always
@@ -1371,6 +1432,7 @@ function installDelegates(): void {
     if (hit("#loc-me")) return useMyLocation();
     if (hit("#seek-down")) return void seek(-1);
     if (hit("#seek-up")) return void seek(1);
+    if (hit("#scan-toggle")) return void toggleScan();
     if (hit("#scope-recenter")) return setState({ scopeSel: null });
     if (t.id === "scope") return onScopeClick(e as MouseEvent);
 
@@ -2600,14 +2662,24 @@ function nowPlayingInner(): string {
       (rp.place ? ` · ${rp.place}` : "")
     : null;
   const canSeek = r.mode === "wbfm" || r.mode === "nbfm" || r.mode === "am" || r.mode === "frs";
+  const canScan = canSeek || r.mode === "ham";
+  const scan = st?.scan;
+  const scanning = scan?.active ?? false;
+  const shownHz = scanning && scan?.frequency_hz ? scan.frequency_hz : r.frequency_hz;
+  const scanNote = scanning
+    ? scan!.parked
+      ? `▶ parked on ${esc(scan!.label ?? freqLabel(r.mode, shownHz))}`
+      : `⏱ scanning ${scan!.index + 1}/${scan!.total} · ${esc(scan!.label ?? "…")}`
+    : null;
   return `
     <h2>Now playing</h2>
     <div class="mode-line">
       <span class="mode">${esc(meta?.label ?? r.mode)}</span>
-      <span class="freq">${freqLabel(r.mode, r.frequency_hz)}</span>
+      <span class="freq">${freqLabel(r.mode, shownHz)}</span>
       <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "running" : "stopped"}</span>
     </div>
-    ${rpNote ? `<p class="note" style="margin:0 0 12px">${esc(rpNote)}</p>` : ident ? `<p class="note" style="margin:0 0 12px">${esc(ident)}</p>` : ""}
+    ${scanNote ? `<p class="note ${scan!.parked ? "" : "warn"}" style="margin:0 0 12px">${scanNote}</p>` : ""}
+    ${!scanning && rpNote ? `<p class="note" style="margin:0 0 12px">${esc(rpNote)}</p>` : !scanning && ident ? `<p class="note" style="margin:0 0 12px">${esc(ident)}</p>` : ""}
     <div class="grid">
       ${kv("Device", st?.device_status ?? "—")}
       ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
@@ -2627,9 +2699,14 @@ function nowPlayingInner(): string {
         ${r.running ? "Stop radio" : "Start radio"}
       </button>
       ${
-        canSeek
+        canSeek && !scanning
           ? `<button id="seek-down" class="secondary" ${state.seeking ? "disabled" : ""}>◀◀ Seek</button>
              <button id="seek-up" class="secondary" ${state.seeking ? "disabled" : ""}>Seek ▶▶</button>`
+          : ""
+      }
+      ${
+        canScan && r.running
+          ? `<button id="scan-toggle" class="${scanning ? "" : "secondary"}">${scanning ? "⏹ Stop scan" : "⏱ Scan"}</button>`
           : ""
       }
       <button id="radio-options" class="secondary">⚙ Radio options</button>

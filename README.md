@@ -62,6 +62,7 @@ wrapper (`client/android`).
 | 2k | Amateur NBFM — band-plan-organized channel picker (6 m – 23 cm), simplex/calling, voluntary ARRL band-plan hints, CTCSS tone squelch + always-on tone identifier, regional repeater directory + manual entry | ✅ |
 | 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97, transmit audit log; DCS encode to follow | ✅ |
 | 2m | Server-side demod-audio recording — `POST /radio/record`, 48 kHz mono WAV, per-request start/stop + download, any audio mode | ✅ |
+| 2n | Server-side channel scan — `POST /radio/scan`, sweeps a channel list / band range in the pipeline thread, parks on squelch-open with a hang time; Scan button in the web client for FRS / NWR / ham / broadcast | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -307,8 +308,11 @@ Pick **FRS** in the mode strip — a fixed picker for all 22 FRS channels
 (462/467 MHz), each labeled with its FCC power limit and whether it's
 FRS-exclusive (channels 8–14) or shared with GMRS (1–7, 15–22). There's no
 station directory here — anyone could be transmitting on any channel from
-anywhere — so Seek in "Now playing" is the closest thing to browsing: it
-steps channel-by-channel looking for squelch-open traffic.
+anywhere — so **Seek** in "Now playing" is the closest thing to browsing: it
+steps channel-by-channel looking for squelch-open traffic. **Scan** (next to
+Seek, also on NWR / ham / broadcast) hands the same idea to the server: the
+pipeline sweeps the whole channel list and *parks* on live traffic, with a
+hang time before it resumes — a real scanner, no client round-trips.
 
 A **push-to-talk** button appears below the channel picker when the server
 is running with `--enable-tx` and a transmit-capable device is selected —

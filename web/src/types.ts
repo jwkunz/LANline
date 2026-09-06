@@ -107,6 +107,14 @@ export interface RadioStatus {
     channels: number;
   };
   recording: { active: boolean; last: AudioRecInfo | null };
+  scan: {
+    active: boolean;
+    parked: boolean;
+    frequency_hz: number | null;
+    label: string | null;
+    index: number;
+    total: number;
+  };
   clients: number;
   time: string;
 }

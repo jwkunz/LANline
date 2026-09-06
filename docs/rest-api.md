@@ -825,6 +825,7 @@ Live telemetry, safe to poll at ~1 Hz.
     "channels": 1
   },
   "recording": { "active": false, "last": null },
+  "scan": { "active": false, "parked": false, "frequency_hz": null, "label": null, "index": 0, "total": 0 },
   "clients": 1,
   "time": "2026-09-03T17:07:52Z"
 }
@@ -833,6 +834,12 @@ Live telemetry, safe to poll at ~1 Hz.
 `recording` reflects the server-side demod-audio recorder (see
 `POST /radio/record` below): `{active, last}` where `last` is the most
 recent finished recording (`filename`, `bytes`, `secs`, …) or `null`.
+
+`scan` reflects a server-side channel scan (`POST /radio/scan`): `{active,
+parked, frequency_hz, label, index, total}`. While `active`, `frequency_hz`
+is the **live** tuned frequency (the top-level `frequency_hz` reflects the
+stored config and is stale during a scan); `parked` is true when the scan
+has stopped on a live channel and is passing its audio through.
 
 In `debug_tone` mode the `dsp` block reports synthetic values
 (`rssi_dbfs: null`, `squelch_open: true`). `ctcss_tone_hz` is the configured
@@ -863,6 +870,39 @@ its metadata shows in `RadioStatus.recording.last`. `start` returns
 Download the most recent completed audio recording as a `audio/wav`
 attachment. `404` if there is none, `409` while one is still recording.
 Unauthenticated (same posture as `/radio/status`).
+
+### `POST /api/v1/radio/scan`
+
+Start or stop a **server-side channel scan** on the running SDR pipeline —
+the pipeline thread sweeps a channel list, dwelling briefly on each, and
+**parks** (stops advancing, passes audio through) on any channel whose
+squelch opens above an RSSI gate, resuming a set time after the signal
+drops. Auth required; `nbfm`/`wbfm`/`am`/`frs`/`ham` while running.
+
+Body: `{"action": "start" | "stop", …}`. For `start`, give the channels as
+an explicit list, a range shorthand, or both:
+
+```json
+{
+  "action": "start",
+  "channels": [
+    { "frequency_hz": 462562500, "label": "Ch 1" },
+    { "frequency_hz": 462587500, "label": "Ch 2" }
+  ],
+  "range": { "lo_hz": 462550000, "hi_hz": 462725000, "step_hz": 12500 },
+  "dwell_ms": 150,
+  "hang_ms": 2500,
+  "rssi_gate_dbfs": -75
+}
+```
+
+`dwell_ms` (30–5000, default 150) is how long to settle on a channel before
+deciding; `hang_ms` (0–30000, default 2500) is how long to stay parked after
+the signal drops; `rssi_gate_dbfs` (default −75) is the floor a channel must
+clear to park. At most 4000 channels. A manual `PATCH /radio` frequency
+change cancels the scan. `start` returns `{scanning: true, channels: N}`;
+`stop` leaves RX wherever the scan currently sits. Progress + the parked
+channel are in `RadioStatus.scan`.
 
 ### `POST /api/v1/radio/tx/key`
 

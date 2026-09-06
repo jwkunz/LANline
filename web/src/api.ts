@@ -252,6 +252,25 @@ export class Client {
 
   audioRecordingUrl = () => `${this.base}/api/v1/radio/recording`;
 
+  /** Start / stop a server-side channel scan. `start` takes either an
+   *  explicit `channels` list or a `range` shorthand, plus optional
+   *  `dwell_ms` / `hang_ms` / `rssi_gate_dbfs`. Scan state comes back in
+   *  `RadioStatus.scan`. */
+  scan = (
+    action: "start" | "stop",
+    opts?: {
+      channels?: { frequency_hz: number; label?: string }[];
+      range?: { lo_hz: number; hi_hz: number; step_hz: number };
+      dwell_ms?: number;
+      hang_ms?: number;
+      rssi_gate_dbfs?: number;
+    },
+  ) =>
+    this.request<{ scanning: boolean; channels?: number }>("POST", "/api/v1/radio/scan", {
+      auth: true,
+      body: { action, ...(opts ?? {}) },
+    });
+
   audioOffer = (id: string, sdp: string) =>
     this.request<SdpMessage>("POST", `/api/v1/sessions/${id}/audio/offer`, {
       auth: true,

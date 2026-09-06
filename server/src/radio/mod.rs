@@ -56,6 +56,14 @@ pub struct Telemetry {
     /// Strongest standard CTCSS tone seen on the channel (Hz), whatever is
     /// configured; `None` when none stands out. Narrowband FM only.
     pub ctcss_scan_hz: Option<f32>,
+    /// Channel-scan state (`run_sdr` only). `scan_freq_hz` is the live tuned
+    /// frequency while a scan is running (the config frequency is stale then).
+    pub scanning: bool,
+    pub scan_parked: bool,
+    pub scan_freq_hz: Option<f64>,
+    pub scan_label: Option<String>,
+    pub scan_index: usize,
+    pub scan_total: usize,
     pub overruns: u64,
     pub source: &'static str,
     /// Currently transmitting (push-to-talk keyed). See `PipelineCmd::Key`.
@@ -230,6 +238,62 @@ enum PipelineCmd {
     Key(TxKeySpec),
     /// End the current transmission early (before `TxKeySpec::max_secs`).
     Unkey,
+    /// Start (`Some`) or stop (`None`) a channel scan (`run_sdr` only). A
+    /// manual `Retune` while scanning also stops it.
+    Scan(Option<ScanConfig>),
+}
+
+/// One channel in a scan list.
+#[cfg(feature = "soapy")]
+#[derive(Clone)]
+struct ScanChan {
+    freq_hz: f64,
+    label: String,
+}
+
+/// A running channel scan: sweep `chans`, dwelling `dwell` on each, and park
+/// (let audio flow, stop advancing) on any channel whose squelch opens above
+/// `rssi_gate_dbfs`; resume sweeping `hang` after the signal drops.
+#[cfg(feature = "soapy")]
+#[derive(Clone)]
+struct ScanConfig {
+    chans: Vec<ScanChan>,
+    dwell: Duration,
+    hang: Duration,
+    rssi_gate_dbfs: f32,
+}
+
+/// Live state of an in-progress scan inside `run_sdr`.
+#[cfg(feature = "soapy")]
+struct ScanRun {
+    cfg: ScanConfig,
+    idx: usize,
+    dwell_start: Instant,
+    parked: bool,
+    /// When the parked signal dropped — resume sweeping once `hang` elapses.
+    lost_at: Option<Instant>,
+}
+
+/// Shared LO-retune sequence for a running `run_sdr`: move the hardware,
+/// track the live frequency + LO, and drop discriminator/CTCSS memory so the
+/// step doesn't click.
+#[cfg(feature = "soapy")]
+#[allow(clippy::too_many_arguments)]
+fn sdr_retune(
+    dev: &soapysdr::Device,
+    dir: soapysdr::Direction,
+    ch: usize,
+    sp: &SdrParams,
+    log_set: &dyn Fn(&str, Result<(), soapysdr::Error>),
+    hz: f64,
+    chain: &mut Chain,
+    cur_freq_hz: &mut f64,
+    lo: &mut f64,
+) {
+    *cur_freq_hz = hz;
+    *lo = hz - sp.demod.lo_offset_hz();
+    log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(*lo, sp.freq_correction_ppm), ""));
+    chain.on_retune();
 }
 
 /// Which analog demodulator `run_sdr` builds. `nbfm`/`wbfm` share the FM
@@ -330,6 +394,56 @@ impl RadioManager {
 
     pub fn tx_enabled(&self) -> bool {
         self.enable_tx
+    }
+
+    /// Start a channel scan on the running SDR pipeline. `chans` is
+    /// `(frequency_hz, label)` pairs; the pipeline sweeps them, dwelling
+    /// `dwell_ms` on each, and parks on any whose squelch opens above
+    /// `rssi_gate_dbfs`, resuming `hang_ms` after the signal drops.
+    #[cfg(feature = "soapy")]
+    pub fn scan_start(
+        &self,
+        chans: Vec<(f64, String)>,
+        dwell_ms: u64,
+        hang_ms: u64,
+        rssi_gate_dbfs: f32,
+    ) -> Result<(), &'static str> {
+        if chans.is_empty() {
+            return Err("scan list is empty");
+        }
+        let cfg = ScanConfig {
+            chans: chans
+                .into_iter()
+                .map(|(freq_hz, label)| ScanChan { freq_hz, label })
+                .collect(),
+            dwell: Duration::from_millis(dwell_ms.clamp(30, 5_000)),
+            hang: Duration::from_millis(hang_ms.clamp(0, 30_000)),
+            rssi_gate_dbfs,
+        };
+        let run = self.run.lock().unwrap();
+        let cmd_tx = run.cmd_tx.as_ref().ok_or("radio is not running")?;
+        cmd_tx
+            .send(PipelineCmd::Scan(Some(cfg)))
+            .map_err(|_| "pipeline is not accepting commands")
+    }
+
+    #[cfg(not(feature = "soapy"))]
+    pub fn scan_start(
+        &self,
+        _chans: Vec<(f64, String)>,
+        _dwell_ms: u64,
+        _hang_ms: u64,
+        _rssi_gate_dbfs: f32,
+    ) -> Result<(), &'static str> {
+        Err("built without SDR support")
+    }
+
+    /// Stop a running scan, leaving RX wherever the scan currently sits.
+    pub fn scan_stop(&self) {
+        #[cfg(feature = "soapy")]
+        if let Some(tx) = self.run.lock().unwrap().cmd_tx.as_ref() {
+            let _ = tx.send(PipelineCmd::Scan(None));
+        }
     }
 
     /// Append a "keyed" entry to the transmit audit log.
@@ -1261,19 +1375,47 @@ fn run_sdr(
     let mut acc: Vec<f32> = Vec::with_capacity(fc.frame_samples * 4);
     let mut buf = vec![0u8; OPUS_MAX_FRAME];
     let mut overruns: u64 = 0;
+    let mut scan: Option<ScanRun> = None;
 
     while !stop.load(Ordering::SeqCst) {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 PipelineCmd::Retune(hz) => {
-                    cur_freq_hz = hz;
-                    lo = hz - sp.demod.lo_offset_hz();
-                    log_set(
-                        "frequency",
-                        dev.set_frequency(dir, ch, apply_ppm(lo, sp.freq_correction_ppm), ""),
+                    // A manual tune cancels an in-progress scan.
+                    if scan.take().is_some() {
+                        tracing::info!("{label}: scan cancelled by manual retune");
+                    }
+                    sdr_retune(
+                        &dev, dir, ch, &sp, &log_set, hz, &mut chain, &mut cur_freq_hz, &mut lo,
                     );
-                    chain.on_retune();
                     tracing::info!("{label}: retuned to {:.4} MHz (live)", hz / 1e6);
+                }
+                PipelineCmd::Scan(Some(cfg)) => {
+                    if cfg.chans.is_empty() {
+                        scan = None;
+                    } else {
+                        let first = cfg.chans[0].freq_hz;
+                        sdr_retune(
+                            &dev, dir, ch, &sp, &log_set, first, &mut chain, &mut cur_freq_hz,
+                            &mut lo,
+                        );
+                        tracing::info!("{label}: scan start — {} channels", cfg.chans.len());
+                        scan = Some(ScanRun {
+                            cfg,
+                            idx: 0,
+                            dwell_start: Instant::now(),
+                            parked: false,
+                            lost_at: None,
+                        });
+                    }
+                }
+                PipelineCmd::Scan(None) => {
+                    if scan.take().is_some() {
+                        tracing::info!(
+                            "{label}: scan stopped, holding {:.4} MHz",
+                            cur_freq_hz / 1e6
+                        );
+                    }
                 }
                 PipelineCmd::Gain { agc, overall, elements } => {
                     log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
@@ -1340,6 +1482,53 @@ fn run_sdr(
 
         chain.process(&iq[..n], &mut acc);
 
+        // Channel-scan state machine. `chain.metrics()` is fresh from the
+        // `process` call above.
+        if let Some(sc) = scan.as_mut() {
+            let m = chain.metrics();
+            let open = m.squelch_open && m.rssi_dbfs >= sc.cfg.rssi_gate_dbfs;
+            let now = Instant::now();
+            let n_chans = sc.cfg.chans.len();
+            if sc.parked {
+                if open {
+                    sc.lost_at = None;
+                } else if let Some(t) = sc.lost_at {
+                    if now.duration_since(t) >= sc.cfg.hang {
+                        sc.parked = false;
+                        sc.lost_at = None;
+                        sc.idx = (sc.idx + 1) % n_chans;
+                        let hz = sc.cfg.chans[sc.idx].freq_hz;
+                        sdr_retune(
+                            &dev, dir, ch, &sp, &log_set, hz, &mut chain, &mut cur_freq_hz, &mut lo,
+                        );
+                        sc.dwell_start = now;
+                    }
+                } else {
+                    sc.lost_at = Some(now);
+                }
+            } else if now.duration_since(sc.dwell_start) >= sc.cfg.dwell {
+                // Dwell elapsed (squelch/noise envelope has settled since the
+                // retune) — decide: park on a live channel, else step on.
+                if open {
+                    sc.parked = true;
+                    sc.lost_at = None;
+                    tracing::info!(
+                        "{label}: scan parked on {} ({:.4} MHz, {:.0} dBFS)",
+                        sc.cfg.chans[sc.idx].label,
+                        cur_freq_hz / 1e6,
+                        m.rssi_dbfs
+                    );
+                } else {
+                    sc.idx = (sc.idx + 1) % n_chans;
+                    let hz = sc.cfg.chans[sc.idx].freq_hz;
+                    sdr_retune(
+                        &dev, dir, ch, &sp, &log_set, hz, &mut chain, &mut cur_freq_hz, &mut lo,
+                    );
+                    sc.dwell_start = now;
+                }
+            }
+        }
+
         while acc.len() >= fc.frame_samples {
             let pcm: Vec<f32> = acc.drain(..fc.frame_samples).collect();
             if let Some(w) = wav.as_deref_mut() {
@@ -1361,6 +1550,21 @@ fn run_sdr(
                 t.ctcss_tone_hz = (m.ctcss_tone_hz > 0.0).then_some(m.ctcss_tone_hz);
                 t.ctcss_scan_hz = (m.ctcss_scan_hz > 0.0).then_some(m.ctcss_scan_hz);
                 t.overruns = overruns;
+                if let Some(sc) = scan.as_ref() {
+                    t.scanning = true;
+                    t.scan_parked = sc.parked;
+                    t.scan_freq_hz = Some(cur_freq_hz);
+                    t.scan_label = Some(sc.cfg.chans[sc.idx].label.clone());
+                    t.scan_index = sc.idx;
+                    t.scan_total = sc.cfg.chans.len();
+                } else {
+                    t.scanning = false;
+                    t.scan_parked = false;
+                    t.scan_freq_hz = None;
+                    t.scan_label = None;
+                    t.scan_index = 0;
+                    t.scan_total = 0;
+                }
             }
         }
     }
@@ -1876,8 +2080,8 @@ fn run_apt(
                 }
                 PipelineCmd::Demod(_) => {}
                 // apt has no TX support (and no antenna-sharing concern —
-                // it never transmits); a stray key/unkey is a no-op here.
-                PipelineCmd::Key(_) | PipelineCmd::Unkey => {}
+                // it never transmits); a stray key/unkey/scan is a no-op here.
+                PipelineCmd::Key(_) | PipelineCmd::Unkey | PipelineCmd::Scan(_) => {}
             }
         }
 
@@ -2043,7 +2247,10 @@ fn run_analysis(
                         }
                     }
                 }
-                PipelineCmd::Demod(_) | PipelineCmd::Key(_) | PipelineCmd::Unkey => {}
+                PipelineCmd::Demod(_)
+                | PipelineCmd::Key(_)
+                | PipelineCmd::Unkey
+                | PipelineCmd::Scan(_) => {}
             }
         }
 

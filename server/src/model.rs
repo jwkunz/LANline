@@ -312,6 +312,7 @@ pub struct RadioStatus {
     pub dsp: DspStatus,
     pub audio: AudioStatus,
     pub recording: RecordingStatus,
+    pub scan: ScanStatus,
     pub clients: usize,
     #[serde(with = "time::serde::rfc3339")]
     pub time: OffsetDateTime,
@@ -357,6 +358,19 @@ pub struct AudioRecInfo {
 pub struct RecordingStatus {
     pub active: bool,
     pub last: Option<AudioRecInfo>,
+}
+
+/// `RadioStatus.scan` — channel-scan state. While `active`, `frequency_hz`
+/// is the live tuned frequency (the top-level `RadioStatus.frequency_hz`
+/// reflects the stored config and is stale during a scan).
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct ScanStatus {
+    pub active: bool,
+    pub parked: bool,
+    pub frequency_hz: Option<u64>,
+    pub label: Option<String>,
+    pub index: usize,
+    pub total: usize,
 }
 
 /// One entry in the transmit audit log (`GET /api/v1/radio/tx/log`) — a
