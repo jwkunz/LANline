@@ -332,6 +332,9 @@ pub struct DspStatus {
     /// independent of `ctcss_hz` — for identifying an unknown repeater's
     /// tone. `null` when none stands out. Narrowband FM only.
     pub ctcss_scan_hz: Option<f64>,
+    /// Configured DCS code (octal digits as decimal, e.g. 23 for D023) while
+    /// it is currently decoded on-channel; `null` when DCS is off / unlocked.
+    pub dcs_code: Option<u16>,
     pub sample_overruns: u64,
     pub pipeline_latency_ms: Option<f64>,
     /// Currently transmitting (push-to-talk keyed).

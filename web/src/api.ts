@@ -220,18 +220,29 @@ export class Client {
   /** Push-to-talk: begins a transmission of live mic audio streamed up over
    *  the session's WebRTC connection. Server-side gated behind `--enable-tx`
    *  + `frs`/`ham` mode + a tx-capable device, and auto-unkeys after a hard
-   *  server-side cap regardless of `unkeyTx`. `offsetHz`/`toneHz` key a
-   *  repeater through its input with an encoded CTCSS uplink tone (`ham`). */
-  keyTx = (opts?: { gainDb?: number; offsetHz?: number; toneHz?: number }) => {
-    const body: Record<string, number> = {};
+   *  server-side cap regardless of `unkeyTx`. `offsetHz` + an encoded
+   *  sub-audible uplink (`toneHz` CTCSS *or* `dcsCode`/`dcsInvert` DCS) key a
+   *  repeater through its input (`ham`). */
+  keyTx = (opts?: {
+    gainDb?: number;
+    offsetHz?: number;
+    toneHz?: number;
+    dcsCode?: number;
+    dcsInvert?: boolean;
+  }) => {
+    const body: Record<string, number | boolean> = {};
     if (opts?.gainDb != null) body.gain_db = opts.gainDb;
     if (opts?.offsetHz) body.offset_hz = opts.offsetHz;
     if (opts?.toneHz) body.tone_hz = opts.toneHz;
+    if (opts?.dcsCode) body.dcs_code = opts.dcsCode;
+    if (opts?.dcsInvert) body.dcs_invert = true;
     return this.request<{
       keyed: boolean;
       gain_db: number;
       offset_hz?: number;
       tone_hz?: number;
+      dcs_code?: number;
+      dcs_invert?: boolean;
     }>("POST", "/api/v1/radio/tx/key", { auth: true, body });
   };
 

@@ -39,6 +39,7 @@ import {
 import { FRS_CHANNELS, FRS_DEFAULT_FREQ_HZ, frsChannelAt, stepFrsChannel } from "./frs";
 import {
   CTCSS_TONES,
+  DCS_CODES,
   HAM_BANDS,
   HAM_DEFAULT_BAND,
   conventionalOffsetHz,
@@ -986,17 +987,30 @@ async function pttDown(): Promise<void> {
   // waiting on the key round-trip.
   micStream?.getAudioTracks().forEach((t) => (t.enabled = true));
   try {
+    // ham TX: a selected repeater's split + uplink tone wins; otherwise
+    // encode whatever sub-audible squelch the wizard has configured.
+    const isHam = state.radio?.mode === "ham";
     const rp =
-      state.radio?.mode === "ham" &&
-      state.activeRepeater?.output_hz === state.radio.frequency_hz
+      isHam && state.activeRepeater?.output_hz === state.radio!.frequency_hz
         ? state.activeRepeater
         : null;
-    const r = await state.client.keyTx(
-      rp ? { offsetHz: rp.offset_hz, toneHz: rp.tone_hz } : undefined,
-    );
+    const mp = state.radio?.mode_params ?? {};
+    let keyOpts: Parameters<typeof state.client.keyTx>[0];
+    if (rp) {
+      keyOpts = { offsetHz: rp.offset_hz, toneHz: rp.tone_hz };
+    } else if (isHam && Number(mp.ctcss_hz ?? 0) > 0) {
+      keyOpts = { toneHz: Number(mp.ctcss_hz) };
+    } else if (isHam && Number(mp.dcs_code ?? 0) > 0) {
+      keyOpts = { dcsCode: Number(mp.dcs_code), dcsInvert: Number(mp.dcs_invert ?? 0) !== 0 };
+    }
+    const r = await state.client.keyTx(keyOpts);
     const via = r.offset_hz
       ? ` via repeater (${offsetLabel(r.offset_hz)}${r.tone_hz ? `, ${r.tone_hz.toFixed(1)} Hz` : ""})`
-      : "";
+      : r.tone_hz
+        ? ` · CTCSS ${Number(r.tone_hz).toFixed(1)} Hz`
+        : r.dcs_code
+          ? ` · DCS D${String(r.dcs_code).padStart(3, "0")}${r.dcs_invert ? "I" : "N"}`
+          : "";
     logLine(
       micStream
         ? `PTT keyed — mic live, ${r.gain_db} dB${via}`
@@ -1258,7 +1272,7 @@ function structKey(): string {
     state.radio?.mode === "ham"
       ? `${hamBandContaining(state.radio.frequency_hz)?.id ?? state.hamBand}:${
           Number(state.radio.mode_params.ctcss_hz ?? 0) > 0
-        }:${state.hamView}:${state.rpAddOpen}:${state.repeaters.length}`
+        }:${Number(state.radio.mode_params.dcs_code ?? 0) > 0}:${state.hamView}:${state.rpAddOpen}:${state.repeaters.length}`
       : "",
     state.switching,
     state.seeking,
@@ -1391,9 +1405,16 @@ function patchLive(): void {
     });
     const det = q("#ham-ctcss-det");
     if (det) {
-      const d = state.status?.dsp.ctcss_tone_hz;
-      det.textContent = d != null ? `detected ${d.toFixed(1)} Hz ✓` : "not detected";
-      det.classList.toggle("ok", d != null);
+      const tone = state.status?.dsp.ctcss_tone_hz;
+      const dcs = state.status?.dsp.dcs_code;
+      const cfgDcs = Number(state.radio.mode_params.dcs_code ?? 0);
+      const on = cfgDcs > 0 ? dcs != null : tone != null;
+      det.textContent = on
+        ? cfgDcs > 0
+          ? `decoded D${String(dcs).padStart(3, "0")} ✓`
+          : `detected ${tone!.toFixed(1)} Hz ✓`
+        : "not detected";
+      det.classList.toggle("ok", on);
     }
     const scanEl = q("#ham-scan");
     const useBtn = q<HTMLButtonElement>("#ham-ctcss-use");
@@ -1461,7 +1482,7 @@ function installDelegates(): void {
       const hz = (t.closest<HTMLElement>("#ham-ctcss-use")?.dataset.hz ?? "").trim();
       if (sel && hz) {
         sel.value = hz;
-        void applyHamCtcss();
+        void applyHamSquelch("ctcss");
       }
       return;
     }
@@ -1509,7 +1530,9 @@ function installDelegates(): void {
   panels.addEventListener("change", (e) => {
     const el = e.target as HTMLElement;
     if (el.id === "audio-mute") toggleMute();
-    if (el.id === "ham-ctcss" || el.id === "ham-ctcss-mon") void applyHamCtcss();
+    if (el.id === "ham-ctcss") void applyHamSquelch("ctcss");
+    if (el.id === "ham-dcs") void applyHamSquelch("dcs");
+    if (el.id === "ham-dcs-inv" || el.id === "ham-ctcss-mon") void applyHamSquelch();
     if (el.id === "scope-range") {
       const v = (el as HTMLSelectElement).value;
       setState({ scopeRangeNm: v === "auto" ? "auto" : Number(v) });
@@ -1890,12 +1913,20 @@ function hamWizardHtml(): string {
     offKHz >= 1000 ? `${(offKHz / 1000).toFixed(offKHz % 1000 ? 1 : 0)} MHz` : `${offKHz} kHz`;
 
   const cfgTone = Number(r.mode_params.ctcss_hz ?? 0);
+  const cfgDcs = Number(r.mode_params.dcs_code ?? 0);
+  const cfgDcsInv = Number(r.mode_params.dcs_invert ?? 0) !== 0;
   const toneMonitor = Number(r.mode_params.ctcss_squelch ?? 1) === 0;
   const toneOpts = [
-    `<option value="0"${cfgTone === 0 ? " selected" : ""}>Off — carrier squelch</option>`,
+    `<option value="0"${cfgTone === 0 ? " selected" : ""}>CTCSS off</option>`,
     ...CTCSS_TONES.map(
       (t) =>
         `<option value="${t}"${Math.abs(t - cfgTone) < 0.05 ? " selected" : ""}>${t.toFixed(1)} Hz</option>`,
+    ),
+  ].join("");
+  const dcsOpts = [
+    `<option value="0"${cfgDcs === 0 ? " selected" : ""}>DCS off</option>`,
+    ...DCS_CODES.map(
+      (c) => `<option value="${c}"${c === cfgDcs ? " selected" : ""}>D${String(c).padStart(3, "0")}</option>`,
     ),
   ].join("");
 
@@ -1937,21 +1968,26 @@ function hamWizardHtml(): string {
       <p class="note" style="margin:8px 0 0">${(band.loHz / 1e6).toFixed(0)}–${(band.hiHz / 1e6).toFixed(0)} MHz ·
       5 kHz steps · ${seg ? esc(seg.use) : "out of the band plan"}.</p>
 
-      <h3 class="ham-sub">Tone squelch (CTCSS)</h3>
+      <h3 class="ham-sub">Sub-audible squelch</h3>
       <div class="ham-ctcss">
         <select id="ham-ctcss">${toneOpts}</select>
-        <label class="ham-ck"><input type="checkbox" id="ham-ctcss-mon"${toneMonitor ? " checked" : ""} /> monitor only</label>
+        <select id="ham-dcs">${dcsOpts}</select>
+        <label class="ham-ck"><input type="checkbox" id="ham-dcs-inv"${cfgDcsInv ? " checked" : ""} /> DCS inv</label>
+        <label class="ham-ck"><input type="checkbox" id="ham-ctcss-mon"${toneMonitor ? " checked" : ""} /> monitor</label>
       </div>
       <p class="note" style="margin:6px 0 0">
-        On air: <span id="ham-scan">—</span>
+        CTCSS on air: <span id="ham-scan">—</span>
         <button id="ham-ctcss-use" class="secondary" hidden>use it</button>
       </p>
       <p class="note" style="margin:4px 0 0">
         ${
           cfgTone > 0
-            ? `Requiring <strong>${cfgTone.toFixed(1)} Hz</strong>${toneMonitor ? " (detect only — audio not muted)" : ""} —
-               <span id="ham-ctcss-det">…</span>. Single-tone presence check, not a full decoder.`
-            : "Set the sub-audible tone a repeater requires (its “PL”/CTCSS) to hear only traffic carrying it."
+            ? `Requiring CTCSS <strong>${cfgTone.toFixed(1)} Hz</strong>${toneMonitor ? " (monitor)" : ""} —
+               <span id="ham-ctcss-det">…</span>.`
+            : cfgDcs > 0
+              ? `Requiring DCS <strong>D${String(cfgDcs).padStart(3, "0")}${cfgDcsInv ? "I" : "N"}</strong>${toneMonitor ? " (monitor)" : ""} —
+                 <span id="ham-ctcss-det">…</span>. If it never locks on-air, toggle <em>DCS inv</em>.`
+              : "Pick the CTCSS tone or DCS code a repeater needs to hear only its traffic. CTCSS and DCS are mutually exclusive."
         }
       </p>
 
@@ -2142,22 +2178,47 @@ function deleteManualRepeater(id: string): void {
   void rebuildRepeaterList();
 }
 
-async function applyHamCtcss(): Promise<void> {
+/** Apply the ham sub-audible squelch controls (CTCSS tone / DCS code / invert
+ *  / monitor). CTCSS and DCS are mutually exclusive — the last one changed
+ *  wins, and the other's <select> is reset in the DOM. */
+async function applyHamSquelch(changed?: "ctcss" | "dcs"): Promise<void> {
   if (!state.client || !state.radio) return;
-  const sel = panels.querySelector<HTMLSelectElement>("#ham-ctcss");
-  const mon = panels.querySelector<HTMLInputElement>("#ham-ctcss-mon");
-  const ctcss_hz = sel ? Number(sel.value) : 0;
-  const ctcss_squelch = mon?.checked ? 0 : 1;
+  const g = <T extends HTMLElement>(id: string) => panels.querySelector<T>(id);
+  const ctcssSel = g<HTMLSelectElement>("#ham-ctcss");
+  const dcsSel = g<HTMLSelectElement>("#ham-dcs");
+  let ctcss_hz = ctcssSel ? Number(ctcssSel.value) : 0;
+  let dcs_code = dcsSel ? Number(dcsSel.value) : 0;
+  if (changed === "ctcss" && ctcss_hz > 0) {
+    dcs_code = 0;
+    if (dcsSel) dcsSel.value = "0";
+  } else if (changed === "dcs" && dcs_code > 0) {
+    ctcss_hz = 0;
+    if (ctcssSel) ctcssSel.value = "0";
+  } else if (ctcss_hz > 0) {
+    dcs_code = 0;
+  }
+  const dcs_invert = g<HTMLInputElement>("#ham-dcs-inv")?.checked ? 1 : 0;
+  const monitor = g<HTMLInputElement>("#ham-ctcss-mon")?.checked ? 0 : 1;
   try {
-    const radio = await state.client.patchRadio({ mode_params: { ctcss_hz, ctcss_squelch } });
+    const radio = await state.client.patchRadio({
+      mode_params: {
+        ctcss_hz,
+        ctcss_squelch: monitor,
+        dcs_code,
+        dcs_invert,
+        dcs_squelch: monitor,
+      },
+    });
     setState({ radio });
     logLine(
       ctcss_hz > 0
-        ? `CTCSS ${ctcss_hz.toFixed(1)} Hz${ctcss_squelch ? "" : " · monitor"}`
-        : "CTCSS off",
+        ? `CTCSS ${ctcss_hz.toFixed(1)} Hz${monitor ? "" : " · monitor"}`
+        : dcs_code > 0
+          ? `DCS D${String(dcs_code).padStart(3, "0")}${dcs_invert ? "I" : "N"}${monitor ? "" : " · monitor"}`
+          : "sub-audible squelch off",
     );
   } catch (e) {
-    logLine(`CTCSS set failed — ${(e as ApiError).message}`);
+    logLine(`squelch set failed — ${(e as ApiError).message}`);
   }
 }
 
@@ -2724,7 +2785,12 @@ function nowPlayingInner(): string {
               "Tone",
               `${Number(r.mode_params.ctcss_hz).toFixed(1)} Hz ${st?.dsp.ctcss_tone_hz != null ? "✓" : "…"}`,
             )
-          : ""
+          : r.mode === "ham" && Number(r.mode_params.dcs_code ?? 0) > 0
+            ? kv(
+                "DCS",
+                `D${String(Number(r.mode_params.dcs_code)).padStart(3, "0")}${Number(r.mode_params.dcs_invert ?? 0) ? "I" : "N"} ${st?.dsp.dcs_code != null ? "✓" : "…"}`,
+              )
+            : ""
       }
       ${kv("Audio", `${r.audio.sample_rate_hz / 1000} kHz · ${r.audio.channels === 1 ? "mono" : `${r.audio.channels}ch`} · ${r.audio.opus_bitrate_bps / 1000} kbps`)}
     </div>
@@ -2769,10 +2835,16 @@ function pttInner(st: RadioStatus | null): string {
       ? state.activeRepeater
       : null;
   const txHz = rp ? rp.output_hz + rp.offset_hz : r.frequency_hz;
+  const mp = r.mode_params ?? {};
+  const encTone = rp?.tone_hz || Number(mp.ctcss_hz ?? 0);
+  const encDcs = !rp && Number(mp.ctcss_hz ?? 0) === 0 ? Number(mp.dcs_code ?? 0) : 0;
   const txLine =
     r.mode === "ham"
       ? `TX ${(txHz / 1e6).toFixed(4)} MHz${rp && rp.offset_hz ? ` (repeater input, ${offsetLabel(rp.offset_hz)})` : " (simplex)"}` +
-        (rp && rp.tone_hz ? ` · encoding ${rp.tone_hz.toFixed(1)} Hz` : "")
+        (encTone ? ` · encoding CTCSS ${encTone.toFixed(1)} Hz` : "") +
+        (encDcs
+          ? ` · encoding DCS D${String(encDcs).padStart(3, "0")}${Number(mp.dcs_invert ?? 0) ? "I" : "N"}`
+          : "")
       : null;
   return `
     <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--line)">

@@ -114,6 +114,14 @@ pub fn modes() -> Vec<ModeInfo> {
                 // detects + reports the tone without gating ("monitor").
                 ("ctcss_hz", num(0.0, 0.0, 260.0, "Hz")),
                 ("ctcss_squelch", num_enum(1.0, &[0.0, 1.0], "bool")),
+                // DCS (Digital Coded Squelch) — the digital alternative to
+                // CTCSS. `dcs_code` is the 3 octal digits written in decimal
+                // (23 = D023, 754 = D754), 0 = off; `dcs_invert` selects the
+                // "I" codes; `dcs_squelch` 0 = monitor. Mutually exclusive
+                // with `ctcss_hz` (a tone wins).
+                ("dcs_code", num(0.0, 0.0, 777.0, "octal")),
+                ("dcs_invert", num_enum(0.0, &[0.0, 1.0], "bool")),
+                ("dcs_squelch", num_enum(1.0, &[0.0, 1.0], "bool")),
             ]),
         },
         ModeInfo {

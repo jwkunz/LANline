@@ -56,6 +56,9 @@ pub struct Telemetry {
     /// Strongest standard CTCSS tone seen on the channel (Hz), whatever is
     /// configured; `None` when none stands out. Narrowband FM only.
     pub ctcss_scan_hz: Option<f32>,
+    /// Configured DCS code (octal-as-decimal) while currently decoded on the
+    /// channel; `None` when DCS is off or not locked.
+    pub dcs_code: Option<u16>,
     /// Channel-scan state (`run_sdr` only). `scan_freq_hz` is the live tuned
     /// frequency while a scan is running (the config frequency is stale then).
     pub scanning: bool,
@@ -76,6 +79,21 @@ pub struct Telemetry {
 #[cfg(feature = "soapy")]
 const MAX_TX_SECS: f64 = 10.0;
 
+/// What the API layer hands `RadioManager::key` for one push-to-talk.
+#[derive(Clone, Copy, Default)]
+pub struct KeyRequest {
+    pub gain_db: f64,
+    pub deviation_hz: f64,
+    pub mic_gain: f64,
+    /// Repeater split from the current RX frequency, Hz (0 = simplex).
+    pub offset_hz: f64,
+    /// CTCSS uplink tone, Hz (0 = none) — mutually exclusive with `dcs_code`.
+    pub tone_hz: f64,
+    /// DCS uplink code (octal digits as decimal, 0 = none) + polarity.
+    pub dcs_code: u16,
+    pub dcs_invert: bool,
+}
+
 /// One push-to-talk transmission: live mic audio (see `TxAudioSource`),
 /// frequency-modulated via `TxModulator`. `gain_db` is a single overall TX
 /// gain (HackRF's TX chain has VGA + AMP elements; SoapySDR's aggregate
@@ -95,6 +113,10 @@ struct TxKeySpec {
     /// CTCSS uplink tone to encode onto the transmission, Hz (0 = none) —
     /// what a repeater needs to hear to key up.
     tone_hz: f64,
+    /// DCS uplink code (octal digits as decimal, 0 = none) + polarity — the
+    /// digital-squelch alternative to `tone_hz`.
+    dcs_code: u16,
+    dcs_invert: bool,
 }
 
 /// Bridges live mic audio from the (async, tokio) WebRTC receive task to the
@@ -484,14 +506,7 @@ impl RadioManager {
     /// the caller (the API handler) is responsible for checking that before
     /// calling this.
     #[cfg(feature = "soapy")]
-    pub fn key(
-        &self,
-        gain_db: f64,
-        deviation_hz: f64,
-        mic_gain: f64,
-        offset_hz: f64,
-        tone_hz: f64,
-    ) -> Result<(), &'static str> {
+    pub fn key(&self, req: KeyRequest) -> Result<(), &'static str> {
         if !self.enable_tx {
             return Err("transmit is disabled on this server — see --enable-tx");
         }
@@ -500,25 +515,20 @@ impl RadioManager {
         let cmd_tx = run.cmd_tx.as_ref().ok_or("radio is not running")?;
         cmd_tx
             .send(PipelineCmd::Key(TxKeySpec {
-                deviation_hz,
-                mic_gain,
-                gain_db,
+                deviation_hz: req.deviation_hz,
+                mic_gain: req.mic_gain,
+                gain_db: req.gain_db,
                 max_secs: MAX_TX_SECS,
-                offset_hz,
-                tone_hz,
+                offset_hz: req.offset_hz,
+                tone_hz: req.tone_hz,
+                dcs_code: req.dcs_code,
+                dcs_invert: req.dcs_invert,
             }))
             .map_err(|_| "pipeline is not accepting commands")
     }
 
     #[cfg(not(feature = "soapy"))]
-    pub fn key(
-        &self,
-        _gain_db: f64,
-        _deviation_hz: f64,
-        _mic_gain: f64,
-        _offset_hz: f64,
-        _tone_hz: f64,
-    ) -> Result<(), &'static str> {
+    pub fn key(&self, _req: KeyRequest) -> Result<(), &'static str> {
         Err("built without SDR support")
     }
 
@@ -751,6 +761,9 @@ fn fm_params(cfg: &RadioConfig) -> dsp::FmParams {
         ctcss_hz: p("ctcss_hz", 0.0),
         // `ctcss_squelch` 0 = monitor only (detect + report, don't gate).
         ctcss_squelch: p("ctcss_squelch", 1.0) != 0.0,
+        dcs_code: p("dcs_code", 0.0).max(0.0) as u16,
+        dcs_invert: p("dcs_invert", 0.0) != 0.0,
+        dcs_squelch: p("dcs_squelch", 1.0) != 0.0,
     }
 }
 
@@ -1549,6 +1562,7 @@ fn run_sdr(
                 t.squelch_open = m.squelch_open;
                 t.ctcss_tone_hz = (m.ctcss_tone_hz > 0.0).then_some(m.ctcss_tone_hz);
                 t.ctcss_scan_hz = (m.ctcss_scan_hz > 0.0).then_some(m.ctcss_scan_hz);
+                t.dcs_code = (m.dcs_code > 0).then_some(m.dcs_code);
                 t.overruns = overruns;
                 if let Some(sc) = scan.as_ref() {
                     t.scanning = true;
@@ -1607,14 +1621,21 @@ fn key_tx(
 
     let _ = rx_stream.deactivate(None);
     telemetry.lock().unwrap().tx_keyed = true;
+    let sub_audible: String = if spec.tone_hz > 0.0 {
+        format!("CTCSS {:.1} Hz", spec.tone_hz)
+    } else if spec.dcs_code > 0 {
+        format!("DCS D{:03}{}", spec.dcs_code, if spec.dcs_invert { "I" } else { "N" })
+    } else {
+        "off".into()
+    };
     tracing::info!(
         "{label}: TX key — {:.4} MHz ({:+.0} kHz offset), {:.0} Hz deviation, \
-         {:.1} dB gain, CTCSS {}, max {:.0}s",
+         {:.1} dB gain, sub-audible {}, max {:.0}s",
         tx_freq_hz / 1e6,
         spec.offset_hz / 1e3,
         spec.deviation_hz,
-        if spec.tone_hz > 0.0 { format!("{:.1} Hz", spec.tone_hz) } else { "off".into() },
         spec.gain_db,
+        sub_audible,
         spec.max_secs
     );
 
@@ -1629,7 +1650,15 @@ fn key_tx(
         let mut txs = dev.tx_stream::<Complex32>(&[ch])?;
         txs.activate(None)?;
 
-        let mut modulator = TxModulator::new(sp.device_rate, spec.deviation_hz, spec.tone_hz);
+        let mut modulator = TxModulator::new(
+            sp.device_rate,
+            spec.deviation_hz,
+            dsp::SubAudibleTx {
+                ctcss_hz: spec.tone_hz,
+                dcs_code: spec.dcs_code,
+                dcs_invert: spec.dcs_invert,
+            },
+        );
         // 20ms @ 48kHz — matches the Opus frame size used elsewhere in this
         // app, though nothing here actually depends on that; it's just a
         // reasonable poll granularity for pulling from `audio_in`.

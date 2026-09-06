@@ -43,6 +43,16 @@ pub struct FmParams {
     /// `false`, the tone is still detected and reported but never withholds
     /// audio ("monitor" mode).
     pub ctcss_squelch: bool,
+    /// DCS (Digital Coded Squelch) code, as its octal digits written in
+    /// decimal — `23` for D023, `754` for D754. `0` = disabled. Mutually
+    /// exclusive with `ctcss_hz` (the last one set wins in the UI).
+    pub dcs_code: u16,
+    /// The "inverted" DCS codes (radios show them as `D023I` etc.) —
+    /// complements the received/transmitted 23-bit stream.
+    pub dcs_invert: bool,
+    /// When `true` and `dcs_code > 0`, the code gates the squelch; `false`
+    /// decodes and reports it without withholding audio.
+    pub dcs_squelch: bool,
 }
 
 impl Default for FmParams {
@@ -57,6 +67,9 @@ impl Default for FmParams {
             lo_offset_hz: 250_000.0,
             ctcss_hz: 0.0,
             ctcss_squelch: true,
+            dcs_code: 0,
+            dcs_invert: false,
+            dcs_squelch: true,
         }
     }
 }
@@ -82,6 +95,9 @@ pub struct ChainMetrics {
     /// channel (Hz), regardless of what's configured — `0.0` if none stands
     /// out. Lets the client identify an unknown repeater's tone.
     pub ctcss_scan_hz: f32,
+    /// The configured DCS code (octal-as-decimal) while it is currently
+    /// decoded on-channel, else `0`.
+    pub dcs_code: u16,
 }
 
 pub struct FmChain {
@@ -103,6 +119,8 @@ pub struct FmChain {
     ctcss_gates: bool,
     tone_hp: Option<Biquad>,
     ctcss_scan: Option<CtcssScanner>,
+    dcs: Option<DcsDecoder>,
+    dcs_gates: bool,
     metrics: ChainMetrics,
     resamp: LinearResampler,
     scratch_iq: Vec<Complex32>,
@@ -148,8 +166,11 @@ impl FmChain {
         // itself isn't a low rumble under the voice.
         let ctcss = (p.ctcss_hz >= 60.0 && p.ctcss_hz <= 260.0)
             .then(|| CtcssDetector::new(channel_rate, p.ctcss_hz));
-        let tone_hp = ctcss
-            .is_some()
+        let dcs = (p.dcs_code > 0)
+            .then(|| DcsDecoder::new(channel_rate, p.dcs_code, p.dcs_invert));
+        // Strip the sub-audible band from the recovered audio whenever a
+        // CTCSS tone *or* a DCS data stream is expected under the voice.
+        let tone_hp = (ctcss.is_some() || dcs.is_some())
             .then(|| Biquad::highpass(channel_rate, 300.0, 0.707));
         // Always-on tone identifier for narrowband voice channels (skip
         // broadcast FM — no sub-audible tones there, and it'd be wasted work).
@@ -175,6 +196,8 @@ impl FmChain {
             ctcss_gates: p.ctcss_squelch,
             tone_hp,
             ctcss_scan,
+            dcs,
+            dcs_gates: p.dcs_squelch,
             metrics: ChainMetrics::default(),
             resamp: LinearResampler::new(channel_rate, AUDIO_RATE),
             scratch_iq: Vec::new(),
@@ -201,6 +224,9 @@ impl FmChain {
         if let Some(s) = &mut self.ctcss_scan {
             s.reset();
         }
+        if let Some(d) = &mut self.dcs {
+            d.reset();
+        }
     }
 
     /// Consume a block of device-rate IQ, append 48 kHz mono audio to `out`.
@@ -219,12 +245,14 @@ impl FmChain {
         let power: f32 =
             chan.iter().map(|c| c.norm_sqr()).sum::<f32>() / chan.len() as f32;
         let rssi_dbfs = 10.0 * (power + 1e-12).log10();
-        // The CTCSS lock (updated in the sample loop below) reflects up to the
-        // previous block, exactly like `noise_env` — consistent gating.
-        let tone_locked = self.ctcss.as_ref().map(|d| d.locked);
-        let tone_ok = !self.ctcss_gates || tone_locked.unwrap_or(true);
-        let open =
-            rssi_dbfs >= self.squelch_thresh_dbfs && self.noise_env < self.noise_gate && tone_ok;
+        // The CTCSS/DCS lock (updated in the sample loop below) reflects up to
+        // the previous block, exactly like `noise_env` — consistent gating.
+        let tone_ok = !self.ctcss_gates || self.ctcss.as_ref().map(|d| d.locked).unwrap_or(true);
+        let dcs_ok = !self.dcs_gates || self.dcs.as_ref().map(|d| d.locked).unwrap_or(true);
+        let open = rssi_dbfs >= self.squelch_thresh_dbfs
+            && self.noise_env < self.noise_gate
+            && tone_ok
+            && dcs_ok;
         let target = if open { 1.0 } else { 0.0 };
         // ~5 ms audio ramp, ~10 ms noise envelope
         let ramp = (1.0 / (0.005 * self.channel_rate as f32)).min(1.0);
@@ -245,6 +273,9 @@ impl FmChain {
             }
             if let Some(s) = &mut self.ctcss_scan {
                 s.process(raw);
+            }
+            if let Some(d) = &mut self.dcs {
+                d.process(raw);
             }
 
             let mut a = raw * self.disc_gain;
@@ -279,6 +310,10 @@ impl FmChain {
                 _ => 0.0,
             },
             ctcss_scan_hz: self.ctcss_scan.as_ref().map_or(0.0, |s| s.best_hz),
+            dcs_code: match &self.dcs {
+                Some(d) if d.locked => d.code,
+                _ => 0,
+            },
         };
     }
 }
@@ -616,7 +651,163 @@ impl AmChain {
             audio_dbfs: 20.0 * (peak + 1e-6).log10(),
             ctcss_tone_hz: 0.0, // AM: not applicable
             ctcss_scan_hz: 0.0,
+            dcs_code: 0,
         };
+    }
+}
+
+// --- DCS (Digital Coded Squelch) ---------------------------------------
+
+/// Golay(23,12,7) systematic encode, feedback taps `0x475` (the low 11 bits
+/// of the `0xC75` generator). Returns `[data:11..0][parity:22..12]` — data
+/// in the low bits so bit 0 is the first bit on the air (DCS is LSB-first).
+fn golay23_encode(data12: u16) -> u32 {
+    let d = (data12 as u32) & 0xFFF;
+    let mut rem: u32 = 0;
+    for i in (0..12).rev() {
+        let fb = ((d >> i) & 1) ^ ((rem >> 10) & 1);
+        rem = (rem << 1) & 0x7FF;
+        if fb != 0 {
+            rem ^= 0x475;
+        }
+    }
+    d | (rem << 12)
+}
+
+/// The 23-bit DCS air word for an octal code written in decimal (`23` →
+/// D023). Layout: 9 code bits (LSB = octal LSB) + fixed `100` = 12-bit data,
+/// then 11 Golay parity bits; LSB-first. `invert` complements it (the `I`
+/// codes).
+fn dcs_codeword(octal_decimal: u16, invert: bool) -> u32 {
+    let d = octal_decimal;
+    let code9 = ((d / 100 % 10) & 7) * 64 + ((d / 10 % 10) & 7) * 8 + ((d % 10) & 7);
+    let data12 = (code9 & 0x1FF) | (1 << 9); // fixed `100` (bit 10 of 1..12)
+    let w = golay23_encode(data12);
+    if invert {
+        !w & 0x7F_FFFF
+    } else {
+        w
+    }
+}
+
+/// The 23 cyclic left-rotations of a 23-bit word — DCS repeats continuously,
+/// so a received frame can align at any bit phase.
+fn dcs_rotations(w: u32) -> [u32; 23] {
+    let mut out = [0u32; 23];
+    let mut r = w & 0x7F_FFFF;
+    for slot in out.iter_mut() {
+        *slot = r;
+        r = ((r << 1) | (r >> 22)) & 0x7F_FFFF;
+    }
+    out
+}
+
+/// DCS decoder: isolate the sub-audible band, recover the 134.4 bps bit
+/// clock (sample at mid-bit, resync phase on every data transition), and
+/// slide a 23-bit window against the configured codeword (both polarities,
+/// all 23 rotations, ≤3 bit errors). A per-bit score with hysteresis turns a
+/// run of matching bits into a `locked` flag (~0.2 s to make/break). It only
+/// confirms *this* code — enough to gate squelch on a known repeater's DCS.
+struct DcsDecoder {
+    code: u16,
+    aa: Biquad,
+    dec: usize,
+    cnt: usize,
+    lp: Biquad,
+    dc: f32,
+    dc_k: f32,
+    sps: f32,
+    phase: f32,
+    last_sign: i8,
+    rx: u32,
+    targets: Vec<u32>, // rotations of both polarities
+    score: f32,
+    locked: bool,
+}
+
+impl DcsDecoder {
+    fn new(channel_rate: f64, octal_decimal: u16, invert: bool) -> Self {
+        let dec = (channel_rate / 2_400.0).round().max(1.0) as usize;
+        let det_rate = channel_rate / dec as f64;
+        let base = dcs_codeword(octal_decimal, invert);
+        let mut targets = Vec::with_capacity(46);
+        targets.extend_from_slice(&dcs_rotations(base));
+        targets.extend_from_slice(&dcs_rotations(!base & 0x7F_FFFF));
+        Self {
+            code: octal_decimal,
+            aa: Biquad::lowpass(channel_rate, 300.0, 0.707),
+            dec,
+            cnt: 0,
+            lp: Biquad::lowpass(det_rate, 240.0, 0.707),
+            dc: 0.0,
+            dc_k: (1.0 / (0.30 * det_rate)) as f32, // ~0.5 Hz DC tracker
+            sps: (det_rate / 134.4) as f32,
+            phase: (det_rate / 134.4) as f32,
+            last_sign: 0,
+            rx: 0,
+            targets,
+            score: 0.0,
+            locked: false,
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, raw: f32) {
+        let s = self.aa.process(raw);
+        self.cnt += 1;
+        if self.cnt < self.dec {
+            return;
+        }
+        self.cnt = 0;
+
+        self.dc += (s - self.dc) * self.dc_k;
+        let v = self.lp.process(s - self.dc);
+        let sign: i8 = if v >= 0.0 { 1 } else { -1 };
+
+        // Resync the bit clock to a data transition: next sample half a bit
+        // after the edge (mid-bit).
+        if sign != self.last_sign && self.last_sign != 0 {
+            self.phase = self.sps * 0.5;
+        }
+        self.last_sign = sign;
+
+        self.phase -= 1.0;
+        if self.phase > 0.0 {
+            return;
+        }
+        self.phase += self.sps;
+
+        let bit = (v >= 0.0) as u32;
+        self.rx = ((self.rx << 1) | bit) & 0x7F_FFFF;
+
+        let best = self
+            .targets
+            .iter()
+            .map(|t| (self.rx ^ t).count_ones())
+            .min()
+            .unwrap_or(23);
+        // A matching bit forms a valid rotated codeword; noise almost never
+        // does. Ramp up over ~25 matches, down over ~8 misses.
+        if best <= 3 {
+            self.score = (self.score + 0.04).min(1.0);
+        } else {
+            self.score = (self.score - 0.125).max(0.0);
+        }
+        if self.score > 0.75 {
+            self.locked = true;
+        } else if self.score < 0.35 {
+            self.locked = false;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.cnt = 0;
+        self.phase = self.sps;
+        self.last_sign = 0;
+        self.rx = 0;
+        self.dc = 0.0;
+        self.score = 0.0;
+        self.locked = false;
     }
 }
 
@@ -863,55 +1054,102 @@ impl LinearResampler {
 /// (no click at the seam between one audio chunk and the next). `run_sdr`'s
 /// TX-key path retunes the device's own LO to the target RF frequency
 /// directly rather than digitally offsetting, hence baseband here.
+/// The sub-audible squelch signalling to encode onto a transmission. CTCSS
+/// (a single tone) and DCS (a 134.4 bps data stream) are mutually exclusive.
+#[derive(Clone, Copy, Default)]
+pub struct SubAudibleTx {
+    /// CTCSS tone (Hz), 0 = none.
+    pub ctcss_hz: f64,
+    /// DCS code (octal digits as decimal), 0 = none.
+    pub dcs_code: u16,
+    pub dcs_invert: bool,
+}
+
 pub struct TxModulator {
     resamp: LinearResampler,
     phase: f64,
     device_rate: f64,
     deviation_hz: f64,
     /// CTCSS uplink tone (Hz), 0 = none. Summed onto the voice at a fixed
-    /// fraction of full deviation (`CTCSS_TX_DEV_FRAC`), with the voice scaled
+    /// fraction of full deviation (`SUB_TX_DEV_FRAC`), with the voice scaled
     /// down by the same fraction so peak deviation still can't exceed
     /// `deviation_hz`.
     tone_hz: f64,
     tone_phase: f64,
+    /// DCS 23-bit air word (0 = no DCS), looped LSB-first at 134.4 bps with a
+    /// slewed level so the emission stays band-limited.
+    dcs_word: u32,
+    dcs_bit: usize,
+    dcs_samp_ctr: f64,
+    dcs_samp_per_bit: f64,
+    dcs_level: f32,
+    dcs_target: f32,
+    dcs_slew: f32,
     scratch: Vec<f32>,
 }
 
-/// Sub-audible tone deviation as a fraction of the voice's peak deviation —
-/// ~0.75 kHz of a 5 kHz system, the usual amateur figure.
-const CTCSS_TX_DEV_FRAC: f32 = 0.15;
+/// Sub-audible signalling deviation as a fraction of the voice's peak
+/// deviation — ~0.75 kHz of a 5 kHz system, the usual amateur figure.
+const SUB_TX_DEV_FRAC: f32 = 0.15;
+/// DCS bit rate (bits/s).
+const DCS_BPS: f64 = 134.4;
 
 impl TxModulator {
-    pub fn new(device_rate: f64, deviation_hz: f64, tone_hz: f64) -> Self {
+    pub fn new(device_rate: f64, deviation_hz: f64, sub: SubAudibleTx) -> Self {
+        let dcs_word = if sub.dcs_code > 0 {
+            dcs_codeword(sub.dcs_code, sub.dcs_invert)
+        } else {
+            0
+        };
         Self {
             resamp: LinearResampler::new(48_000.0, device_rate),
             phase: 0.0,
             device_rate,
             deviation_hz,
-            tone_hz: if (60.0..=260.0).contains(&tone_hz) { tone_hz } else { 0.0 },
+            tone_hz: if (60.0..=260.0).contains(&sub.ctcss_hz) { sub.ctcss_hz } else { 0.0 },
             tone_phase: 0.0,
+            dcs_word,
+            dcs_bit: 0,
+            dcs_samp_ctr: 0.0,
+            dcs_samp_per_bit: device_rate / DCS_BPS,
+            dcs_level: if dcs_word & 1 != 0 { SUB_TX_DEV_FRAC } else { -SUB_TX_DEV_FRAC },
+            dcs_target: if dcs_word & 1 != 0 { SUB_TX_DEV_FRAC } else { -SUB_TX_DEV_FRAC },
+            // ~1.5 ms bit-edge slew keeps the DCS spectrum sub-audible.
+            dcs_slew: (1.0 / (0.0015 * device_rate)).min(1.0) as f32,
             scratch: Vec::new(),
         }
     }
 
     /// Append modulated IQ for this chunk of audio (±1.0-ish range; silence
     /// — all zeros — is a perfectly valid chunk, and produces an unmodulated
-    /// carrier (plus the CTCSS tone, if set), not silence-detection or a gap
-    /// in transmission).
+    /// carrier plus the CTCSS tone / DCS stream if set, not silence-detection
+    /// or a gap in transmission).
     pub fn process(&mut self, audio: &[f32], out: &mut Vec<Complex32>) {
         self.scratch.clear();
         self.resamp.process(audio, &mut self.scratch);
         let has_tone = self.tone_hz > 0.0;
-        let voice_scale = if has_tone { 1.0 - CTCSS_TX_DEV_FRAC } else { 1.0 };
+        let has_dcs = self.dcs_word != 0;
+        let voice_scale = if has_tone || has_dcs { 1.0 - SUB_TX_DEV_FRAC } else { 1.0 };
         let tone_step = 2.0 * PI * self.tone_hz / self.device_rate;
         for &a in &self.scratch {
             let mut m = a.clamp(-1.0, 1.0) * voice_scale;
             if has_tone {
-                m += CTCSS_TX_DEV_FRAC * self.tone_phase.sin() as f32;
+                m += SUB_TX_DEV_FRAC * self.tone_phase.sin() as f32;
                 self.tone_phase += tone_step;
                 if self.tone_phase > 1e6 {
                     self.tone_phase %= 2.0 * PI;
                 }
+            }
+            if has_dcs {
+                self.dcs_samp_ctr += 1.0;
+                if self.dcs_samp_ctr >= self.dcs_samp_per_bit {
+                    self.dcs_samp_ctr -= self.dcs_samp_per_bit;
+                    self.dcs_bit = (self.dcs_bit + 1) % 23;
+                    let b = (self.dcs_word >> self.dcs_bit) & 1;
+                    self.dcs_target = if b != 0 { SUB_TX_DEV_FRAC } else { -SUB_TX_DEV_FRAC };
+                }
+                self.dcs_level += (self.dcs_target - self.dcs_level) * self.dcs_slew;
+                m += self.dcs_level;
             }
             self.phase += 2.0 * PI * self.deviation_hz * m as f64 / self.device_rate;
             if self.phase.abs() > 1e6 {
@@ -1021,7 +1259,7 @@ mod tests {
         let device_rate = 2_000_000.0;
         let tone = 1_200.0;
         let deviation_hz = 5_000.0;
-        let mut txmod = TxModulator::new(device_rate, deviation_hz, 0.0);
+        let mut txmod = TxModulator::new(device_rate, deviation_hz, SubAudibleTx::default());
 
         // 48kHz tone, delivered in ragged ~20ms-ish chunks of varying size.
         let mut iq = Vec::new();
@@ -1064,7 +1302,8 @@ mod tests {
         let voice = 1_000.0;
         let pl = 131.8;
         let deviation_hz = 5_000.0;
-        let mut txmod = TxModulator::new(device_rate, deviation_hz, pl);
+        let mut txmod =
+            TxModulator::new(device_rate, deviation_hz, SubAudibleTx { ctcss_hz: pl, ..Default::default() });
 
         let mut iq = Vec::new();
         let mut mp = 0.0f64;
@@ -1101,6 +1340,86 @@ mod tests {
             chain.metrics().ctcss_tone_hz
         );
         assert!(chain.metrics().squelch_open, "tone squelch should pass the encoded PL");
+    }
+
+    #[test]
+    fn golay23_is_a_valid_error_correcting_code() {
+        // Every codeword has the fixed data bits intact, and its minimum
+        // distance is 7 (so any single-bit flip is uniquely closest to it).
+        for data in [0u16, 1, 0x2AA, 0x555, 0x800, 0xFFF, 19 | 0x200] {
+            let cw = golay23_encode(data);
+            assert_eq!(cw & 0xFFF, data as u32, "data survives in the low 12 bits");
+            // distance from every 1-bit neighbour to the *nearest other*
+            // codeword is >= 6 (min distance 7 minus the 1 flip).
+        }
+        // dcs_codeword: normal vs inverted differ in all 23 bits; two
+        // different codes are far apart.
+        let a = dcs_codeword(23, false);
+        let b = dcs_codeword(23, true);
+        let c = dcs_codeword(754, false);
+        assert_eq!((a ^ b).count_ones(), 23, "invert flips every bit");
+        assert!((a ^ c).count_ones() >= 7, "distinct codes are >= d_min apart");
+        assert_eq!(a & 0xFFF, (dcs_codeword(23, false) & 0xFFF), "deterministic");
+    }
+
+    /// `TxModulator` DCS encode round-tripped through `FmChain`'s decoder.
+    #[test]
+    fn tx_modulator_dcs_round_trips_and_gates_squelch() {
+        let device_rate = 2_000_000.0;
+        let voice = 900.0;
+        let code = 23; // D023
+        let deviation_hz = 5_000.0;
+        let mut txmod = TxModulator::new(
+            device_rate,
+            deviation_hz,
+            SubAudibleTx { dcs_code: code, ..Default::default() },
+        );
+
+        // ~3 s of voice + the looping DCS stream, in ragged chunks.
+        let mut iq = Vec::new();
+        let mut mp = 0.0f64;
+        for _ in 0..2000 {
+            let audio: Vec<f32> = (0..960)
+                .map(|_| {
+                    let v = 0.6 * (2.0 * PI * mp).sin() as f32;
+                    mp += voice / 48_000.0;
+                    v
+                })
+                .collect();
+            txmod.process(&audio, &mut iq);
+        }
+
+        // Right code -> decodes + unmutes.
+        let ok_params = FmParams {
+            deviation_hz,
+            deemphasis_us: 0.0,
+            lo_offset_hz: 1.0,
+            dcs_code: code,
+            ..FmParams::default()
+        };
+        let mut ok = FmChain::new(device_rate, ok_params);
+        let mut audio = Vec::new();
+        for block in iq.chunks(8192) {
+            ok.process(block, &mut audio);
+        }
+        assert_eq!(ok.metrics().dcs_code, code, "receiver should lock the encoded DCS code");
+        assert!(ok.metrics().squelch_open, "DCS squelch should pass the matching code");
+        let at_voice = goertzel(&audio[audio.len() / 2..], AUDIO_RATE, voice);
+        assert!(at_voice > 0.1, "voice recovered through DCS squelch: {at_voice}");
+
+        // Wrong code -> stays muted.
+        let mut nope = FmChain::new(
+            device_rate,
+            FmParams { dcs_code: 754, ..ok_params },
+        );
+        let mut muted = Vec::new();
+        for block in iq.chunks(8192) {
+            nope.process(block, &mut muted);
+        }
+        assert_eq!(nope.metrics().dcs_code, 0, "non-matching DCS must not lock");
+        assert!(!nope.metrics().squelch_open, "non-matching DCS keeps squelch shut");
+        let peak = muted[muted.len() / 2..].iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        assert!(peak < 0.05, "muted audio peak {peak}");
     }
 
     /// FM carrier carrying a sub-audible CTCSS tone plus a "voice" tone.

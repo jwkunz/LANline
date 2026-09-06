@@ -241,6 +241,21 @@ export const CTCSS_TONES: number[] = [
   203.5, 206.5, 210.7, 218.1, 225.7, 229.1, 233.6, 241.8, 250.3, 254.1,
 ];
 
+/** The standard DCS / DPL codes — the 3 octal digits written as a decimal
+ *  number (23 → D023). Radios also offer each "inverted" (D023I); that's the
+ *  `dcs_invert` flag, not a separate entry. */
+// prettier-ignore
+export const DCS_CODES: number[] = [
+  23, 25, 26, 31, 32, 43, 47, 51, 54, 65, 71, 72, 73, 74,
+  114, 115, 116, 122, 125, 131, 132, 134, 143, 145, 152, 155, 156, 162, 165, 172, 174,
+  205, 212, 223, 225, 226, 243, 244, 245, 246, 251, 252, 255, 261, 263, 265, 266, 271, 274,
+  306, 311, 315, 325, 331, 332, 343, 346, 351, 356, 364, 365, 371,
+  411, 412, 413, 423, 431, 432, 445, 446, 452, 454, 455, 462, 464, 465, 466,
+  503, 506, 516, 523, 526, 532, 546, 565,
+  606, 612, 624, 627, 631, 632, 654, 662, 664,
+  703, 712, 723, 731, 732, 734, 743, 754,
+];
+
 export function hamBand(id: string): HamBand {
   return HAM_BANDS.find((b) => b.id === id) ?? HAM_BANDS[1]!;
 }

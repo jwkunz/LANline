@@ -66,6 +66,9 @@ export interface DspStatus {
   /** Strongest standard CTCSS tone the receiver sees (Hz), independent of the
    *  configured one — for identifying an unknown repeater. null if none. */
   ctcss_scan_hz?: number | null;
+  /** Configured DCS code (octal digits as decimal) while decoded on-channel;
+   *  null when DCS is off / unlocked. */
+  dcs_code?: number | null;
   sample_overruns: number;
   pipeline_latency_ms: number | null;
   tx_keyed: boolean;

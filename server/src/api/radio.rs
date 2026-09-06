@@ -152,21 +152,36 @@ pub async fn key_tx(
 
     let body = body.map(|Json(v)| v).unwrap_or(Value::Null);
     let gain_db = body.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 61.0);
-    // Repeater split + uplink tone (ham only; ignored/zeroed for frs, a
-    // simplex Part 95 service).
-    let (offset_hz, tone_hz) = if mode == "ham" {
+    // Repeater split + uplink CTCSS tone or DCS code (ham only; ignored/zeroed
+    // for frs, a simplex Part 95 service).
+    let (offset_hz, tone_hz, dcs_code, dcs_invert) = if mode == "ham" {
         let off = body.get("offset_hz").and_then(Value::as_f64).unwrap_or(0.0).clamp(-30e6, 30e6);
         let tone = match body.get("tone_hz").and_then(Value::as_f64).unwrap_or(0.0) {
             t if (60.0..=260.0).contains(&t) => t,
             _ => 0.0,
         };
-        (off, tone)
+        // A DCS code only applies when there's no CTCSS tone.
+        let dcs = if tone == 0.0 {
+            body.get("dcs_code").and_then(Value::as_u64).unwrap_or(0).min(777) as u16
+        } else {
+            0
+        };
+        let inv = body.get("dcs_invert").and_then(Value::as_bool).unwrap_or(false);
+        (off, tone, dcs, inv)
     } else {
-        (0.0, 0.0)
+        (0.0, 0.0, 0, false)
     };
 
     st.radio_mgr
-        .key(gain_db, deviation_hz, mic_gain, offset_hz, tone_hz)
+        .key(crate::radio::KeyRequest {
+            gain_db,
+            deviation_hz,
+            mic_gain,
+            offset_hz,
+            tone_hz,
+            dcs_code,
+            dcs_invert,
+        })
         .map_err(ApiError::forbidden)?;
 
     let client = st.sessions.get(auth.id).map(|s| s.client.name).unwrap_or_default();
@@ -186,6 +201,8 @@ pub async fn key_tx(
         "mic_gain": mic_gain,
         "offset_hz": offset_hz,
         "tone_hz": tone_hz,
+        "dcs_code": dcs_code,
+        "dcs_invert": dcs_invert,
     })))
 }
 
@@ -240,6 +257,7 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
             audio_level_dbfs: tele.audio_level_dbfs.map(f64::from),
             ctcss_tone_hz: tele.ctcss_tone_hz.map(f64::from),
             ctcss_scan_hz: tele.ctcss_scan_hz.map(f64::from),
+            dcs_code: tele.dcs_code,
             sample_overruns: tele.overruns,
             pipeline_latency_ms: running.then_some(20.0),
             tx_keyed: tele.tx_keyed,

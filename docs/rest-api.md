@@ -341,7 +341,10 @@ the client uses to render controls and the server uses to validate
       "noise_squelch": { "type": "number", "default": 0.35, "min": 0.02, "max": 2.0, "unit": "ratio" },
       "tx_mic_gain":   { "type": "number", "default": 2.5, "min": 1.0, "max": 32.0, "unit": "x" },
       "ctcss_hz":      { "type": "number", "default": 0, "min": 0, "max": 260, "unit": "Hz" },
-      "ctcss_squelch": { "type": "number", "default": 1, "enum": [0, 1], "unit": "bool" }
+      "ctcss_squelch": { "type": "number", "default": 1, "enum": [0, 1], "unit": "bool" },
+      "dcs_code":      { "type": "number", "default": 0, "min": 0, "max": 777, "unit": "octal" },
+      "dcs_invert":    { "type": "number", "default": 0, "enum": [0, 1], "unit": "bool" },
+      "dcs_squelch":   { "type": "number", "default": 1, "enum": [0, 1], "unit": "bool" }
     }
   },
   {
@@ -445,8 +448,17 @@ an audible rumble. `ctcss_squelch: 0` detects and reports the tone (see
 `dsp.ctcss_tone_hz` in `GET /radio/status`) without ever withholding audio —
 "monitor" mode. `0` disables it (carrier squelch only). It's a single-tone
 *presence* check keyed to the tone you select, not a 50-tone decoder bank.
+`dcs_code` is the **DCS (Digital Coded Squelch)** alternative — the 3 octal
+digits written in decimal (`23` = D023), `0` = off, mutually exclusive with
+`ctcss_hz` (a tone wins). `dcs_invert` selects the "I" codes; `dcs_squelch`
+`0` is monitor mode. A `DcsDecoder`
+([architecture.md](architecture.md#dcs-digital-coded-squelch)) recovers the
+134.4 bps stream and matches the Golay(23,12) codeword; `dsp.dcs_code` in
+`GET /radio/status` reports it while locked.
+
 Live-editable via `PATCH /api/v1/radio` (`mode_params` is deep-merged), so
-changing the tone or toggling monitor mode takes effect without a restart.
+changing the tone/code or toggling monitor mode takes effect without a
+restart.
 
 The repeater picker (a bundled regional directory at `GET /repeaters.json`
 plus browser-stored manual entries) is entirely client-side: selecting a
@@ -454,9 +466,10 @@ repeater issues a `PATCH /api/v1/radio` that sets `frequency_hz` to the
 repeater's output and `mode_params.ctcss_hz` to its transmitted tone, if any.
 `ham` is `tx_capable` — Part 97 permits homebrew transmit equipment under an
 amateur licence (firmer footing than `frs`'s Part 95 situation). PTT is still
-`--enable-tx`-gated; `POST /api/v1/radio/tx/key` takes `offset_hz` + `tone_hz`
-to key a repeater through its input with an encoded CTCSS uplink tone (the
-web client fills both from the selected repeater). DCS encode is deferred.
+`--enable-tx`-gated; `POST /api/v1/radio/tx/key` takes `offset_hz` plus an
+encoded uplink — `tone_hz` (CTCSS) or `dcs_code`/`dcs_invert` (DCS) — to key
+a repeater through its input (the web client fills these from the selected
+repeater / the wizard's squelch controls).
 
 `debug_tone` synthesizes audio internally and does **not** touch the SDR — it
 works with no device selected or a device in `error`, and is the end-to-end
@@ -813,6 +826,7 @@ Live telemetry, safe to poll at ~1 Hz.
     "audio_level_dbfs": -18.0,
     "ctcss_tone_hz": null,
     "ctcss_scan_hz": null,
+    "dcs_code": null,
     "sample_overruns": 0,
     "pipeline_latency_ms": 62,
     "tx_keyed": false
@@ -847,7 +861,9 @@ CTCSS tone while it is currently detected on-channel (FM modes with
 `ctcss_hz` set), else `null`. `ctcss_scan_hz` is the strongest *standard*
 CTCSS tone the receiver sees regardless of what's configured — an always-on
 Goertzel bank on narrowband FM, for identifying an unknown repeater's tone —
-or `null` when none stands out.
+or `null` when none stands out. `dcs_code` is the configured DCS code while
+it is currently decoded on-channel (FM modes with `dcs_code` set), else
+`null`.
 
 ### `POST /api/v1/radio/record`
 
@@ -917,8 +933,9 @@ optional:
   through its input: `offset_hz` (±30 MHz) shifts the transmit frequency from
   the current RX frequency (a plain LO retune, restored on unkey), and
   `tone_hz` (a standard 67.0–254.1 Hz CTCSS value, else ignored) is encoded
-  onto the transmission as the uplink tone. Both default to `0`
-  (simplex/none) and are ignored for `frs`.
+  onto the transmission as the uplink tone. `{"dcs_code": 23, "dcs_invert":
+  false}` encodes a DCS uplink instead (ignored when `tone_hz` is set). All
+  default to `0`/`false` (simplex/none) and are ignored for `frs`.
 
 Audio conditioning comes from the current mode's `mode_params`, read at
 key-up: `deviation_hz` sets the peak FM deviation, and `tx_mic_gain` (a
@@ -936,7 +953,7 @@ tx-capable device (else `503 device_unavailable`).
 
 Response:
 ```json
-{ "keyed": true, "gain_db": 10, "mic_gain": 2.5, "offset_hz": -600000, "tone_hz": 100.0 }
+{ "keyed": true, "gain_db": 10, "mic_gain": 2.5, "offset_hz": -600000, "tone_hz": 100.0, "dcs_code": 0, "dcs_invert": false }
 ```
 
 Auto-unkeys after a hard 10s server-side cap regardless of whether

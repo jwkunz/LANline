@@ -218,12 +218,13 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   changes). Every VHF/UHF FM band is open to all licence classes, so there's
   no privilege gating to enforce — the "privilege vs licence" hint is
   informational. Follow-up commits added **CTCSS tone squelch**
-  ([below](#ctcss-tone-squelch)) and a **repeater directory + manual entry**
-  ([below](#repeater-directory)). Still receive-only; keying a repeater
-  through its input (offset + uplink tone encode) and DCS are the remaining
-  follow-ups. Part 97 allows homebrew/experimental transmit gear under an
-  amateur licence (the operator holds Amateur Extra, KZ4AZ), so a `ham` TX
-  path is on firmer regulatory footing than `frs`'s.
+  ([below](#ctcss-tone-squelch)), a **repeater directory + manual entry**
+  ([below](#repeater-directory)), **amateur transmit** (simplex or through a
+  repeater's input+offset with an encoded uplink), and **DCS**
+  ([below](#dcs-digital-coded-squelch)) — decode + encode. Part 97 allows
+  homebrew/experimental transmit gear under an amateur licence (the operator
+  holds Amateur Extra, KZ4AZ), so a `ham` TX path is on firmer regulatory
+  footing than `frs`'s.
 
 ### CTCSS tone squelch
 
@@ -259,8 +260,41 @@ it live ("On air: 103.5 Hz") with a one-tap **use it** that copies it into
 PATCHes, each rebuilding the chain). The scanner only *identifies*; the
 hysteretic single-tone `CtcssDetector` still does the actual gating. `Chain`'s `Fm`/`Am` variants are both
 `Box`ed now — `FmChain` grew past the point where an unboxed enum variant
-tripped `clippy::large_enum_variant`. DCS (23-bit Golay code, ~134 Hz
-sub-carrier) is a different problem and stays deferred.
+tripped `clippy::large_enum_variant`.
+
+### DCS (Digital Coded Squelch)
+
+`dcs_code` (the 3 octal digits written in decimal — `23` → D023) is CTCSS's
+digital sibling: a continuous 23-bit Golay(23,12) codeword looped at
+134.4 bps, direct-FM'd sub-audibly onto the carrier. `golay23_encode` is a
+~15-line LFSR (feedback taps `0x475`, the low 11 bits of the `0xC75`
+generator); `dcs_codeword(code, invert)` builds the air word — 9 code bits +
+the fixed `100` = a 12-bit data word, then 11 Golay parity, LSB-first,
+optionally complemented for the "I" codes.
+
+**Decode** (`DcsDecoder`): anti-alias LP → decimate to ~2.4 kHz → a slow DC
+tracker + a ~240 Hz LP isolate the sub-audible band. Bit clock is
+transition-locked — on every zero-crossing of the filtered signal the next
+sample instant is pulled to mid-bit — and each recovered bit shifts a 23-bit
+window that's compared (Hamming distance ≤ 3) against **all 23 cyclic
+rotations** of the target codeword, both polarities (DCS repeats
+continuously, so the frame aligns at any phase). A per-bit score with
+hysteresis (ramp up over ~25 matches, down over ~8) becomes `locked` in
+~0.2 s. Noise almost never forms a valid rotated codeword, so it can't hold
+the score up. It confirms *this* code, like `CtcssDetector` — not a full
+83-code scanner.
+
+**Encode** (`TxModulator`): `SubAudibleTx` carries either a CTCSS tone or a
+DCS code (mutually exclusive). The DCS path loops the 23-bit word at
+134.4 bps with a ~1.5 ms bit-edge slew, summed onto the voice at the same
+`SUB_TX_DEV_FRAC` (0.15) reserve.
+
+`tx_modulator_dcs_round_trips_and_gates_squelch` runs the encoder's IQ back
+through `FmChain`'s decoder: the matching code locks + passes the voice, a
+different code (D754 vs D023) never locks and stays muted. The exact bit
+layout follows the common hobbyist convention (op25/DSD-style); the
+`dcs_invert` toggle is the escape hatch if a specific radio needs the other
+polarity — the ham wizard's copy says so.
 
 ### Repeater directory
 
@@ -529,11 +563,13 @@ body fields for `ham`:
   `FmChain` and confirms the far end both recovers the voice and can
   tone-squelch on the encoded PL.
 
-The web client fills both from `state.activeRepeater` (set when you tap a
-repeater in the picker), so keying a repeater is one hold of the same PTT
-button FRS uses; the "Now playing" card shows the actual TX frequency and
-encoded tone. `ham` also has its own `tx_mic_gain` (default 2.5, same meaning
-as `frs`'s). DCS encode is still deferred.
+The web client fills `offset_hz` + the uplink (`tone_hz` CTCSS or
+`dcs_code`/`dcs_invert` DCS) from `state.activeRepeater` when a repeater is
+selected, else from the wizard's own sub-audible squelch controls — so
+keying is one hold of the same PTT button FRS uses; the "Now playing" card
+shows the actual TX frequency and what's being encoded. `ham` also has its
+own `tx_mic_gain` (default 2.5, same meaning as `frs`'s). DCS encode +
+decode landed together — see [DCS](#dcs-digital-coded-squelch).
 
 **Transmit audit log.** Every `tx/key` (any mode) appends to a bounded
 in-memory ring (`RadioManager`'s `TxAudit`, ~200 entries) — client name,

@@ -60,10 +60,11 @@ wrapper (`client/android`).
 | 2i | Push-to-talk transmit (FRS only; FM modulator, half-duplex device switching, live mic-audio uplink over WebRTC, PTT protocol) — off by default (`--enable-tx`), personal-use only per FCC Part 95 | ✅ |
 | 2j | Multi-radio device picker (HackRF / ADALM-Pluto), TLS with a self-signed cert, Receiver Analysis waterfall | ✅ |
 | 2k | Amateur NBFM — band-plan-organized channel picker (6 m – 23 cm), simplex/calling, voluntary ARRL band-plan hints, CTCSS tone squelch + always-on tone identifier, regional repeater directory + manual entry | ✅ |
-| 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97, transmit audit log; DCS encode to follow | ✅ |
+| 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97, transmit audit log | ✅ |
 | 2m | Server-side demod-audio recording — `POST /radio/record`, 48 kHz mono WAV, per-request start/stop + download, any audio mode | ✅ |
 | 2n | Server-side channel scan — `POST /radio/scan`, sweeps a channel list / band range in the pipeline thread, parks on squelch-open with a hang time; Scan button in the web client for FRS / NWR / ham / broadcast | ✅ |
 | 2o | Repeater directory coverage — hearham region matcher now reads spelled-out state names (83 → ~1460 FL), `HAM_REPEATER_CENTER` distance filter, paste-shorthand in the add form | ✅ |
+| 2p | DCS (Digital Coded Squelch) — decode (134.4 bps Golay(23,12), transition-locked bit clock) + encode in the TX modulator, `dcs_code`/`dcs_invert`/`dcs_squelch` params, wizard picker | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -351,11 +352,12 @@ VHF/UHF bands. The picker is organized by **band** — 6 m, 2 m, 1.25 m,
 Every band here is open to **all U.S. license classes** (Technician and up)
 for FM voice; the panel notes the conventional repeater offset for the band.
 
-A **CTCSS tone squelch** picker sits under the manual dial: choose the
-sub-audible tone ("PL") a repeater requires and the channel only unmutes
-while that tone is present (a "monitor only" checkbox detects and reports it
-without muting). It's a single-tone presence check keyed to your selection,
-not a full decoder bank. The panel also shows the **tone actually on the
+A **sub-audible squelch** picker sits under the manual dial: choose the
+**CTCSS** tone ("PL") *or* the **DCS** code a repeater requires and the
+channel only unmutes while that signalling is present (a "monitor" checkbox
+detects and reports without muting; a "DCS inv" checkbox for the inverted
+codes). CTCSS is a single-tone presence check; DCS decodes the 134.4 bps
+Golay-coded stream. The panel also shows the **CTCSS tone actually on the
 air** (an always-on 50-tone Goertzel scanner) with a one-tap "use it" — so
 an unknown repeater's tone identifies itself.
 
@@ -375,12 +377,12 @@ takes shorthand like `146.94 - 100.0` or `442.100 +5 PL 131.8 W4ABC`.
 **Transmit** (`--enable-tx`, off by default): the same hold-to-talk button
 FRS uses appears in *Now playing*. On simplex it keys the tuned frequency;
 with a repeater selected it keys the **input** (output ± offset) and encodes
-the repeater's **uplink CTCSS tone**, so one hold gets you through the
-machine. Every key is written to a **transmit audit log**
+the **uplink signalling** — the repeater's CTCSS tone, or a DCS code you set
+in the wizard. Every key is written to a **transmit audit log**
 (`GET /api/v1/radio/tx/log`, and a collapsible list under the PTT button) —
-time, frequency, offset, tone, duration. Part 97 permits homebrew gear under
-an amateur licence — you are the control operator (KZ4AZ). DCS encode is
-deferred. The same UHF `freq_correction_ppm` note as FRS applies.
+time, frequency, offset, tone/code, duration. Part 97 permits homebrew gear
+under an amateur licence — you are the control operator (KZ4AZ). The same UHF
+`freq_correction_ppm` note as FRS applies.
 
 ### Receiver Analysis (waterfall)
 
