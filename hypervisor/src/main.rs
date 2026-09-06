@@ -64,11 +64,15 @@ async fn main() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let fleet_url = (cli.fleet_port != 0)
+        .then(|| format!("http://{advertise_host}:{}", cli.fleet_port));
+
     let sup_opts = supervisor::Opts {
         server_bin,
         state_dir,
         bind: cli.bind,
         advertise_host,
+        fleet_url,
         no_restart: cli.no_restart,
         max_restarts: cli.max_restarts,
     };

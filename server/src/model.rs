@@ -56,6 +56,9 @@ pub struct ServerInfo {
     /// as `lanline-hypervisor` does for each child). `null` for a plain
     /// standalone server.
     pub instance_label: Option<String>,
+    /// URL of the hypervisor fleet page this radio belongs to (`--fleet-url`),
+    /// or `null` when it is a standalone server.
+    pub fleet_url: Option<String>,
     /// `"http"` or `"https"` — the transport this C2 port is served over.
     pub scheme: &'static str,
     #[serde(with = "time::serde::rfc3339")]

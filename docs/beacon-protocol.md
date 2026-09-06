@@ -56,6 +56,7 @@ packet):
 | `protocol_version` | Bump on any breaking change to this payload or the REST contract |
 | `server_id` | Stable for the lifetime of a server process (UUID v4). Under `lanline-hypervisor` it is pinned per radio, so it also survives a supervised restart |
 | `instance_label` | Optional human name for the radio (`--instance-label`; the hypervisor sets it per child). `null` on a plain standalone server |
+| `fleet_url` | URL of the hypervisor fleet page this radio belongs to (`--fleet-url`), or `null` for a standalone server |
 | `advertised_host` | The IPv4 address the server believes clients should dial; per-interface datagrams carry that interface's address |
 | `ports.c2` | TCP port of the REST API |
 | `ports.audio_out` | UDP port for the receive WebRTC media (ICE host candidate) |

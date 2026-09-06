@@ -18,6 +18,10 @@ pub struct Opts {
     pub state_dir: PathBuf,
     pub bind: std::net::IpAddr,
     pub advertise_host: std::net::IpAddr,
+    /// `http://<advertise_host>:<fleet_port>` — passed to each child as
+    /// `--fleet-url` so its web UI can link back. `None` when the fleet HTTP
+    /// endpoint is disabled.
+    pub fleet_url: Option<String>,
     pub no_restart: bool,
     pub max_restarts: u32,
 }
@@ -251,6 +255,9 @@ fn build_command(spec: &RadioSpec, opts: &Opts) -> Result<Command> {
         .arg("--tls-dir")
         .arg(&tls_dir);
 
+    if let Some(url) = &opts.fleet_url {
+        cmd.arg("--fleet-url").arg(url);
+    }
     if spec.freq_correction_ppm != 0.0 {
         cmd.arg("--freq-correction-ppm").arg(format!("{}", spec.freq_correction_ppm));
     }
@@ -275,7 +282,7 @@ where
     });
 }
 
-fn now_unix() -> u64 {
+pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

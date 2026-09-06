@@ -84,6 +84,7 @@ impl Beacon {
             "version": SERVER_VERSION,
             "hostname": self.state.hostname,
             "instance_label": self.state.config.instance_label,
+            "fleet_url": self.state.config.fleet_url,
             "advertised_host": host.to_string(),
             "ports": {
                 "c2": ports.c2,

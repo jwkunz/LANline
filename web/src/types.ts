@@ -19,6 +19,10 @@ export interface ServerInfo {
   protocol_version: number;
   version: string;
   hostname: string;
+  /** Human name for this radio, when it is one of a hypervisor fleet. */
+  instance_label?: string | null;
+  /** URL of the hypervisor fleet page this radio belongs to, if any. */
+  fleet_url?: string | null;
   time: string;
   ports: Ports;
   capabilities: string[];

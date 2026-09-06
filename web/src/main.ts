@@ -290,7 +290,10 @@ function readSavedLoc(): Located | null {
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 app.innerHTML = `
-  <h1>LANline <span class="sub">SDR on your LAN</span></h1>
+  <div class="app-head">
+    <h1>LANline <span class="sub" id="app-sub">SDR on your LAN</span></h1>
+    <a id="fleet-link" class="fleet-link secondary" hidden>&#8676;&nbsp;Fleet</a>
+  </div>
   <p class="tagline">Discover a radio server on the LAN, pick a waveform, and listen.</p>
   <section class="card">
     <h2>Connection</h2>
@@ -310,6 +313,8 @@ const actionBtn = app.querySelector<HTMLButtonElement>("#action")!;
 const connStatus = app.querySelector<HTMLParagraphElement>("#conn-status")!;
 const panels = app.querySelector<HTMLDivElement>("#panels")!;
 const discoveredBox = app.querySelector<HTMLDivElement>("#discovered")!;
+const appSub = app.querySelector<HTMLSpanElement>("#app-sub")!;
+const fleetLink = app.querySelector<HTMLAnchorElement>("#fleet-link")!;
 
 hostInput.value = localStorage.getItem(HOST_KEY) ?? "";
 actionBtn.addEventListener("click", onAction);
@@ -1321,6 +1326,14 @@ function structKey(): string {
 function render(): void {
   const connected = state.phase === "connected";
   const connecting = state.phase === "connecting";
+
+  // Fleet member? Show its label in the header and a link back to the
+  // hypervisor's radio picker.
+  const fleetUrl = connected ? state.server?.fleet_url ?? null : null;
+  const label = connected ? state.server?.instance_label ?? null : null;
+  appSub.textContent = label ? `radio · ${label}` : "SDR on your LAN";
+  fleetLink.hidden = !fleetUrl;
+  if (fleetUrl) fleetLink.href = fleetUrl;
 
   actionBtn.textContent = connected
     ? "Disconnect"

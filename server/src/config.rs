@@ -59,6 +59,13 @@ pub struct Config {
     #[arg(long, env = "LANLINE_SERVER_ID")]
     pub server_id: Option<Uuid>,
 
+    /// URL of the `lanline-hypervisor` fleet page this radio belongs to, if
+    /// any. Surfaced in `GET /api/v1/server` and the beacon; the web client
+    /// shows a "back to the fleet" link when it is set. `lanline-hypervisor`
+    /// passes it to each child.
+    #[arg(long, env = "LANLINE_FLEET_URL")]
+    pub fleet_url: Option<String>,
+
     /// Host/IP to advertise to clients. Defaults to the autodetected primary
     /// LAN IPv4 address.
     #[arg(long, env = "LANLINE_ADVERTISE_HOST")]
