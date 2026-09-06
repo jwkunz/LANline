@@ -63,6 +63,7 @@ wrapper (`client/android`).
 | 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97, transmit audit log; DCS encode to follow | ✅ |
 | 2m | Server-side demod-audio recording — `POST /radio/record`, 48 kHz mono WAV, per-request start/stop + download, any audio mode | ✅ |
 | 2n | Server-side channel scan — `POST /radio/scan`, sweeps a channel list / band range in the pipeline thread, parks on squelch-open with a hang time; Scan button in the web client for FRS / NWR / ham / broadcast | ✅ |
+| 2o | Repeater directory coverage — hearham region matcher now reads spelled-out state names (83 → ~1460 FL), `HAM_REPEATER_CENTER` distance filter, paste-shorthand in the add form | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -359,13 +360,17 @@ air** (an always-on 50-tone Goertzel scanner) with a one-tap "use it" — so
 an unknown repeater's tone identifies itself.
 
 A **Simplex / Repeaters** toggle switches the channel list to a regional
-repeater directory (bundled from [hearham.com](https://hearham.com); regenerate
-or widen with `node scripts/fetch-repeaters.mjs`, `HAM_REPEATER_REGIONS="FL,GA"`).
-Each row shows the output frequency, offset (−0.6 / +5 MHz …), uplink/output
-tones, town and distance. Tapping one tunes the repeater's output and, if it
-transmits a tone, sets that as your receive tone squelch; the offset and
-uplink tone are remembered for transmit. **+ Add repeater** stores your own
-(offset + tones) in the browser.
+repeater directory (~1460 for the default Florida bundle, from
+[hearham.com](https://hearham.com)). Each row shows the output frequency,
+offset (−0.6 / +5 MHz …), uplink/output tones, town and distance. Tapping one
+tunes the repeater's output and, if it transmits a tone, sets that as your
+receive tone squelch; the offset and uplink tone are remembered for transmit.
+
+Regenerate for your own area with
+`HAM_REPEATER_CENTER="lat,lon" node scripts/fetch-repeaters.mjs` (a distance
+filter, sorted nearest-first; or `HAM_REPEATER_REGIONS="FL,GA"` for whole
+states). **+ Add repeater** stores your own in the browser — its paste box
+takes shorthand like `146.94 - 100.0` or `442.100 +5 PL 131.8 W4ABC`.
 
 **Transmit** (`--enable-tx`, off by default): the same hold-to-talk button
 FRS uses appears in *Now playing*. On simplex it keys the tuned frequency;

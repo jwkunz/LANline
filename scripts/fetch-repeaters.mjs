@@ -3,31 +3,54 @@
 // region (callsign, output frequency, offset, CTCSS uplink/downlink tones,
 // transmitter lat/lon, town, open/closed).
 //
-//   node scripts/fetch-repeaters.mjs                       # default: FL
+//   node scripts/fetch-repeaters.mjs                          # default: FL
 //   HAM_REPEATER_REGIONS="FL,GA,AL" node scripts/fetch-repeaters.mjs
+//   HAM_REPEATER_CENTER="29.65,-82.32" \
+//     HAM_REPEATER_RADIUS_MI=150 node scripts/fetch-repeaters.mjs
 //
 // Source: hearham.com's open repeater API (one ~9 MB global JSON, no key, no
 // rate limit) — https://hearham.com/api/repeaters/v1. The output is committed
 // so builds need no network; RepeaterBook's export API now requires an
 // account, hence hearham.
 //
-// Regions are matched against the free-form "city" string ("Gainesville, FL",
-// "Miami, FL USA", …) by trailing state code, so pass 2-letter codes.
+// hearham's "city" string comes in two shapes — "Town, FL USA" *and*
+// "Town, Florida" — so region matching handles both a trailing 2-letter code
+// and a spelled-out state name. If HAM_REPEATER_CENTER is set, that (plus
+// HAM_REPEATER_RADIUS_MI) filters by transmitter distance instead, and the
+// output is sorted nearest-first.
 
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-const OUT = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "../web/public/repeaters.json",
-);
+const OUT = resolve(dirname(fileURLToPath(import.meta.url)), "../web/public/repeaters.json");
 const SOURCE = "https://hearham.com/api/repeaters/v1";
 
 const REGIONS = (process.env.HAM_REPEATER_REGIONS || "FL")
   .split(",")
   .map((s) => s.trim().toUpperCase())
   .filter(Boolean);
+
+const CENTER = (() => {
+  const [la, lo] = (process.env.HAM_REPEATER_CENTER || "").split(",").map((v) => parseFloat(v));
+  return Number.isFinite(la) && Number.isFinite(lo) ? { lat: la, lon: lo } : null;
+})();
+const RADIUS_MI = parseFloat(process.env.HAM_REPEATER_RADIUS_MI || "150");
+
+// USPS code -> lowercase full name, for the "Town, Florida" city format.
+// prettier-ignore
+const STATE_NAMES = {
+  AL:"alabama", AK:"alaska", AZ:"arizona", AR:"arkansas", CA:"california", CO:"colorado",
+  CT:"connecticut", DE:"delaware", DC:"district of columbia", FL:"florida", GA:"georgia",
+  HI:"hawaii", ID:"idaho", IL:"illinois", IN:"indiana", IA:"iowa", KS:"kansas", KY:"kentucky",
+  LA:"louisiana", ME:"maine", MD:"maryland", MA:"massachusetts", MI:"michigan", MN:"minnesota",
+  MS:"mississippi", MO:"missouri", MT:"montana", NE:"nebraska", NV:"nevada", NH:"new hampshire",
+  NJ:"new jersey", NM:"new mexico", NY:"new york", NC:"north carolina", ND:"north dakota",
+  OH:"ohio", OK:"oklahoma", OR:"oregon", PA:"pennsylvania", RI:"rhode island", SC:"south carolina",
+  SD:"south dakota", TN:"tennessee", TX:"texas", UT:"utah", VT:"vermont", VA:"virginia",
+  WA:"washington", WV:"west virginia", WI:"wisconsin", WY:"wyoming", PR:"puerto rico",
+};
+const VALID_CODES = new Set(Object.keys(STATE_NAMES));
 
 // Amateur VHF/UHF FM bands the `ham` mode covers, by output frequency (Hz).
 const BANDS = [
@@ -45,26 +68,72 @@ const tone = (v) => {
   const n = parseFloat(String(v ?? "").trim());
   return Number.isFinite(n) && n >= 60 && n <= 260 ? Math.round(n * 10) / 10 : 0;
 };
-const stateOf = (city) => {
-  const m = String(city ?? "")
+
+/** USPS code for a hearham "city" string, or "" if none is recognizable. */
+function stateOf(city) {
+  const s = String(city ?? "")
     .toUpperCase()
-    .match(/,\s*([A-Z]{2})\b/);
-  return m ? m[1] : "";
-};
+    .replace(/,?\s*(USA|UNITED STATES)\s*$/i, "")
+    .trim();
+  const code = s.match(/(?:^|[,\s/])([A-Z]{2})\s*$/);
+  if (code && VALID_CODES.has(code[1])) return code[1];
+  const lc = s.toLowerCase();
+  for (const [c, name] of Object.entries(STATE_NAMES)) {
+    if (lc.endsWith(name) || lc.includes(`, ${name}`)) return c;
+  }
+  return "";
+}
+
+/** "Town, FL" for display — strip the country and normalize the state. */
+function placeOf(city, code) {
+  let town = String(city ?? "")
+    .replace(/,?\s*(USA|United States)\s*$/i, "")
+    .trim();
+  if (code) {
+    const name = STATE_NAMES[code];
+    town = town
+      .replace(new RegExp(`,?\\s*${name}\\s*$`, "i"), "")
+      .replace(new RegExp(`,?\\s*${code}\\s*$`, "i"), "")
+      .trim()
+      .replace(/[,/]\s*$/, "");
+    return town ? `${town}, ${code}` : code;
+  }
+  return town;
+}
+
+const R_MI = 3958.7613;
+const rad = (d) => (d * Math.PI) / 180;
+function haversineMi(aLat, aLon, bLat, bLon) {
+  const dLat = rad(bLat - aLat);
+  const dLon = rad(bLon - aLon);
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R_MI * Math.asin(Math.sqrt(x));
+}
 
 console.log(`fetch ${SOURCE}`);
-const res = await fetch(SOURCE, { headers: { "User-Agent": "LANline/1.5 (+github.com/jwkunz/LANline)" } });
+const res = await fetch(SOURCE, {
+  headers: { "User-Agent": "LANline/1.9 (+github.com/jwkunz/LANline)" },
+});
 if (!res.ok) throw new Error(`fetch: HTTP ${res.status}`);
 const rows = await res.json();
-console.log(`  ${rows.length} repeaters worldwide; filtering to ${REGIONS.join(", ")}`);
+console.log(
+  `  ${rows.length} repeaters worldwide; ` +
+    (CENTER
+      ? `within ${RADIUS_MI} mi of ${CENTER.lat},${CENTER.lon}`
+      : `regions ${REGIONS.join(", ")}`),
+);
 
-const out = [];
+/** Keep the entry with more filled-in fields when a machine is listed twice. */
+const richness = (r) =>
+  (r.tone_hz ? 1 : 0) + (r.tsq_hz ? 1 : 0) + (r.offset_hz ? 1 : 0) + (r.lat ? 1 : 0);
+
+const byKey = new Map();
+let scanned = 0;
 for (const row of rows) {
-  if (row.operational !== 1) continue;
-  if (!/(^|[,\s])FM([,\s]|$)/i.test(String(row.mode || ""))) continue;
-
-  const st = stateOf(row.city);
-  if (!REGIONS.includes(st)) continue;
+  if (row.operational === 0) continue; // keep 1 and missing/unknown
+  if (!/(^|[,\s/])FM([,\s/]|$)/i.test(String(row.mode || ""))) continue;
 
   const outputHz = Math.round(Number(row.frequency) || 0);
   const band = bandOf(outputHz);
@@ -75,30 +144,61 @@ for (const row of rows) {
 
   const lat = Number(row.latitude);
   const lon = Number(row.longitude);
-  const restriction = String(row.restriction || "").trim().toLowerCase();
+  const hasLL = Number.isFinite(lat) && Number.isFinite(lon) && (lat !== 0 || lon !== 0);
+  const code = stateOf(row.city);
 
-  out.push({
+  let distance_mi = null;
+  if (CENTER) {
+    if (!hasLL) continue;
+    distance_mi = haversineMi(CENTER.lat, CENTER.lon, lat, lon);
+    if (distance_mi > RADIUS_MI) continue;
+  } else if (!REGIONS.includes(code)) {
+    continue;
+  }
+  scanned++;
+
+  const restriction = String(row.restriction || "").trim().toLowerCase();
+  const entry = {
     id: String(row.id),
     call,
     output_hz: outputHz,
     offset_hz: Math.round(Number(row.offset) || 0),
-    tone_hz: tone(row.encode), // uplink (to key it — used by TX later)
+    tone_hz: tone(row.encode), // uplink (to key it)
     tsq_hz: tone(row.decode), // downlink (what it sends — optional RX squelch)
-    lat: Number.isFinite(lat) ? Number(lat.toFixed(5)) : 0,
-    lon: Number.isFinite(lon) ? Number(lon.toFixed(5)) : 0,
-    place: String(row.city || "").replace(/\s+USA$/i, "").trim(),
+    lat: hasLL ? Number(lat.toFixed(5)) : 0,
+    lon: hasLL ? Number(lon.toFixed(5)) : 0,
+    place: placeOf(row.city, code),
     band: band.id,
     open: !restriction || restriction === "open",
-  });
+  };
+  if (CENTER) entry._d = distance_mi;
+
+  const key = `${call}@${outputHz}`;
+  const prev = byKey.get(key);
+  if (!prev || richness(entry) > richness(prev)) byKey.set(key, entry);
 }
 
-out.sort((a, b) => a.band.localeCompare(b.band) || a.output_hz - b.output_hz || a.call.localeCompare(b.call));
-// Dedupe exact call+frequency collisions (multiple DB entries for one machine).
-const seen = new Set();
-const list = out.filter((r) => {
-  const k = `${r.call}@${r.output_hz}`;
-  return seen.has(k) ? false : seen.add(k);
-});
+let list = [...byKey.values()];
+if (CENTER) {
+  list.sort((a, b) => a._d - b._d);
+  list.forEach((r) => delete r._d);
+} else {
+  list.sort(
+    (a, b) =>
+      a.band.localeCompare(b.band) || a.output_hz - b.output_hz || a.call.localeCompare(b.call),
+  );
+}
 
 writeFileSync(OUT, JSON.stringify(list) + "\n");
-console.log(`wrote ${list.length} repeaters to ${OUT} (regions: ${REGIONS.join(", ")})`);
+
+const perBand = {};
+for (const r of list) perBand[r.band] = (perBand[r.band] || 0) + 1;
+const withTone = list.filter((r) => r.tone_hz).length;
+const withOffset = list.filter((r) => r.offset_hz).length;
+console.log(
+  `wrote ${list.length} repeaters to ${OUT}\n` +
+    `  bands: ${Object.entries(perBand)
+      .map(([b, n]) => `${b} ${n}`)
+      .join(", ")}\n` +
+    `  ${withTone} with an uplink tone, ${withOffset} with an offset`,
+);

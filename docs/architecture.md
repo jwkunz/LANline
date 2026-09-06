@@ -278,12 +278,27 @@ list; the add form pre-fills the offset from `conventionalOffsetHz()`.
 
 The bundled list is `GET /repeaters.json` — `scripts/fetch-repeaters.mjs`
 pulls [hearham.com](https://hearham.com)'s open API (one ~9 MB global JSON,
-no key), filters to a region by the trailing state code in its free-form
-`city` string, keeps FM-analog + operational rows in our VHF/UHF bands, and
-writes a compact per-region file. RepeaterBook's export API now needs an
-account, hence hearham; its coverage is thinner, so `HAM_REPEATER_REGIONS`
-takes a comma list and the wizard leans on manual entry. `build.rs` +
-`webui.rs` embed the file the same way as the FM/AM/NWR station DBs.
+no key; RepeaterBook's export API now needs an account), keeps FM-analog
+rows that aren't marked off-air and land in our VHF/UHF bands, dedupes a
+machine listed twice to the more complete row, and writes a compact file.
+`build.rs` + `webui.rs` embed it the same way as the FM/AM/NWR station DBs.
+
+**Region matching** was the coverage bug worth recording: hearham's `city`
+string comes in two shapes — `"Town, FL USA"` *and* `"Town, Florida"` — and
+the first cut only matched the trailing 2-letter code, so it silently
+dropped ~95 % of a state (83 Florida rows out of ~1700). The matcher now
+also recognises the 50 spelled-out state names. `HAM_REPEATER_REGIONS`
+takes a comma list of codes; `HAM_REPEATER_CENTER="lat,lon"` +
+`HAM_REPEATER_RADIUS_MI` (default 150) filters by transmitter distance
+instead and sorts the output nearest-first — the better default for "what
+can I hit from here". The default `FL` bundle is ~1460 repeaters.
+
+The add-repeater form has a **paste box** (`ham::parseRepeaterShorthand`):
+`146.94 - 100.0` or `442.100 +5 PL 131.8 W4ABC` — order-independent, a bare
+`+`/`-` means the band's conventional offset, a signed magnitude ≥ 100 is
+kHz else MHz, a bare 60–260 is a CTCSS tone, a callsign-shaped token is the
+call. It fills the form fields (snapping the offset to the nearest preset)
+for review before save.
 
 ### Server-side channel scan
 

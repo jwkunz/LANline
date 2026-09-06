@@ -47,6 +47,7 @@ import {
   hamSimplexChannels,
   loadRepeaters,
   offsetLabel,
+  parseRepeaterShorthand,
   type Repeater,
 } from "./ham";
 import type {
@@ -1454,6 +1455,7 @@ function installDelegates(): void {
     if (hit("#rp-add-toggle")) return setState({ rpAddOpen: true });
     if (hit("#rp-add-cancel")) return setState({ rpAddOpen: false });
     if (hit("#rp-add-save")) return saveManualRepeater();
+    if (hit("#rp-paste-fill")) return fillRepeaterFromShorthand();
     if (hit("#ham-ctcss-use")) {
       const sel = panels.querySelector<HTMLSelectElement>("#ham-ctcss");
       const hz = (t.closest<HTMLElement>("#ham-ctcss-use")?.dataset.hz ?? "").trim();
@@ -1522,6 +1524,7 @@ function installDelegates(): void {
     else if (id === "am-freq") amManualGo();
     else if (id === "apt-freq") aptManualGo();
     else if (id === "ham-freq") hamManualGo();
+    else if (id === "rp-paste") fillRepeaterFromShorthand();
   });
 
   // Press-and-hold, not click: pointerdown keys, pointerup/cancel unkeys.
@@ -2006,10 +2009,15 @@ function hamRepeaterSection(bandId: string): string {
     ? list.map((rp) => repeaterRow(rp, tunedHz)).join("")
     : `<p class="note" style="margin:8px 0">No repeaters listed for this band.${
         state.loc ? "" : " Set your location above to sort by distance."
-      } Add one below, or widen the bundled region with <code>scripts/fetch-repeaters.mjs</code>.</p>`;
+      } Add one below, or rebuild the bundle for your area with
+      <code>HAM_REPEATER_CENTER="lat,lon" node scripts/fetch-repeaters.mjs</code>.</p>`;
 
   const addForm = state.rpAddOpen
     ? `<div class="rp-add">
+        <div class="rp-paste-row">
+          <input id="rp-paste" type="text" placeholder="paste: 146.94 - 100.0  ·  442.100 +5 PL 131.8 W4ABC" />
+          <button id="rp-paste-fill" class="secondary">Fill</button>
+        </div>
         <div class="rp-add-grid">
           <label>Call <input id="rp-call" type="text" autocapitalize="characters" placeholder="W4XYZ" /></label>
           <label>Output MHz <input id="rp-output" type="text" inputmode="decimal" placeholder="146.940" /></label>
@@ -2062,6 +2070,32 @@ async function tuneRepeater(rp: Repeater): Promise<void> {
   } catch (e) {
     logLine(`repeater tune failed — ${(e as ApiError).message}`);
   }
+}
+
+/** Parse the "paste" box and pre-fill the add-repeater form fields. */
+function fillRepeaterFromShorthand(): void {
+  const g = <T extends HTMLElement>(id: string) => panels.querySelector<T>(id);
+  const raw = g<HTMLInputElement>("#rp-paste")?.value ?? "";
+  const p = parseRepeaterShorthand(raw);
+  if (p.output_hz == null && p.call == null && p.tone_hz == null) {
+    logLine("paste — couldn't read a frequency, tone or call from that");
+    return;
+  }
+  const set = (id: string, v: string) => {
+    const el = g<HTMLInputElement | HTMLSelectElement>(id);
+    if (el) el.value = v;
+  };
+  if (p.output_hz != null) set("#rp-output", (p.output_hz / 1e6).toFixed(4).replace(/0+$/, "").replace(/\.$/, ""));
+  if (p.call) set("#rp-call", p.call);
+  if (p.tone_hz != null) set("#rp-tone", String(p.tone_hz));
+  if (p.tsq_hz != null) set("#rp-tsq", String(p.tsq_hz));
+  if (p.offset_hz != null) {
+    // Snap to the closest preset the <select> offers.
+    const closest = RP_OFFSETS.reduce((best, [, v]) =>
+      Math.abs(v - p.offset_hz!) < Math.abs(best - p.offset_hz!) ? v : best, RP_OFFSETS[0]![1]);
+    set("#rp-offset", String(closest));
+  }
+  logLine("paste — filled the form, review and save");
 }
 
 function saveManualRepeater(): void {

@@ -303,6 +303,65 @@ export function offsetLabel(offsetHz: number): string {
     : `${sign}${Math.round(abs / 1e3)} kHz`;
 }
 
+/** Parse a spoken/written repeater shorthand into whatever fields it carries
+ *  — for the "add repeater" quick box. Tolerant of order and punctuation:
+ *
+ *    146.94 - 100.0            output 146.94, conventional − offset, PL 100.0
+ *    442.100 +5 PL 131.8 W4ABC output, +5 MHz, tone 131.8, call W4ABC
+ *    147.120 +0.6 107.2        output, +600 kHz, tone 107.2
+ *
+ *  A signed magnitude ≥ 100 is read as kHz, otherwise MHz; a bare `+`/`-` is
+ *  the band's conventional offset with that sign; a bare number in 60–260 is
+ *  a CTCSS tone; a callsign-shaped token is the call. */
+export function parseRepeaterShorthand(text: string): {
+  output_hz?: number;
+  offset_hz?: number;
+  tone_hz?: number;
+  tsq_hz?: number;
+  call?: string;
+} {
+  const out: ReturnType<typeof parseRepeaterShorthand> = {};
+  const toks = text.trim().split(/[\s,]+/).filter(Boolean);
+  let sign: 1 | -1 | 0 = 0;
+  let toneKindNext: "tone" | "tsq" | null = null;
+
+  for (const raw of toks) {
+    const t = raw.trim();
+    if (/^[+]$/.test(t)) { sign = 1; continue; }
+    if (/^[-]$/.test(t)) { sign = -1; continue; }
+    if (/^(pl|t|tone|ctcss)$/i.test(t)) { toneKindNext = "tone"; continue; }
+    if (/^(tsq|rx|dcs|dpl)$/i.test(t)) { toneKindNext = "tsq"; continue; }
+    if (/^[A-Z]{1,2}\d[A-Z0-9]{1,4}$/i.test(t)) { out.call = t.toUpperCase(); continue; }
+
+    const n = parseFloat(t);
+    if (!Number.isFinite(n)) continue;
+    const signed = /^[+-]/.test(t);
+
+    if (toneKindNext) {
+      if (n >= 60 && n <= 260) out[toneKindNext === "tone" ? "tone_hz" : "tsq_hz"] = Math.round(n * 10) / 10;
+      toneKindNext = null;
+      continue;
+    }
+    if (signed) {
+      // offset: |n| >= 100 -> kHz, else MHz
+      out.offset_hz = Math.round((Math.abs(n) >= 100 ? n * 1e3 : n * 1e6));
+      continue;
+    }
+    if (out.output_hz == null) {
+      out.output_hz = n > 1e6 ? Math.round(n) : Math.round(n * 1e6);
+      continue;
+    }
+    if (n >= 60 && n <= 260 && out.tone_hz == null) {
+      out.tone_hz = Math.round(n * 10) / 10;
+    }
+  }
+
+  if (sign !== 0 && out.offset_hz == null && out.output_hz != null) {
+    out.offset_hz = sign * Math.abs(conventionalOffsetHz(out.output_hz));
+  }
+  return out;
+}
+
 /** Conventional repeater offset for a 2 m / 70 cm / … output frequency —
  *  used to pre-fill the "add repeater" form. Sign follows the usual sub-band
  *  convention (e.g. 2 m outputs 145.2–145.5 are −600 kHz, 146.61–147.00 are

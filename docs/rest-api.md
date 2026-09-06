@@ -52,7 +52,7 @@ browser pointed at the server's own address connects with nothing to type
 | `GET /fm-stations.json` | `application/json` — bundled FCC FM broadcast station directory |
 | `GET /am-stations.json` | `application/json` — bundled FCC AM broadcast station directory |
 | `GET /apt-tle.json` | `application/json` — bundled NOAA-15/18/19 orbital elements (TLE), for the client-side pass predictor |
-| `GET /repeaters.json` | `application/json` — bundled regional amateur repeater directory (`scripts/fetch-repeaters.mjs` from hearham.com), for the `ham` mode repeater picker |
+| `GET /repeaters.json` | `application/json` — bundled regional amateur repeater directory (`scripts/fetch-repeaters.mjs` from hearham.com; `HAM_REPEATER_REGIONS` state codes, or `HAM_REPEATER_CENTER`/`HAM_REPEATER_RADIUS_MI` for a distance filter), for the `ham` mode repeater picker |
 
 These are unauthenticated and cached (`Cache-Control: public, max-age=86400`).
 The same bundle is what the Android APK embeds as local assets.

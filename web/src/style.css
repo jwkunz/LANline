@@ -472,6 +472,16 @@ h3.ham-sub {
   border: 1px solid var(--line);
   border-radius: 8px;
 }
+.rp-paste-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.rp-paste-row input {
+  flex: 1 1 auto;
+  font-size: 13px;
+  padding: 6px 8px;
+}
 .rp-add-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
