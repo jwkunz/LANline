@@ -276,6 +276,22 @@ export class Client {
    *  bounded, newest first). */
   txLog = () => this.request<TxLogEntry[]>("GET", "/api/v1/radio/tx/log", { auth: true });
 
+  /** Text-to-speech transmit: synthesize `text` and key it on the air
+   *  (needs `--enable-tx` + `--tts` + a voice mode + running). */
+  saySpeech = (body: { text: string; gain_db?: number }) =>
+    this.request<{ transmitted: boolean; secs: number; text: string; backend: string }>(
+      "POST",
+      "/api/v1/radio/tx/say",
+      { auth: true, body },
+    );
+
+  /** Recognized text from received transmissions (`--stt`), newest last. */
+  transcript = () =>
+    this.request<{ time: string; count: number; segments: import("./types").TranscriptEntry[] }>(
+      "GET",
+      "/api/v1/radio/transcript",
+    );
+
   /** Start / stop a server-side recording of the demodulated audio (48 kHz
    *  mono WAV). Status comes back in `RadioStatus.recording`. */
   recordAudio = (action: "start" | "stop", maxSecs?: number) =>

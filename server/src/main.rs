@@ -58,17 +58,23 @@ async fn main() -> Result<()> {
         }
         radio.tuner.freq_correction_ppm = config.freq_correction_ppm;
     }
+    check_voice_features(&config)?;
+    let voice = lanline_server::voice::VoiceShared::new(&config);
     let radio_mgr = radio::RadioManager::new(
         radio_cfg.clone(),
         registry.clone(),
         config.dump_wav.clone(),
         config.iq_dir.clone().unwrap_or_else(|| std::path::PathBuf::from(".")),
         config.enable_tx,
+        voice,
     );
     if config.enable_tx {
         tracing::warn!(
             "transmit ENABLED (--enable-tx) — this server will key a real transmitter on request"
         );
+    }
+    if radio_mgr.tts_enabled() {
+        tracing::info!("tts ENABLED — POST /api/v1/radio/tx/say synthesizes speech on the air");
     }
 
     // --- sessions + media ------------------------------------------
@@ -209,6 +215,18 @@ async fn main() -> Result<()> {
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown)
             .await?;
+    }
+    Ok(())
+}
+
+/// A `--tts` / `--stt` flag set on a binary built without the matching feature
+/// is a config error, not a silent no-op.
+fn check_voice_features(config: &Config) -> Result<()> {
+    if config.tts && !cfg!(feature = "tts") {
+        anyhow::bail!("--tts set but this binary was built without the `tts` feature");
+    }
+    if config.stt && !cfg!(feature = "stt") {
+        anyhow::bail!("--stt set but this binary was built without the `stt` feature");
     }
     Ok(())
 }

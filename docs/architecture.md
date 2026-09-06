@@ -465,6 +465,36 @@ panel has a messaging card (my-call / to-call, a text field, a chat log built
 from the TNC2 ring); pointing two browser tabs at the two child servers is an
 APRS chat room, each side driving its own radio.
 
+### Voice ↔ text (`voice/`)
+
+Optional, feature-gated (`tts` / `stt` / `voice-text`), off by default — the
+standalone and soapy CI tiers don't build it.
+
+**STT (`voice/stt.rs`, feature `stt`)** — pure-Rust Whisper via `candle`.
+`run_sdr` calls `VoiceShared::stt_feed(&pcm, squelch_open, rssi)` every audio
+frame (right next to `audio_rec.write`); it accumulates while the squelch is
+open and, on close (0.3 s hang) or at 30 s, ships the whole over to a worker
+thread over an `mpsc`. The worker pre-filters + linear-resamples 48 k → 16 k,
+runs `whisper::audio::pcm_to_mel` (80-bin filterbank vendored as
+`melfilters.bytes`), one 30 s encoder pass and a greedy no-timestamps decode
+(`.en` models), and pushes a `TranscriptEntry` to a 200-entry ring +
+broadcast. The model is a local HF-layout dir (`--stt-model`:
+`config.json` / `tokenizer.json` / `model.safetensors`). Served at
+`GET /radio/transcript`; `DspStatus.transcribing` flags a decode in flight.
+
+**TTS (`voice/tts.rs`, feature `tts`)** — no Rust engine dep: it shells
+`espeak-ng --stdout` (robotic formant synth, no model — fine for automated
+radio) or, with `--tts-voice <model.onnx>`, the `piper` binary (`--output_raw`,
+sample rate from the `.onnx.json`). Output is parsed (WAV or raw s16le),
+`LinearResampler`d to 48 kHz, and handed to `RadioManager::say`, which prefills
+the single `TxAudioSource` and sends a `PipelineCmd::Key` with
+`max_secs = clip length` — `key_tx` drains it, silence-pads the tail and
+auto-unkeys. The audit log gets a `say (<backend>): <text>` entry.
+
+Web: a **"Voice text"** card in the `frs` / `ham` panels (each half shown per
+`capabilities`) — a text field that transmits as speech, and a live transcript
+log of received overs. No mic involved.
+
 ### AM and HackRF MF/LF sensitivity
 
 The HackRF's front end has no dedicated preselection filtering or LNA below

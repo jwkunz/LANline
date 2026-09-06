@@ -78,6 +78,12 @@ impl AppState {
         if device_tx_capable && self.0.radio_mgr.tx_enabled() {
             caps.push("ptt".to_string());
         }
+        if self.0.radio_mgr.tts_enabled() {
+            caps.push("tts".to_string());
+        }
+        if self.0.radio_mgr.stt_enabled() {
+            caps.push("stt".to_string());
+        }
         caps
     }
 }

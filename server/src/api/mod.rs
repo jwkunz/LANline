@@ -43,6 +43,8 @@ pub fn router(state: AppState) -> Router {
         .route("/radio/tx/key", post(radio::key_tx))
         .route("/radio/tx/unkey", post(radio::unkey_tx))
         .route("/radio/tx/log", get(radio::tx_log))
+        .route("/radio/tx/say", post(radio::say))
+        .route("/radio/transcript", get(radio::transcript))
         .route("/adsb/aircraft", get(adsb::aircraft))
         .route("/adsb/messages", get(adsb::messages))
         .route("/ais/vessels", get(ais::vessels))
@@ -135,7 +137,7 @@ mod tests {
         let config = Config::parse_from(["lanline-server", "--no-beacon"]);
         let registry = Arc::new(DeviceRegistry::new()); // no device selected
         let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
-        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, std::env::temp_dir(), false);
+        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, std::env::temp_dir(), false, crate::voice::VoiceShared::new(&config));
         let sessions = Arc::new(SessionStore::new(15, 45, 8));
         let (webrtc, audio_out) = WebrtcEngine::new(
             Ipv4Addr::LOCALHOST.into(),
@@ -167,7 +169,7 @@ mod tests {
         let config = Config::parse_from(["lanline-server", "--no-beacon", "--enable-tx"]);
         let registry = Arc::new(DeviceRegistry::new()); // no device selected
         let radio_cfg = Arc::new(Mutex::new(RadioConfig::default_noaa()));
-        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, std::env::temp_dir(), true);
+        let radio_mgr = RadioManager::new(radio_cfg.clone(), registry.clone(), None, std::env::temp_dir(), true, crate::voice::VoiceShared::new(&config));
         let sessions = Arc::new(SessionStore::new(15, 45, 8));
         let (webrtc, audio_out) = WebrtcEngine::new(
             Ipv4Addr::LOCALHOST.into(),

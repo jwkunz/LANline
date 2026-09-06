@@ -114,6 +114,28 @@ pub struct Config {
     #[arg(long, env = "LANLINE_FREQ_CORRECTION_PPM", allow_hyphen_values = true, default_value_t = 0.0)]
     pub freq_correction_ppm: f64,
 
+    /// Text-to-speech for the voice modes: `POST /radio/tx/say` synthesizes
+    /// the text and transmits it. Needs the `tts` build feature and either
+    /// `espeak-ng` (default) or `piper` (see `--tts-voice`) on `PATH`.
+    #[arg(long, env = "LANLINE_TTS", default_value_t = false)]
+    pub tts: bool,
+
+    /// Path to a Piper voice model (`*.onnx`, with its `*.onnx.json` beside
+    /// it). When set, `--tts` uses Piper's neural voice; otherwise espeak-ng.
+    #[arg(long, env = "LANLINE_TTS_VOICE")]
+    pub tts_voice: Option<PathBuf>,
+
+    /// Speech-to-text on received transmissions: each over is transcribed and
+    /// appended to `GET /radio/transcript`. Needs the `stt` build feature.
+    #[arg(long, env = "LANLINE_STT", default_value_t = false)]
+    pub stt: bool,
+
+    /// Directory holding a Whisper model (`config.json`, `tokenizer.json`,
+    /// `model.safetensors` — the HF layout, e.g. from `openai/whisper-base.en`).
+    /// Required when `--stt` is set.
+    #[arg(long, env = "LANLINE_STT_MODEL")]
+    pub stt_model: Option<PathBuf>,
+
     /// Allow push-to-talk transmit (`POST /radio/tx/key`). Off by default —
     /// a general-purpose SDR keying a real transmitter is a materially
     /// bigger deal than one that only ever receives, so it needs explicit

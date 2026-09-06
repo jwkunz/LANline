@@ -60,6 +60,7 @@ import type {
   ModeInfo,
   RadioConfig,
   RadioStatus,
+  TranscriptEntry,
   ServerInfo,
   TxLogEntry,
 } from "./types";
@@ -223,6 +224,7 @@ interface State {
   ais: AisSnapshot | null;
   aprs: AprsSnapshot | null;
   aprsPackets: string[];
+  transcript: TranscriptEntry[];
   apt: AptStatus | null;
   scopeSel: string | null;
   scopeRangeNm: number | "auto";
@@ -266,6 +268,7 @@ const state: State = {
   ais: null,
   aprs: null,
   aprsPackets: [],
+  transcript: [],
   apt: null,
   scopeSel: null,
   scopeRangeNm: "auto",
@@ -1280,7 +1283,17 @@ async function poll(): Promise<void> {
         void refreshAptImage();
       }
     }
-    setState({ server, radio, status, audioStats, adsb, ais, aprs, aprsPackets, apt });
+    let transcript = state.transcript;
+    if (
+      server.capabilities.includes("stt") &&
+      ["frs", "ham", "nbfm", "wbfm", "am"].includes(radio.mode)
+    ) {
+      transcript = await state.client
+        .transcript()
+        .then((r) => r.segments)
+        .catch(() => state.transcript);
+    }
+    setState({ server, radio, status, audioStats, adsb, ais, aprs, aprsPackets, transcript, apt });
   } catch (e) {
     pollFails += 1;
     if (pollFails >= 3) loopFailed(e as ApiError, "poll");
@@ -1454,6 +1467,27 @@ function patchLive(): void {
     b.classList.toggle("tuned", Number(b.dataset.hz) === freq);
   });
 
+  // Voice-text card (frs/ham): live transcript + TX-keyed lockout.
+  const vtLog = q<HTMLElement>("#vt-log");
+  if (vtLog) {
+    const atBottom = vtLog.scrollHeight - vtLog.scrollTop - vtLog.clientHeight < 40;
+    const html = transcriptInner();
+    if (vtLog.innerHTML !== html) {
+      vtLog.innerHTML = html;
+      if (atBottom) vtLog.scrollTop = vtLog.scrollHeight;
+    }
+  }
+  const vtBusy = q<HTMLElement>("#vt-busy");
+  if (vtBusy) vtBusy.hidden = !(state.status?.dsp.transcribing ?? false);
+  const keyed = state.status?.dsp.tx_keyed ?? false;
+  const vtMsg = q<HTMLInputElement>("#vt-msg");
+  const vtSay = q<HTMLButtonElement>("#vt-say");
+  if (vtMsg && vtMsg !== document.activeElement) vtMsg.disabled = keyed;
+  if (vtSay) {
+    vtSay.disabled = keyed;
+    vtSay.textContent = keyed ? "on air…" : "Speak";
+  }
+
   // Keep the manual-tune dial's number in sync as +/- and Seek move the
   // frequency — structKey() ignores frequency_hz, so the panel isn't
   // rebuilt. Don't stomp a value the user is mid-edit on.
@@ -1525,6 +1559,7 @@ function installDelegates(): void {
     if (hit("#aprs-send")) return void sendAprsMsg();
     if (hit("#aprs-beacon")) return void beaconAprs();
     if (hit("#aprs-freq-go")) return void aprsTune();
+    if (hit("#vt-say")) return void sendVoiceText();
     if (hit("#audio-toggle")) return void toggleAudio();
     if (hit("#audio-rec")) return void toggleAudioRecord();
     if (hit("#loc-find")) return findFromInput();
@@ -1633,6 +1668,7 @@ function installDelegates(): void {
     else if (id === "rp-paste") fillRepeaterFromShorthand();
     else if (id === "aprs-msg") void sendAprsMsg();
     else if (id === "aprs-freq") aprsTune();
+    else if (id === "vt-msg") void sendVoiceText();
   });
 
   // Press-and-hold, not click: pointerdown keys, pointerup/cancel unkeys.
@@ -1893,6 +1929,69 @@ async function beaconAprs(): Promise<void> {
   }
 }
 
+// --- Voice ↔ text (TTS on TX, STT on RX) --------------------------
+
+function transcriptInner(): string {
+  if (!state.transcript.length) {
+    return `<div class="note" style="padding:8px 4px">No received transmissions yet.</div>`;
+  }
+  return state.transcript
+    .slice(-40)
+    .map((s) => {
+      const t = new Date(s.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      return `<div class="aprs-msg in">
+        <span class="aprs-msg-who">${t} · ${s.rssi_dbfs.toFixed(0)} dBFS · ${s.secs.toFixed(1)}s</span>
+        <span class="aprs-msg-text">${esc(s.text)}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+function voiceTextCard(): string {
+  const caps = state.server?.capabilities ?? [];
+  const tts = caps.includes("tts");
+  const stt = caps.includes("stt");
+  if (!tts && !stt) return "";
+  const keyed = state.status?.dsp.tx_keyed ?? false;
+  return `
+    <section class="card" id="voice-text">
+      <h2>Voice text</h2>
+      ${
+        tts
+          ? `<div class="vt-send">
+        <input id="vt-msg" type="text" maxlength="500"
+          placeholder="type a message to speak on the air…" ${keyed ? "disabled" : ""} />
+        <button id="vt-say" ${keyed ? "disabled" : ""}>${keyed ? "on air…" : "Speak"}</button>
+      </div>`
+          : `<p class="note warn" style="margin:0">text-to-speech is not enabled (—tts) — receive only</p>`
+      }
+      ${
+        stt
+          ? `<div id="vt-log" class="stations vt-log">${transcriptInner()}</div>
+             <p class="note" id="vt-busy" style="margin:6px 0 0" hidden>transcribing…</p>`
+          : ""
+      }
+    </section>`;
+}
+
+async function sendVoiceText(): Promise<void> {
+  if (!state.client) return;
+  const inp = q<HTMLInputElement>("#vt-msg");
+  const text = (inp?.value ?? "").trim();
+  if (!text) return;
+  const btn = q<HTMLButtonElement>("#vt-say");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await state.client.saySpeech({ text });
+    logLine(`spoke (${r.backend}, ${r.secs.toFixed(1)}s): "${r.text}"`);
+    if (inp) inp.value = "";
+  } catch (e) {
+    logLine(`speak failed: ${e instanceof ApiError ? e.message : String(e)}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function wizardHtml(): string {
   switch (state.radio?.mode) {
     case "nbfm":
@@ -1904,9 +2003,9 @@ function wizardHtml(): string {
     case "apt":
       return aptWizardHtml();
     case "frs":
-      return frsWizardHtml();
+      return frsWizardHtml() + voiceTextCard();
     case "ham":
-      return hamWizardHtml();
+      return hamWizardHtml() + voiceTextCard();
     case "adsb":
     case "ais":
       return scopeWizardHtml();

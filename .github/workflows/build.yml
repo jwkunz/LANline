@@ -270,6 +270,30 @@ jobs:
           path: web/dist
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+  voice:
+    # Keep the optional `voice-text` feature (TTS + candle Whisper STT)
+    # compiling. `check`, not a release artifact.
+    needs: web-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: voice
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsoapysdr-dev libopus-dev libclang-dev pkg-config espeak-ng libespeak-ng-dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - run: "cargo clippy --locked --features voice-text -p lanline-server --all-targets -- -D warnings"
+      - run: "cargo test --locked --features voice-text -p lanline-server voice::"
+
   android:
     # The APK embeds the same built web bundle as the server. Debug build:
     # it's self-signed with the debug keystore so it installs for sideloading

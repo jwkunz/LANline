@@ -1120,7 +1120,49 @@ newest first. Auth required.
 
 `released_at`/`duration_ms` are `null` when no explicit `unkey` was recorded
 for that key — the transmission was auto-released at the server's 10 s cap,
-or the client vanished. The log is not persisted across a server restart.
+or the client vanished. The log is not persisted across a server restart. An
+APRS or spoken (`say`) burst appears here with `duration_ms: 0` and its text
+in a `detail` field.
+
+### `POST /api/v1/radio/tx/say`
+
+**Text-to-speech transmit** — synthesize `text` and key it on the air.
+Feature `tts` + `--tts`; `--enable-tx`; a voice mode (`nbfm`/`wbfm`/`am`/
+`frs`/`ham`); the radio running; a tx-capable device. Auth required.
+
+```jsonc
+// request
+{ "text": "radio check from lan line", "gain_db": 0 }
+// response
+{ "transmitted": true, "secs": 2.1, "text": "radio check from lan line",
+  "backend": "espeak-ng" }
+```
+
+The synth backend is `espeak-ng` by default, or `piper` when the server was
+started with `--tts-voice <model.onnx>`. A spoken message can run up to 30 s
+(a normal PTT over is capped at 10). `403` without `--enable-tx` or `--tts`,
+`409` off a voice mode or when the radio is stopped.
+
+### `GET /api/v1/radio/transcript`
+
+Recognized text from received transmissions (feature `stt` + `--stt`), newest
+last. Unauthenticated, read-only. Each over is transcribed on a worker thread
+when its squelch closes.
+
+```json
+{
+  "time": "2026-09-06T22:40:11Z",
+  "count": 3,
+  "segments": [
+    { "time": "…", "text": "meet at the north gate at fifteen hundred",
+      "rssi_dbfs": -34.1, "secs": 4.2 }
+  ]
+}
+```
+
+`DspStatus.transcribing` (in `/radio/status`) is `true` while a segment is
+being decoded. STT (`stt`) and TTS (`tts`) also appear in
+`GET /api/v1/server`'s `capabilities`.
 
 ---
 

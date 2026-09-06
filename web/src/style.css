@@ -514,6 +514,21 @@ h3.ham-sub {
   min-width: 0;
 }
 
+/* --- Voice text ---------------------------------------------------- */
+.vt-send {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.vt-send input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.vt-log {
+  max-height: min(40vh, 300px);
+  gap: 4px;
+}
+
 .tx-log {
   margin-top: 10px;
   font-size: 12px;

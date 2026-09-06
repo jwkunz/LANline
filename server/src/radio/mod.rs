@@ -79,6 +79,10 @@ pub struct Telemetry {
 /// connection, a crashed client) leaving the transmitter keyed indefinitely.
 #[cfg(feature = "soapy")]
 const MAX_TX_SECS: f64 = 10.0;
+/// Hard cap for a synthesized `say` message — longer than a PTT over, still
+/// bounded.
+#[cfg(feature = "soapy")]
+const MAX_SAY_SECS: f64 = 30.0;
 
 /// What the API layer hands `RadioManager::key` for one push-to-talk.
 #[derive(Clone, Copy, Default)]
@@ -188,6 +192,9 @@ pub struct RadioManager {
     /// In-memory station log of push-to-talk keys, served by
     /// `GET /api/v1/radio/tx/log`.
     tx_audit: TxAudit,
+    /// Text-to-speech (TX) + speech-to-text (RX) — inert unless built with the
+    /// `tts` / `stt` features and enabled via `--tts` / `--stt`.
+    voice: Arc<crate::voice::VoiceShared>,
 }
 
 /// How many transmit-log entries to keep.
@@ -434,6 +441,7 @@ impl RadioManager {
         dump_wav: Option<PathBuf>,
         iq_dir: std::path::PathBuf,
         enable_tx: bool,
+        voice: Arc<crate::voice::VoiceShared>,
     ) -> Arc<Self> {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Arc::new(Self {
@@ -452,7 +460,18 @@ impl RadioManager {
             enable_tx,
             audio_in: TxAudioSource::new(),
             tx_audit: TxAudit::default(),
+            voice,
         })
+    }
+
+    pub fn voice(&self) -> Arc<crate::voice::VoiceShared> {
+        self.voice.clone()
+    }
+    pub fn tts_enabled(&self) -> bool {
+        self.voice.tts_enabled()
+    }
+    pub fn stt_enabled(&self) -> bool {
+        self.voice.stt_enabled()
     }
 
     pub fn tx_enabled(&self) -> bool {
@@ -622,6 +641,38 @@ impl RadioManager {
         Err("built without SDR support")
     }
 
+    /// Transmit a synthesized speech clip on a running voice pipeline: prefill
+    /// the TX audio buffer and key for exactly its length. `pcm` is 48 kHz
+    /// mono. Gated by `--enable-tx`; the API handler checks the mode.
+    #[cfg(feature = "soapy")]
+    pub fn say(&self, pcm: Vec<f32>, gain_db: f64, deviation_hz: f64) -> Result<(), &'static str> {
+        if !self.enable_tx {
+            return Err("transmit is disabled on this server — see --enable-tx");
+        }
+        let secs = pcm.len() as f64 / 48_000.0;
+        self.audio_in.clear();
+        self.audio_in.push(&pcm);
+        let run = self.run.lock().unwrap();
+        let cmd_tx = run.cmd_tx.as_ref().ok_or("radio is not running")?;
+        cmd_tx
+            .send(PipelineCmd::Key(TxKeySpec {
+                deviation_hz,
+                mic_gain: 1.0,
+                gain_db,
+                max_secs: secs + 0.4,
+                offset_hz: 0.0,
+                tone_hz: 0.0,
+                dcs_code: 0,
+                dcs_invert: false,
+            }))
+            .map_err(|_| "pipeline is not accepting commands")
+    }
+
+    #[cfg(not(feature = "soapy"))]
+    pub fn say(&self, _pcm: Vec<f32>, _gain_db: f64, _deviation_hz: f64) -> Result<(), &'static str> {
+        Err("built without SDR support")
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
         self.tx.subscribe()
     }
@@ -694,6 +745,7 @@ impl RadioManager {
         let analysis = self.analysis.clone();
         let audio_rec = self.audio_rec.clone();
         let audio_in = self.audio_in.clone();
+        let voice = self.voice.clone();
 
         #[cfg(feature = "soapy")]
         let (cmd_tx, cmd_rx) = mpsc::channel::<PipelineCmd>();
@@ -705,7 +757,7 @@ impl RadioManager {
             .spawn(move || {
                 run_pipeline(
                     params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, aprs, analysis,
-                    audio_rec, audio_in,
+                    audio_rec, audio_in, voice,
                 )
             })
             .expect("spawn rx-pipeline thread");
@@ -1332,8 +1384,9 @@ fn run_pipeline(
     analysis: Arc<AnalysisShared>,
     audio_rec: Arc<AudioRecorder>,
     audio_in: Arc<TxAudioSource>,
+    voice: Arc<crate::voice::VoiceShared>,
 ) {
-    let _ = (&adsb, &ais, &apt, &aprs, &analysis, &audio_in);
+    let _ = (&adsb, &ais, &apt, &aprs, &analysis, &audio_in, &voice);
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
         Ok(w) => {
@@ -1355,9 +1408,18 @@ fn run_pipeline(
             run_synth(Synth::Silence, fc, &tx, &telemetry, &stop, wav.as_mut(), &audio_rec)
         }
         #[cfg(feature = "soapy")]
-        SourceKind::Sdr(sdr) => {
-            run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut(), &audio_rec, cmd_rx, &audio_in)
-        }
+        SourceKind::Sdr(sdr) => run_sdr(
+            *sdr,
+            fc,
+            &tx,
+            &telemetry,
+            &stop,
+            wav.as_mut(),
+            &audio_rec,
+            cmd_rx,
+            &audio_in,
+            &voice,
+        ),
         #[cfg(feature = "soapy")]
         SourceKind::Adsb(p) => run_adsb(*p, adsb, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
@@ -1458,6 +1520,7 @@ fn run_sdr(
     audio_rec: &AudioRecorder,
     cmd_rx: mpsc::Receiver<PipelineCmd>,
     audio_in: &Arc<TxAudioSource>,
+    voice: &Arc<crate::voice::VoiceShared>,
 ) {
     use num_complex::Complex32;
     use soapysdr::{Device, Direction, ErrorCode};
@@ -1707,6 +1770,10 @@ fn run_sdr(
                 w.write(&pcm);
             }
             audio_rec.write(&pcm);
+            {
+                let m = chain.metrics();
+                voice.stt_feed(&pcm, m.squelch_open, m.rssi_dbfs);
+            }
             if let Ok(nb) = encoder.encode_float(&pcm, &mut buf) {
                 let _ = tx.send(AudioFrame {
                     data: Bytes::copy_from_slice(&buf[..nb]),
@@ -1826,7 +1893,8 @@ fn key_tx(
         let mut iq_chunk: Vec<Complex32> = Vec::new();
         let mtu = txs.mtu().unwrap_or(65_536).max(1);
         let started = Instant::now();
-        let max_dur = Duration::from_secs_f64(spec.max_secs.clamp(0.5, MAX_TX_SECS));
+        // PTT keys pass MAX_TX_SECS; a spoken `say` message can run longer.
+        let max_dur = Duration::from_secs_f64(spec.max_secs.clamp(0.5, MAX_SAY_SECS));
 
         'key: while !stop.load(Ordering::SeqCst) && started.elapsed() < max_dur {
             while let Ok(c) = cmd_rx.try_recv() {

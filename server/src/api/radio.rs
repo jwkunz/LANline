@@ -226,6 +226,84 @@ pub async fn tx_log(
     Json(st.radio_mgr.tx_log())
 }
 
+/// Text-to-speech transmit: synthesize `text` and key it on the air. Needs
+/// `--enable-tx` + `--tts` + a voice mode + the radio running. Body:
+/// `{ "text": "…", "gain_db"? }`.
+#[cfg(feature = "tts")]
+pub async fn say(
+    State(st): State<AppState>,
+    auth: AuthedSession,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    if !st.radio_mgr.tx_enabled() {
+        return Err(ApiError::forbidden("transmit is disabled on this server — see --enable-tx"));
+    }
+    if !st.radio_mgr.tts_enabled() {
+        return Err(ApiError::forbidden("text-to-speech is not enabled — start with --tts"));
+    }
+    let (mode, running, deviation_hz) = {
+        let r = st.radio.lock().unwrap();
+        let dev = r.mode_params.get("deviation_hz").and_then(Value::as_f64).unwrap_or(2_500.0);
+        (r.mode.clone(), r.running, dev)
+    };
+    if !matches!(mode.as_str(), "nbfm" | "wbfm" | "am" | "frs" | "ham") {
+        return Err(ApiError::bad_request("speak is only available in a voice mode"));
+    }
+    if !running {
+        return Err(ApiError::conflict("start the radio before transmitting"));
+    }
+    if !st.registry.selected().map(|d| d.tx_capable).unwrap_or(false) {
+        return Err(ApiError::device_unavailable("selected device cannot transmit"));
+    }
+    let text = body
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::bad_request("`text` is required"))?
+        .to_string();
+    let gain_db = body.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 61.0);
+
+    let cfg = crate::voice::tts::TtsCfg::from_config(&st.config);
+    let backend = cfg.backend();
+    let pcm = tokio::task::spawn_blocking({
+        let text = text.clone();
+        move || crate::voice::tts::synthesize(&text, &cfg)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(format!("tts: {e}")))?;
+    let secs = pcm.len() as f64 / 48_000.0;
+
+    st.radio_mgr.say(pcm, gain_db, deviation_hz).map_err(ApiError::conflict)?;
+
+    let client = st.sessions.get(auth.id).map(|s| s.client.name).unwrap_or_default();
+    let tx_freq = {
+        let r = st.radio.lock().unwrap();
+        r.frequency_hz
+    };
+    st.radio_mgr.tx_log_burst(client, mode, tx_freq, format!("say ({backend}): {text}"));
+
+    Ok(Json(serde_json::json!({
+        "transmitted": true, "secs": (secs * 10.0).round() / 10.0, "text": text, "backend": backend
+    })))
+}
+
+#[cfg(not(feature = "tts"))]
+pub async fn say(State(_st): State<AppState>, _auth: AuthedSession) -> ApiResult<Json<Value>> {
+    Err(ApiError::forbidden("this server was built without the `tts` feature"))
+}
+
+/// Recognized text from received transmissions (`--stt`), newest last.
+pub async fn transcript(State(st): State<AppState>) -> Json<Value> {
+    let segs = st.radio_mgr.voice().transcript();
+    Json(serde_json::json!({
+        "time": crate::model::now_utc(),
+        "count": segs.len(),
+        "segments": segs,
+    }))
+}
+
 pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
     let (mode, frequency_hz, bitrate_bps, sample_rate_hz, channels) = {
         let r = st.radio.lock().unwrap();
@@ -261,6 +339,10 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
             sample_overruns: tele.overruns,
             pipeline_latency_ms: running.then_some(20.0),
             tx_keyed: tele.tx_keyed,
+            transcribing: st
+                .radio_mgr
+                .stt_enabled()
+                .then(|| st.radio_mgr.voice().transcribing()),
         },
         audio: AudioStatus {
             encoder: "opus",

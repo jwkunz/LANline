@@ -348,6 +348,22 @@ pub struct DspStatus {
     pub pipeline_latency_ms: Option<f64>,
     /// Currently transmitting (push-to-talk keyed).
     pub tx_keyed: bool,
+    /// A received over is being transcribed right now (`--stt`). Omitted when
+    /// STT is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcribing: Option<bool>,
+}
+
+/// One transcribed received transmission (`GET /api/v1/radio/transcript`),
+/// when `--stt` is enabled. `secs` is the length of the over; `rssi_dbfs` its
+/// mean received level.
+#[derive(Serialize, Clone, Debug)]
+pub struct TranscriptEntry {
+    #[serde(with = "time::serde::rfc3339")]
+    pub time: OffsetDateTime,
+    pub text: String,
+    pub rssi_dbfs: f32,
+    pub secs: f32,
 }
 
 /// A demod-audio recording (`POST /api/v1/radio/record`), in progress or

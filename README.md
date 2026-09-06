@@ -69,6 +69,7 @@ wrapper (`client/android`).
 | 2q | APRS receive mode — 1200-baud AFSK/AX.25 decode (position / MIC-E / status / message), per-callsign station tracker on the shared radar scope, `GET /aprs/stations` + `/aprs/packets`, TNC2 TCP feed | ✅ |
 | 2r | Concurrent radios — `lanline-hypervisor` runs one server per SDR (server split into lib + bin), collision-free port blocks + `serial=`-resolved devices + backoff supervision, aggregated discovery (`LANLINE-FLEET-BEACON`, `GET /api/v1/fleet`, per-child mDNS), native Android radio chooser | ✅ |
 | 2s | APRS transmit — `POST /aprs/tx` (message / position / raw), half-duplex burst in `run_aprs` reusing the demod's modulator, `--enable-tx`-gated, local TNC echo + audit log; web `aprs` panel messaging card → two browser tabs = an APRS chat room between the fleet's two radios | ✅ |
+| 2t | Voice ↔ text for the FM/AM modes (optional, feature `voice-text`) — `POST /radio/tx/say` speaks typed text on the air (espeak-ng / Piper), `GET /radio/transcript` transcribes received overs (pure-Rust Whisper via candle); web "Voice text" card in `frs`/`ham` | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -229,6 +230,28 @@ wideband FM at 4 Msps can starve the WebRTC threads (audio drops).
 
 Sanity-check the radio independently with `SoapySDRUtil --find` from inside the
 same shell.
+
+### Voice ↔ text (optional)
+
+Type a message and have the server speak it on the air, and transcribe received
+transmissions back to text — for the `nbfm` / `wbfm` / `am` / `frs` / `ham`
+modes. Off by default; build it in with `--features voice-text`:
+
+```sh
+sudo apt-get install -y espeak-ng            # TTS engine (or: brew install espeak-ng)
+cargo build --release --features voice-text -p lanline-server
+# STT needs a local Whisper model in the HF layout, e.g.
+huggingface-cli download openai/whisper-base.en --local-dir ~/models/whisper-base.en
+./target/release/lanline-server --device driver=hackrf --enable-tx \
+    --tts --stt --stt-model ~/models/whisper-base.en
+```
+
+`POST /api/v1/radio/tx/say {"text": "…"}` speaks it; `GET /api/v1/radio/transcript`
+returns the recognized overs. The web client shows a **Voice text** card in the
+`frs` / `ham` panels. `--tts-voice <model.onnx>` swaps espeak-ng's robotic
+voice for a Piper neural one (needs the `piper` binary). See
+[`docs/rest-api.md`](docs/rest-api.md) and the "Voice ↔ text" section of
+[`docs/architecture.md`](docs/architecture.md).
 
 ### Running multiple radios
 

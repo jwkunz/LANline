@@ -1,6 +1,6 @@
 [package]
 name = "lanline-server"
-version = "2.1.1"
+version = "2.2.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,14 @@ default = ["soapy"]
 # `--no-default-features` on a box without it: device enumeration is stubbed
 # and only `debug_tone` works.
 soapy = ["dep:soapysdr"]
+# `tts` — text-to-speech for the voice modes (`POST /radio/tx/say`). No Rust
+# deps: it shells out to `espeak-ng` (default) or `piper` (`--tts-voice`), so
+# one of those must be on PATH at runtime.
+tts = []
+# `stt` — speech-to-text on received transmissions (`GET /radio/transcript`).
+# Pure-Rust Whisper via candle; needs a local model dir (`--stt-model`).
+stt = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+voice-text = ["tts", "stt"]
 
 [dependencies]
 webrtc.workspace = true
@@ -50,3 +58,9 @@ rustls-pemfile.workspace = true
 rcgen.workspace = true
 sha2.workspace = true
 soapysdr = { workspace = true, optional = true }
+
+# --- stt (candle Whisper), all optional ---------------------------------
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"], optional = true }

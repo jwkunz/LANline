@@ -76,6 +76,16 @@ export interface DspStatus {
   sample_overruns: number;
   pipeline_latency_ms: number | null;
   tx_keyed: boolean;
+  /** A received over is being transcribed right now (`--stt`). */
+  transcribing?: boolean | null;
+}
+
+/** One transcribed received transmission (`GET /api/v1/radio/transcript`). */
+export interface TranscriptEntry {
+  time: string;
+  text: string;
+  rssi_dbfs: number;
+  secs: number;
 }
 
 export interface AudioRecInfo {
