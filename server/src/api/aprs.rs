@@ -63,11 +63,16 @@ pub async fn tx(
     if !st.radio_mgr.tx_enabled() {
         return Err(ApiError::forbidden("transmit is disabled on this server — see --enable-tx"));
     }
-    let (mode, running, gain_default, dev_default) = {
+    let (mode, running, freq_hz, gain_default, dev_default) = {
         let r = st.radio.lock().unwrap();
         let g = r.mode_params.get("tx_gain_db").and_then(Value::as_f64).unwrap_or(30.0);
         let d = r.mode_params.get("tx_deviation_hz").and_then(Value::as_f64).unwrap_or(3_000.0);
-        (r.mode.clone(), r.running, g, d)
+        let f = if r.frequency_hz >= 1_000_000 {
+            r.frequency_hz
+        } else {
+            crate::aprs::APRS_HZ as u64
+        };
+        (r.mode.clone(), r.running, f, g, d)
     };
     if mode != "aprs" {
         return Err(ApiError::bad_request("APRS transmit requires `aprs` mode"));
@@ -144,7 +149,7 @@ pub async fn tx(
         .map_err(ApiError::conflict)?;
 
     let client = st.sessions.get(auth.id).map(|s| s.client.name).unwrap_or_default();
-    st.radio_mgr.tx_log_burst(client, "aprs".into(), crate::aprs::APRS_HZ as u64, tnc2.clone());
+    st.radio_mgr.tx_log_burst(client, "aprs".into(), freq_hz, tnc2.clone());
 
     Ok(Json(serde_json::json!({ "transmitted": true, "tnc2": tnc2, "bytes": bytes })))
 }

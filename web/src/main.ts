@@ -775,7 +775,7 @@ async function switchMode(id: string): Promise<void> {
   const meta = MODE_META[id];
   setState({ switching: true });
 
-  const fixedFreq = id === "adsb" || id === "ais" || id === "aprs";
+  const fixedFreq = id === "adsb" || id === "ais";
   const patch: Record<string, unknown> = { mode: id };
   if (id !== "debug_tone") {
     const last = Number(localStorage.getItem(freqKey(id)));
@@ -1428,6 +1428,11 @@ function patchLive(): void {
     setHTML("#scope-list", scopeListInner());
     drawScope();
     if (state.radio.mode === "aprs") {
+      const fq = q<HTMLInputElement>("#aprs-freq");
+      if (fq && fq !== document.activeElement) {
+        const v = (state.radio.frequency_hz / 1e6).toFixed(4);
+        if (fq.value !== v) fq.value = v;
+      }
       const log = q<HTMLElement>("#aprs-log");
       if (log) {
         const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
@@ -1519,6 +1524,7 @@ function installDelegates(): void {
     if (hit("#radio-options")) return void openRadioOptionsPanel();
     if (hit("#aprs-send")) return void sendAprsMsg();
     if (hit("#aprs-beacon")) return void beaconAprs();
+    if (hit("#aprs-freq-go")) return void aprsTune();
     if (hit("#audio-toggle")) return void toggleAudio();
     if (hit("#audio-rec")) return void toggleAudioRecord();
     if (hit("#loc-find")) return findFromInput();
@@ -1626,6 +1632,7 @@ function installDelegates(): void {
     else if (id === "ham-freq") hamManualGo();
     else if (id === "rp-paste") fillRepeaterFromShorthand();
     else if (id === "aprs-msg") void sendAprsMsg();
+    else if (id === "aprs-freq") aprsTune();
   });
 
   // Press-and-hold, not click: pointerdown keys, pointerup/cancel unkeys.
@@ -1814,6 +1821,7 @@ function aprsChatHtml(): string {
   const mp = state.radio?.mode_params ?? {};
   const hasRef = Number(mp.reference_lat ?? 0) !== 0 || Number(mp.reference_lon ?? 0) !== 0;
   const tx = state.server?.capabilities.includes("ptt") ?? false;
+  const mhz = ((state.radio?.frequency_hz ?? 144_390_000) / 1e6).toFixed(4);
   return `
     <section class="card" id="aprs-chat">
       <h2>APRS messaging</h2>
@@ -1822,6 +1830,12 @@ function aprsChatHtml(): string {
           ? ""
           : `<p class="note warn" style="margin:0 0 10px">transmit is disabled on this server (—enable-tx) — receive only</p>`
       }
+      <div class="aprs-freq">
+        <input id="aprs-freq" type="text" inputmode="decimal" spellcheck="false" value="${mhz}" />
+        <span class="dial-unit">MHz</span>
+        <button id="aprs-freq-go" class="secondary">Tune</button>
+        <span class="note" style="margin-left:auto">144.390 = 2 m APRS</span>
+      </div>
       <div class="aprs-calls">
         <input id="aprs-mycall" type="text" spellcheck="false" autocapitalize="characters"
           placeholder="your call e.g. KZ4AZ-1" value="${esc(aprsCall("my"))}" />
@@ -1837,6 +1851,12 @@ function aprsChatHtml(): string {
           title="${hasRef ? "beacon your reference position" : "set a reference position first"}">Beacon</button>
       </div>
     </section>`;
+}
+
+function aprsTune(): void {
+  const v = Number((q<HTMLInputElement>("#aprs-freq")?.value ?? "").trim());
+  if (!Number.isFinite(v) || v <= 0) return;
+  void tuneFrequency(Math.round(v * 1e6));
 }
 
 async function sendAprsMsg(): Promise<void> {

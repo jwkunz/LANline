@@ -455,6 +455,17 @@ h3.ham-sub {
   margin-left: 4px;
 }
 /* --- APRS messaging -------------------------------------------------- */
+.aprs-freq {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.aprs-freq input {
+  flex: 0 1 120px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 .aprs-calls {
   display: flex;
   gap: 8px;

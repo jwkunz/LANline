@@ -535,15 +535,17 @@ export](#ais-vessel-track-export) or the AIVDM TCP feed. `mode_params`:
 `reference_lat`/`reference_lon` (receiver position, `0,0` = unset), `max_range_nm`
 (default 60), `trail_seconds` (default 600), `forget_seconds` (default 900).
 
-`aprs` is also **non-audio**: it tunes 144.390 MHz (the North American APRS
-channel) as NBFM, runs a 1200-baud Bell 202 AFSK demodulator → NRZI/HDLC
-deframer → AX.25 UI-frame decode → APRS payload parse (uncompressed and
-compressed position, MIC-E, status, message), and folds the result into a
-per-callsign station table. Read it from [APRS station-track
-export](#aprs-station-track-export) or the TNC2 TCP feed. `mode_params`:
-`reference_lat`/`reference_lon` (receiver position, `0,0` = unset),
-`max_range_km` (default 300), `trail_seconds` (default 1800), `forget_seconds`
-(default 3600).
+`aprs` is also **non-audio**: it defaults to 144.390 MHz (the North American
+APRS channel) as NBFM but is **tunable** (`frequency_hz`, hot-retune, so the
+same 1200-baud Bell 202 AFSK / AX.25 chain — RX **and** TX — can run on e.g.
+the 33 cm band). Demod: AFSK → NRZI/HDLC deframer → AX.25 UI-frame decode →
+APRS payload parse (uncompressed and compressed position, MIC-E, status,
+message), folded into a per-callsign station table. Read it from [APRS
+station-track export](#aprs-station-track-export) or the TNC2 TCP feed.
+`mode_params`: `reference_lat`/`reference_lon` (receiver position, `0,0` =
+unset), `max_range_km` (default 300), `trail_seconds` (default 1800),
+`forget_seconds` (default 3600), `tx_gain_db` (default 30), `tx_deviation_hz`
+(default 3000).
 
 ---
 

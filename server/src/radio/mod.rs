@@ -937,6 +937,9 @@ struct AisSdrParams {
 struct AprsSdrParams {
     soapy_args: String,
     device_rate: f64,
+    /// Packet channel centre. Default 144.390 MHz; tunable so the same
+    /// AFSK/AX.25 chain can run on e.g. the 33 cm band.
+    freq_hz: f64,
     channel: usize,
     antenna: Option<String>,
     agc: bool,
@@ -1177,6 +1180,10 @@ impl PipelineParams {
                         SourceKind::Aprs(Box::new(AprsSdrParams {
                             soapy_args: dev.soapy_args.clone(),
                             device_rate: cfg.tuner.sample_rate_hz,
+                            freq_hz: {
+                                let f = cfg.frequency_hz as f64;
+                                if f >= 1_000_000.0 { f } else { crate::aprs::APRS_HZ }
+                            },
                             channel: cfg.tuner.channel,
                             antenna: cfg.tuner.antenna.clone(),
                             agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
@@ -2164,15 +2171,16 @@ fn run_aprs(
     cmd_rx: mpsc::Receiver<PipelineCmd>,
 ) {
     use crate::aprs::demod::AprsDemod;
-    use crate::aprs::APRS_HZ;
     use num_complex::Complex32;
     use soapysdr::{Device, Direction, ErrorCode};
 
     let dir = Direction::Rx;
     let ch = p.channel;
-    // Tune 250 kHz low so 144.390 sits clear of the ZIF DC spike.
+    // Tune `lo_offset` low so the packet channel sits clear of the ZIF DC spike;
+    // the demod NCO shifts it back. `cur_freq` tracks live retunes.
     let lo_offset = 250_000.0;
-    let center = APRS_HZ - lo_offset;
+    let mut cur_freq = p.freq_hz;
+    let mut center = cur_freq - lo_offset;
 
     shared
         .tracker
@@ -2227,13 +2235,14 @@ fn run_aprs(
 
     let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
     let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
-    let mut demod = AprsDemod::new(p.device_rate, APRS_HZ - center);
+    // The NCO always shifts by `lo_offset` regardless of centre frequency.
+    let mut demod = AprsDemod::new(p.device_rate, lo_offset);
 
     telemetry.lock().unwrap().source = "aprs";
     tracing::info!(
         "aprs: {} @ {:.4} MHz, {:.1} Msps, channel rate {:.0} Hz, ref {}",
         p.soapy_args,
-        APRS_HZ / 1e6,
+        cur_freq / 1e6,
         p.device_rate / 1e6,
         demod.channel_rate(),
         match p.reference {
@@ -2250,6 +2259,15 @@ fn run_aprs(
     while !stop.load(Ordering::SeqCst) {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
+                PipelineCmd::Retune(hz) => {
+                    cur_freq = hz;
+                    center = hz - lo_offset;
+                    log_set(
+                        "frequency",
+                        dev.set_frequency(dir, ch, apply_ppm(center, p.freq_correction_ppm), ""),
+                    );
+                    tracing::info!("aprs: retuned to {:.4} MHz (live)", hz / 1e6);
+                }
                 PipelineCmd::Gain { agc, overall, elements } => {
                     log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
                     if !agc {
@@ -2262,8 +2280,10 @@ fn run_aprs(
                     }
                 }
                 PipelineCmd::AprsTx(spec) => {
-                    if aprs_tx_burst(&dev, ch, &log_set, &p, center, &spec, &mut stream, telemetry)
-                        .is_err()
+                    if aprs_tx_burst(
+                        &dev, ch, &log_set, &p, cur_freq, center, &spec, &mut stream, telemetry,
+                    )
+                    .is_err()
                     {
                         // RX could not be brought back up — let the pipeline
                         // die and be restarted.
@@ -2316,8 +2336,8 @@ fn run_aprs(
     let _ = stream.deactivate(None);
 }
 
-/// One half-duplex APRS transmit burst: drop RX, key 144.390 MHz straight (no
-/// LO offset — like [`key_tx`]), modulate `spec.frame` via
+/// One half-duplex APRS transmit burst: drop RX, key the packet channel
+/// straight (no LO offset — like [`key_tx`]), modulate `spec.frame` via
 /// [`crate::aprs::tx::modulate`] and write it, then retune + reactivate RX.
 /// `Err(())` means RX could not be brought back — the caller lets the pipeline
 /// restart.
@@ -2328,12 +2348,12 @@ fn aprs_tx_burst(
     ch: usize,
     log_set: &dyn Fn(&str, Result<(), soapysdr::Error>),
     p: &AprsSdrParams,
+    tx_freq_hz: f64,
     rx_center_hz: f64,
     spec: &AprsTxSpec,
     rx_stream: &mut soapysdr::RxStream<num_complex::Complex32>,
     telemetry: &Arc<Mutex<Telemetry>>,
 ) -> Result<(), ()> {
-    use crate::aprs::APRS_HZ;
     use num_complex::Complex32;
     use soapysdr::Direction;
 
@@ -2350,7 +2370,7 @@ fn aprs_tx_burst(
     let txdir = Direction::Tx;
     log_set(
         "tx frequency",
-        dev.set_frequency(txdir, ch, apply_ppm(APRS_HZ, p.freq_correction_ppm), ""),
+        dev.set_frequency(txdir, ch, apply_ppm(tx_freq_hz, p.freq_correction_ppm), ""),
     );
     log_set("tx gain", dev.set_gain(txdir, ch, spec.gain_db));
 
