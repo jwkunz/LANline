@@ -642,6 +642,28 @@ async function toggleAudio(): Promise<void> {
   }
 }
 
+async function toggleAudioRecord(): Promise<void> {
+  if (!state.client) return;
+  const active = state.status?.recording.active ?? false;
+  try {
+    if (active) {
+      const r = (await state.client.recordAudio("stop")) as { last?: { secs: number } };
+      logLine(`recording stopped${r.last ? ` (${r.last.secs.toFixed(1)}s)` : ""}`);
+    } else {
+      await state.client.recordAudio("start", 300);
+      logLine("recording started (48 kHz WAV, 5 min cap)");
+    }
+  } catch (e) {
+    logLine(`recording — ${(e as ApiError).message}`);
+  }
+  // Reflect the new state now rather than waiting for the next poll.
+  try {
+    setState({ status: await state.client.radioStatus() });
+  } catch {
+    /* next poll will catch up */
+  }
+}
+
 function toggleMute(): void {
   if (state.audio) {
     state.audio.setMuted(!state.audio.muted);
@@ -1344,6 +1366,7 @@ function installDelegates(): void {
     if (hit("#radio-toggle")) return void toggleRadio();
     if (hit("#radio-options")) return void openRadioOptionsPanel();
     if (hit("#audio-toggle")) return void toggleAudio();
+    if (hit("#audio-rec")) return void toggleAudioRecord();
     if (hit("#loc-find")) return findFromInput();
     if (hit("#loc-me")) return useMyLocation();
     if (hit("#seek-down")) return void seek(-1);
@@ -2697,10 +2720,16 @@ function audioInner(): string {
           ? `failed${state.audioDetail ? ` — ${state.audioDetail}` : ""}`
           : "stopped";
   const stats = state.audioStats;
+  const rec = state.status?.recording;
+  const canRecord = ["nbfm", "wbfm", "am", "frs", "ham", "debug_tone"].includes(
+    state.radio?.mode ?? "",
+  );
+  const lr = rec?.last;
   return `
     <h2>Received audio</h2>
     <div class="mode-line">
       <span class="badge"><span class="dot ${dotClass}"></span>${esc(label)}</span>
+      ${rec?.active ? `<span class="badge"><span class="dot bad live"></span>recording</span>` : ""}
     </div>
     <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
       <button id="audio-toggle" class="${playing || busy ? "secondary" : ""}" ${busy ? "disabled" : ""}>
@@ -2709,7 +2738,19 @@ function audioInner(): string {
       <label class="note" style="display:flex; gap:6px; align-items:center">
         <input id="audio-mute" type="checkbox" ${state.audio?.muted ? "checked" : ""} /> mute
       </label>
+      ${
+        canRecord
+          ? `<button id="audio-rec" class="secondary">${rec?.active ? "⏹ Stop recording" : "⏺ Record"}</button>`
+          : ""
+      }
     </div>
+    ${
+      lr && !rec?.active
+        ? `<p class="note" style="margin:8px 0 0">saved <b>${esc(lr.filename)}</b>
+           (${lr.secs.toFixed(1)}s, ${(lr.bytes / 1e6).toFixed(1)} MB) —
+           <a href="${state.client?.audioRecordingUrl() ?? "#"}" download>download</a></p>`
+        : ""
+    }
     ${
       stats
         ? `<div class="grid" style="margin-top:14px">

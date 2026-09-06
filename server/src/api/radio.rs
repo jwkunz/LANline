@@ -251,7 +251,106 @@ pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
             sample_rate_hz,
             channels,
         },
+        recording: RecordingStatus {
+            active: st.radio_mgr.audio_rec().is_active(),
+            last: st.radio_mgr.audio_rec().last(),
+        },
         clients: st.webrtc.peer_count(),
         time: now_utc(),
     })
+}
+
+/// Modes whose pipeline produces the 48 kHz demod audio a recording captures.
+fn is_audio_mode(mode: &str) -> bool {
+    matches!(mode, "nbfm" | "wbfm" | "am" | "frs" | "ham" | "debug_tone")
+}
+
+#[derive(serde::Deserialize)]
+pub struct RecordBody {
+    /// `"start"` or `"stop"`.
+    action: String,
+    /// Length cap in seconds (default 300, max 3600).
+    max_secs: Option<f64>,
+}
+
+/// Start or stop a recording of the demodulated audio (48 kHz mono int16
+/// WAV) on the server. Download the finished file from `GET /radio/recording`.
+pub async fn record(
+    State(st): State<AppState>,
+    _auth: AuthedSession,
+    body: Option<Json<RecordBody>>,
+) -> ApiResult<Json<Value>> {
+    let body = body.map(|Json(b)| b).ok_or_else(|| ApiError::bad_request("body required"))?;
+    let rec = st.radio_mgr.audio_rec();
+
+    match body.action.as_str() {
+        "stop" => {
+            let last = rec.stop();
+            Ok(Json(serde_json::json!({ "active": false, "last": last })))
+        }
+        "start" => {
+            let (mode, freq, running) = {
+                let r = st.radio.lock().unwrap();
+                (r.mode.clone(), r.frequency_hz, r.running)
+            };
+            if !running || !is_audio_mode(&mode) {
+                return Err(ApiError::conflict(
+                    "start an audio mode (nbfm/wbfm/am/frs/ham) before recording — \
+                     Receiver Analysis has its own IQ recorder",
+                ));
+            }
+            if rec.is_active() {
+                return Err(ApiError::conflict("already recording"));
+            }
+            let max_secs = body.max_secs.unwrap_or(300.0).clamp(1.0, 3600.0);
+            let info = rec
+                .start(&mode, freq, max_secs)
+                .map_err(|e| ApiError::internal(format!("open recording: {e}")))?;
+            tracing::info!(
+                "audio recording started: {} (cap {max_secs:.0}s)",
+                info.filename
+            );
+            Ok(Json(serde_json::json!({
+                "active": true,
+                "filename": info.filename,
+                "path": info.path,
+                "sample_rate_hz": info.sample_rate_hz,
+                "max_secs": max_secs,
+            })))
+        }
+        other => Err(ApiError::bad_request(format!("unknown action `{other}`"))),
+    }
+}
+
+/// Download the most recent completed audio recording as a file attachment.
+pub async fn download(State(st): State<AppState>) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let rec = st.radio_mgr.audio_rec();
+    if rec.is_active() {
+        return ApiError::conflict("stop the current recording first").into_response();
+    }
+    let Some(info) = rec.last() else {
+        return ApiError::not_found("no completed audio recording").into_response();
+    };
+    let file = match tokio::fs::File::open(&info.path).await {
+        Ok(f) => f,
+        Err(e) => return ApiError::internal(format!("open recording: {e}")).into_response(),
+    };
+    let stream = tokio_util::io::ReaderStream::new(file);
+    (
+        [
+            (header::CONTENT_TYPE, "audio/wav".to_string()),
+            (header::CONTENT_LENGTH, info.bytes.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", info.filename),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
 }

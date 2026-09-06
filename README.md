@@ -31,6 +31,9 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
 - **Receiver Analysis**: a server-computed FFT panadapter + waterfall,
   rendered as an interactive (zoom / pan / click-to-tune) plot in the web
   client, with IQ `.wav` recording,
+- **recording**: a ⏺ button in the audio card captures the demodulated audio
+  to a 48 kHz mono `.wav` on the server (any audio mode), with a download
+  link — separate from Analysis mode's IQ recorder,
 - **discovery** so clients find it unaided: an **mDNS** responder
   (`lanline.local` + `_lanline._tcp`) for browsers, and a **UDP beacon** for the
   Android/CLI clients that can't use mDNS.
@@ -58,6 +61,7 @@ wrapper (`client/android`).
 | 2j | Multi-radio device picker (HackRF / ADALM-Pluto), TLS with a self-signed cert, Receiver Analysis waterfall | ✅ |
 | 2k | Amateur NBFM — band-plan-organized channel picker (6 m – 23 cm), simplex/calling, voluntary ARRL band-plan hints, CTCSS tone squelch + always-on tone identifier, regional repeater directory + manual entry | ✅ |
 | 2l | Amateur transmit — hold-to-talk on simplex or through a repeater (input offset + encoded CTCSS uplink tone), `--enable-tx`-gated, Part 97, transmit audit log; DCS encode to follow | ✅ |
+| 2m | Server-side demod-audio recording — `POST /radio/record`, 48 kHz mono WAV, per-request start/stop + download, any audio mode | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel

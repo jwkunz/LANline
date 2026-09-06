@@ -311,6 +311,7 @@ pub struct RadioStatus {
     pub device_status: DeviceStatus,
     pub dsp: DspStatus,
     pub audio: AudioStatus,
+    pub recording: RecordingStatus,
     pub clients: usize,
     #[serde(with = "time::serde::rfc3339")]
     pub time: OffsetDateTime,
@@ -334,6 +335,28 @@ pub struct DspStatus {
     pub pipeline_latency_ms: Option<f64>,
     /// Currently transmitting (push-to-talk keyed).
     pub tx_keyed: bool,
+}
+
+/// A demod-audio recording (`POST /api/v1/radio/record`), in progress or
+/// finished — the shape reported in `RadioStatus.recording.last` and by the
+/// start/stop endpoint.
+#[derive(Serialize, Clone, Debug)]
+pub struct AudioRecInfo {
+    pub path: String,
+    pub filename: String,
+    pub bytes: u64,
+    pub secs: f64,
+    pub sample_rate_hz: u32,
+    pub mode: String,
+    pub frequency_hz: u64,
+}
+
+/// `RadioStatus.recording` — whether a demod-audio capture is running, and
+/// the most recent finished one.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct RecordingStatus {
+    pub active: bool,
+    pub last: Option<AudioRecInfo>,
 }
 
 /// One entry in the transmit audit log (`GET /api/v1/radio/tx/log`) — a

@@ -36,6 +36,8 @@ pub fn router(state: AppState) -> Router {
         .route("/radio/start", post(radio::start))
         .route("/radio/stop", post(radio::stop))
         .route("/radio/status", get(radio::status))
+        .route("/radio/record", post(radio::record))
+        .route("/radio/recording", get(radio::download))
         .route("/radio/tx/key", post(radio::key_tx))
         .route("/radio/tx/unkey", post(radio::unkey_tx))
         .route("/radio/tx/log", get(radio::tx_log))

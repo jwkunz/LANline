@@ -242,6 +242,16 @@ export class Client {
    *  bounded, newest first). */
   txLog = () => this.request<TxLogEntry[]>("GET", "/api/v1/radio/tx/log", { auth: true });
 
+  /** Start / stop a server-side recording of the demodulated audio (48 kHz
+   *  mono WAV). Status comes back in `RadioStatus.recording`. */
+  recordAudio = (action: "start" | "stop", maxSecs?: number) =>
+    this.request<Record<string, unknown>>("POST", "/api/v1/radio/record", {
+      auth: true,
+      body: maxSecs != null ? { action, max_secs: maxSecs } : { action },
+    });
+
+  audioRecordingUrl = () => `${this.base}/api/v1/radio/recording`;
+
   audioOffer = (id: string, sdp: string) =>
     this.request<SdpMessage>("POST", `/api/v1/sessions/${id}/audio/offer`, {
       auth: true,

@@ -824,10 +824,15 @@ Live telemetry, safe to poll at ~1 Hz.
     "sample_rate_hz": 48000,
     "channels": 1
   },
+  "recording": { "active": false, "last": null },
   "clients": 1,
   "time": "2026-09-03T17:07:52Z"
 }
 ```
+
+`recording` reflects the server-side demod-audio recorder (see
+`POST /radio/record` below): `{active, last}` where `last` is the most
+recent finished recording (`filename`, `bytes`, `secs`, …) or `null`.
 
 In `debug_tone` mode the `dsp` block reports synthetic values
 (`rssi_dbfs: null`, `squelch_open: true`). `ctcss_tone_hz` is the configured
@@ -836,6 +841,28 @@ CTCSS tone while it is currently detected on-channel (FM modes with
 CTCSS tone the receiver sees regardless of what's configured — an always-on
 Goertzel bank on narrowband FM, for identifying an unknown repeater's tone —
 or `null` when none stands out.
+
+### `POST /api/v1/radio/record`
+
+Start or stop a server-side recording of the **demodulated audio** — 48 kHz
+mono 16-bit WAV, written next to the IQ recordings (`--iq-dir`, default cwd).
+Auth required. Body: `{"action": "start" | "stop", "max_secs": 300}`
+(`max_secs` 1–3600, default 300). Available in the audio modes
+(`nbfm`/`wbfm`/`am`/`frs`/`ham`/`debug_tone`) while the radio is running —
+`analysis` has its own IQ recorder instead (`409 conflict` otherwise, or if
+one is already recording).
+
+The recording auto-stops at `max_secs`, and on any pipeline bounce (mode
+switch, sample-rate change, `stop`) — a finished file is always left, and
+its metadata shows in `RadioStatus.recording.last`. `start` returns
+`{active, filename, path, sample_rate_hz, max_secs}`; `stop` returns
+`{active: false, last}`.
+
+### `GET /api/v1/radio/recording`
+
+Download the most recent completed audio recording as a `audio/wav`
+attachment. `404` if there is none, `409` while one is still recording.
+Unauthenticated (same posture as `/radio/status`).
 
 ### `POST /api/v1/radio/tx/key`
 

@@ -71,6 +71,16 @@ export interface DspStatus {
   tx_keyed: boolean;
 }
 
+export interface AudioRecInfo {
+  path: string;
+  filename: string;
+  bytes: number;
+  secs: number;
+  sample_rate_hz: number;
+  mode: string;
+  frequency_hz: number;
+}
+
 export interface TxLogEntry {
   keyed_at: string;
   client: string;
@@ -96,6 +106,7 @@ export interface RadioStatus {
     sample_rate_hz: number;
     channels: number;
   };
+  recording: { active: boolean; last: AudioRecInfo | null };
   clients: number;
   time: string;
 }

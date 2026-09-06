@@ -7,6 +7,7 @@
 //! modes produce 20 ms Opus frames on a broadcast channel that each WebRTC
 //! session subscribes to.
 
+pub mod audio_rec;
 #[cfg(feature = "soapy")]
 pub mod dsp;
 
@@ -16,6 +17,7 @@ use crate::analysis::AnalysisShared;
 use crate::apt::AptShared;
 use crate::audio::{rms_dbfs, AudioFrame};
 use crate::model::{RadioConfig, TxLogEntry};
+use crate::radio::audio_rec::AudioRecorder;
 use crate::registry::DeviceRegistry;
 use std::collections::VecDeque;
 use time::OffsetDateTime;
@@ -145,6 +147,7 @@ pub struct RadioManager {
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
     analysis: Arc<AnalysisShared>,
+    audio_rec: Arc<AudioRecorder>,
     /// Off by default (`--enable-tx`) — a general-purpose SDR transmitting
     /// is a much bigger deal than one only ever receiving, so it needs an
     /// explicit opt-in rather than working out of the box.
@@ -317,7 +320,8 @@ impl RadioManager {
             adsb: Arc::new(AdsbShared::new()),
             ais: Arc::new(AisShared::new()),
             apt: Arc::new(AptShared::new()),
-            analysis: Arc::new(AnalysisShared::new(iq_dir)),
+            analysis: Arc::new(AnalysisShared::new(iq_dir.clone())),
+            audio_rec: Arc::new(AudioRecorder::new(iq_dir)),
             enable_tx,
             audio_in: TxAudioSource::new(),
             tx_audit: TxAudit::default(),
@@ -443,6 +447,12 @@ impl RadioManager {
         self.analysis.clone()
     }
 
+    /// Shared demod-audio recorder (start/stop over REST; the pipeline
+    /// thread writes 20 ms frames into it while a recording is active).
+    pub fn audio_rec(&self) -> Arc<AudioRecorder> {
+        self.audio_rec.clone()
+    }
+
     pub fn is_running(&self) -> bool {
         self.run.lock().unwrap().running
     }
@@ -472,6 +482,7 @@ impl RadioManager {
         let ais = self.ais.clone();
         let apt = self.apt.clone();
         let analysis = self.analysis.clone();
+        let audio_rec = self.audio_rec.clone();
         let audio_in = self.audio_in.clone();
 
         #[cfg(feature = "soapy")]
@@ -481,7 +492,12 @@ impl RadioManager {
 
         let handle = std::thread::Builder::new()
             .name("rx-pipeline".into())
-            .spawn(move || run_pipeline(params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, analysis, audio_in))
+            .spawn(move || {
+                run_pipeline(
+                    params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, analysis, audio_rec,
+                    audio_in,
+                )
+            })
             .expect("spawn rx-pipeline thread");
 
         run.stop = Some(stop);
@@ -495,6 +511,11 @@ impl RadioManager {
     }
 
     pub fn stop(&self) {
+        // Finalize any in-progress audio recording — the pipeline thread that
+        // feeds it is about to exit (and a mode switch bounces through here).
+        if let Some(info) = self.audio_rec.stop() {
+            tracing::info!("audio recording finalized: {} ({:.1}s)", info.filename, info.secs);
+        }
         let (stop, handle) = {
             let mut run = self.run.lock().unwrap();
             run.running = false;
@@ -1027,6 +1048,7 @@ fn run_pipeline(
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
     analysis: Arc<AnalysisShared>,
+    audio_rec: Arc<AudioRecorder>,
     audio_in: Arc<TxAudioSource>,
 ) {
     let _ = (&adsb, &ais, &apt, &analysis, &audio_in);
@@ -1044,15 +1066,15 @@ fn run_pipeline(
     match p.kind {
         SourceKind::Tone { hz, amp } => {
             let _ = &cmd_rx;
-            run_synth(Synth::Tone { hz, amp }, fc, &tx, &telemetry, &stop, wav.as_mut())
+            run_synth(Synth::Tone { hz, amp }, fc, &tx, &telemetry, &stop, wav.as_mut(), &audio_rec)
         }
         SourceKind::Silence => {
             let _ = &cmd_rx;
-            run_synth(Synth::Silence, fc, &tx, &telemetry, &stop, wav.as_mut())
+            run_synth(Synth::Silence, fc, &tx, &telemetry, &stop, wav.as_mut(), &audio_rec)
         }
         #[cfg(feature = "soapy")]
         SourceKind::Sdr(sdr) => {
-            run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut(), cmd_rx, &audio_in)
+            run_sdr(*sdr, fc, &tx, &telemetry, &stop, wav.as_mut(), &audio_rec, cmd_rx, &audio_in)
         }
         #[cfg(feature = "soapy")]
         SourceKind::Adsb(p) => run_adsb(*p, adsb, &telemetry, &stop, cmd_rx),
@@ -1077,6 +1099,7 @@ fn run_synth(
     telemetry: &Arc<Mutex<Telemetry>>,
     stop: &Arc<AtomicBool>,
     mut wav: Option<&mut WavDump>,
+    audio_rec: &AudioRecorder,
 ) {
     let Some(encoder) = new_encoder(fc.bitrate_bps) else {
         return;
@@ -1117,6 +1140,7 @@ fn run_synth(
         if let Some(w) = wav.as_deref_mut() {
             w.write(&pcm);
         }
+        audio_rec.write(&pcm);
         if let Ok(n) = encoder.encode_float(&pcm, &mut buf) {
             let _ = tx.send(AudioFrame {
                 data: Bytes::copy_from_slice(&buf[..n]),
@@ -1147,6 +1171,7 @@ fn run_sdr(
     telemetry: &Arc<Mutex<Telemetry>>,
     stop: &Arc<AtomicBool>,
     mut wav: Option<&mut WavDump>,
+    audio_rec: &AudioRecorder,
     cmd_rx: mpsc::Receiver<PipelineCmd>,
     audio_in: &Arc<TxAudioSource>,
 ) {
@@ -1320,6 +1345,7 @@ fn run_sdr(
             if let Some(w) = wav.as_deref_mut() {
                 w.write(&pcm);
             }
+            audio_rec.write(&pcm);
             if let Ok(nb) = encoder.encode_float(&pcm, &mut buf) {
                 let _ = tx.send(AudioFrame {
                     data: Bytes::copy_from_slice(&buf[..nb]),

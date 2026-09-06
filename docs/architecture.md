@@ -624,6 +624,19 @@ A hard `max_secs` cap (default 60, ~0.5 GB max at the ceiling) auto-stops it;
 `GET /api/v1/analysis/recording` streams the finished file off disk (via
 `tokio_util::io::ReaderStream`, never buffered) as an attachment.
 
+**Demod-audio recording** is the same idea one level down the chain, for the
+audio modes: `radio::audio_rec::AudioRecorder` (owned by `RadioManager`,
+shared with the pipeline thread) captures the 48 kHz mono PCM frames — the
+exact bytes fed to the Opus encoder and `--dump-wav` — into a mono int16 WAV
+via the same `WavDump` writer. `POST /api/v1/radio/record` start/stops it;
+`run_synth`/`run_sdr` call `audio_rec.write(&pcm)` every 20 ms frame, and it
+auto-stops at `max_secs` or when `RadioManager::stop()` runs (which every
+pipeline bounce goes through), so a finished, header-patched file always
+survives a mode switch. `RadioStatus.recording` carries `{active, last}` so
+the web client's Record button needs no extra polling.
+`GET /api/v1/radio/recording` streams the last finished file. Both recorders
+write to `--iq-dir` (default cwd).
+
 ### HackRF frequency calibration
 
 `tuner.freq_correction_ppm` (in the radio config since phase 1, but never
