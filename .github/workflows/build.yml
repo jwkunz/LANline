@@ -4,7 +4,8 @@ name: build
 # web client is embedded into the binary at compile time (build.rs stages
 # web/dist → include_str!), so a single server executable *is* server + client.
 # `lanline-hypervisor` (runs one server per radio) ships from the `soapy` leg's
-# artifacts. The Android app is a separate APK and isn't part of this.
+# artifacts. The `android` job builds the WebView-wrapper APK (same embedded
+# bundle) and it rides along in the release.
 #
 # Two tiers:
 #   standalone — `--no-default-features`: no SoapySDR, no system SDR libs. One
@@ -21,8 +22,8 @@ name: build
 # Windows MSVC target links audiopus_sys' own bundled prebuilt opus, so nothing
 # to install there. ring (webrtc crypto) needs NASM on Windows on both tiers.
 #
-# On a `v*` tag push, the standalone binaries are attached to a draft GitHub
-# Release.
+# On a `v*` tag push, the standalone binaries + the APK are attached to a
+# draft GitHub Release.
 
 on:
   push:
@@ -269,10 +270,42 @@ jobs:
           path: web/dist
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+  android:
+    # The APK embeds the same built web bundle as the server. Debug build:
+    # it's self-signed with the debug keystore so it installs for sideloading
+    # (the project has no release signing config).
+    needs: web-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Build APK
+        working-directory: client/android
+        run: ./gradlew --no-daemon :app:assembleDebug
+      - name: Stage APK
+        run: |
+          v=$(grep -oP 'versionName = "\K[^"]+' client/android/app/build.gradle.kts)
+          mkdir -p apk
+          cp client/android/app/build/outputs/apk/debug/app-debug.apk "apk/lanline-android-${v}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: apk/lanline-android-*.apk
+          if-no-files-found: error
+
   release:
-    # `v*` tag → draft Release with the standalone binaries attached.
+    # `v*` tag → draft Release with the standalone binaries + the APK attached.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [standalone, clippy]
+    needs: [standalone, android, clippy]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -282,6 +315,10 @@ jobs:
           pattern: standalone-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: dist
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
@@ -301,3 +338,10 @@ jobs:
             SoapySDR build — see `docs/windows-port.md` and the `-soapy`
             workflow artifacts — which by SoapySDR's design cannot be a single
             file (it loads driver modules at runtime).
+
+            ## Android
+
+            `lanline-android-<version>.apk` — the WebView wrapper (same embedded
+            web client, plus the native LAN beacon listener + fleet radio
+            chooser). Debug-signed for sideloading; enable "install unknown
+            apps" for your browser/file manager to install it.
