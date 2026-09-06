@@ -4,6 +4,7 @@ mod adsb;
 mod analysis;
 mod ais;
 mod apt;
+mod aprs;
 mod audio;
 mod devices;
 mod meta;
@@ -46,6 +47,8 @@ pub fn router(state: AppState) -> Router {
         .route("/adsb/messages", get(adsb::messages))
         .route("/ais/vessels", get(ais::vessels))
         .route("/ais/messages", get(ais::sentences))
+        .route("/aprs/stations", get(aprs::stations))
+        .route("/aprs/packets", get(aprs::packets))
         .route("/apt/image", get(apt::image))
         .route("/apt/status", get(apt::status))
         .route("/analysis/spectrum", get(analysis::spectrum))
@@ -144,7 +147,7 @@ mod tests {
         .unwrap();
         let state = AppState::new(
             config,
-            Ports { c2: 0, audio_out, audio_in: 0, beast: 0, ais_nmea: 0 },
+            Ports { c2: 0, audio_out, audio_in: 0, beast: 0, ais_nmea: 0, aprs: 0 },
             Ipv4Addr::LOCALHOST.into(),
             registry,
             sessions,
@@ -176,7 +179,7 @@ mod tests {
         .unwrap();
         let state = AppState::new(
             config,
-            Ports { c2: 0, audio_out, audio_in: 0, beast: 0, ais_nmea: 0 },
+            Ports { c2: 0, audio_out, audio_in: 0, beast: 0, ais_nmea: 0, aprs: 0 },
             Ipv4Addr::LOCALHOST.into(),
             registry,
             sessions,

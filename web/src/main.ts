@@ -7,6 +7,7 @@ import { nativeDiscovery, serverHost } from "./discovery";
 import { haversineMi, parseLatLon, type Located } from "./geo";
 import { altLabel, offsetNm, type AdsbSnapshot } from "./adsb";
 import { type AisSnapshot } from "./ais";
+import { aprsSymbolGlyph, type AprsSnapshot } from "./aprs";
 import { loadNwrStations, nearestNwr, NWR_CHANNELS, type NwrStation } from "./nwr";
 import {
   FM_MAX_HZ,
@@ -119,6 +120,14 @@ const MODE_META: Record<string, ModeMeta> = {
     loOffsetHz: 0,
     wantSampleRateHz: 2_000_000,
   },
+  aprs: {
+    label: "APRS",
+    icon: "📍",
+    band: "144.39 MHz",
+    defaultFreqHz: 144_390_000,
+    loOffsetHz: 250_000,
+    wantSampleRateHz: 2_000_000,
+  },
   ais: {
     label: "AIS",
     icon: "🚢",
@@ -212,6 +221,7 @@ interface State {
   pttHeld: boolean;
   adsb: AdsbSnapshot | null;
   ais: AisSnapshot | null;
+  aprs: AprsSnapshot | null;
   apt: AptStatus | null;
   scopeSel: string | null;
   scopeRangeNm: number | "auto";
@@ -253,6 +263,7 @@ const state: State = {
   pttHeld: false,
   adsb: null,
   ais: null,
+  aprs: null,
   apt: null,
   scopeSel: null,
   scopeRangeNm: "auto",
@@ -518,7 +529,7 @@ async function autoListen(): Promise<void> {
     logLine(`auto start-radio failed — ${(e as ApiError).message}`);
   }
   const m = state.radio?.mode;
-  if (m === "adsb" || m === "ais" || m === "apt") return; // data-only modes, no audio
+  if (m === "adsb" || m === "ais" || m === "aprs" || m === "apt") return; // data-only modes, no audio
   try {
     if (state.audioState === "idle") await startAudio();
   } catch (e) {
@@ -745,7 +756,7 @@ async function switchMode(id: string): Promise<void> {
   const meta = MODE_META[id];
   setState({ switching: true });
 
-  const fixedFreq = id === "adsb" || id === "ais";
+  const fixedFreq = id === "adsb" || id === "ais" || id === "aprs";
   const patch: Record<string, unknown> = { mode: id };
   if (id !== "debug_tone") {
     const last = Number(localStorage.getItem(freqKey(id)));
@@ -778,6 +789,14 @@ async function switchMode(id: string): Promise<void> {
       trail_seconds: 600,
       forget_seconds: 900,
     };
+  } else if (id === "aprs") {
+    patch.mode_params = {
+      reference_lat: state.loc?.lat ?? 0,
+      reference_lon: state.loc?.lon ?? 0,
+      max_range_km: 300,
+      trail_seconds: 1800,
+      forget_seconds: 3600,
+    };
   }
 
   aptImg = null;
@@ -792,7 +811,7 @@ async function switchMode(id: string): Promise<void> {
   }
   try {
     let radio = await state.client.patchRadio(patch);
-    setState({ radio, adsb: null, ais: null, apt: null, scopeSel: null, activeRepeater: null });
+    setState({ radio, adsb: null, ais: null, aprs: null, apt: null, scopeSel: null, activeRepeater: null });
     logLine(`mode → ${meta?.label ?? id}`);
     void refreshStations();
     if (id === "frs" || id === "ham") void refreshTxLog();
@@ -1207,7 +1226,11 @@ async function poll(): Promise<void> {
       state.client.radioStatus(),
     ]);
     pollFails = 0;
-    const dataMode = radio.mode === "adsb" || radio.mode === "ais" || radio.mode === "apt";
+    const dataMode =
+      radio.mode === "adsb" ||
+      radio.mode === "ais" ||
+      radio.mode === "aprs" ||
+      radio.mode === "apt";
     let audioStats = state.audioStats;
     if (!dataMode && state.session && state.audio && state.audioState !== "idle") {
       audioStats = await state.client
@@ -1216,11 +1239,14 @@ async function poll(): Promise<void> {
     }
     let adsb = state.adsb;
     let ais = state.ais;
+    let aprs = state.aprs;
     let apt = state.apt;
     if (radio.mode === "adsb") {
       adsb = await state.client.adsbAircraft().catch(() => state.adsb);
     } else if (radio.mode === "ais") {
       ais = await state.client.aisVessels().catch(() => state.ais);
+    } else if (radio.mode === "aprs") {
+      aprs = await state.client.aprsStations().catch(() => state.aprs);
     } else if (radio.mode === "apt") {
       apt = await state.client.aptStatus().catch(() => state.apt);
       // The raster can grow to a couple MB; refetch it far less often than
@@ -1230,7 +1256,7 @@ async function poll(): Promise<void> {
         void refreshAptImage();
       }
     }
-    setState({ server, radio, status, audioStats, adsb, ais, apt });
+    setState({ server, radio, status, audioStats, adsb, ais, aprs, apt });
   } catch (e) {
     pollFails += 1;
     if (pollFails >= 3) loopFailed(e as ApiError, "poll");
@@ -1284,7 +1310,7 @@ function structKey(): string {
     state.loc ? 1 : 0,
     state.locNote ?? "",
     state.audioStats ? 1 : 0,
-    state.adsb || state.ais ? 1 : 0,
+    state.adsb || state.ais || state.aprs ? 1 : 0,
     state.apt ? 1 : 0,
     state.scopeRangeNm,
     state.device?.id ?? state.device?.label ?? "",
@@ -1366,7 +1392,7 @@ function patchLive(): void {
   setHTML("#telemetry", telemetryInner());
   setHTML("#log", state.log.map(esc).join("\n") || "—");
 
-  if (state.radio.mode === "adsb" || state.radio.mode === "ais") {
+  if (state.radio.mode === "adsb" || state.radio.mode === "ais" || state.radio.mode === "aprs") {
     setHTML("#scope-list", scopeListInner());
     drawScope();
   } else if (state.radio.mode === "apt") {
@@ -1712,6 +1738,7 @@ function wizardHtml(): string {
       return hamWizardHtml();
     case "adsb":
     case "ais":
+    case "aprs":
       return scopeWizardHtml();
     case "analysis":
       return `<section class="card"><h2>Receiver Analysis</h2><div id="analysis-host"></div></section>`;
@@ -2360,7 +2387,7 @@ interface ScopeContact {
   lon: number | null;
   course: number | null;
   trail: [number, number][];
-  kind: "air" | "sea";
+  kind: "air" | "sea" | "land";
 }
 
 interface ScopeData {
@@ -2419,6 +2446,33 @@ function activeScope(): ScopeData | null {
         course: v.cog_deg ?? v.heading_deg,
         trail: v.trail,
         kind: "sea",
+      })),
+    };
+  }
+  if (state.radio?.mode === "aprs") {
+    const a = state.aprs;
+    if (!a) return null;
+    return {
+      receiver: a.receiver,
+      title: "APRS — 144.390 MHz packet",
+      empty: "Listening for packets…",
+      contacts: a.stations.map((s) => ({
+        id: s.call,
+        label: `${s.symbol ? aprsSymbolGlyph(s.symbol) + " " : ""}${s.call}`,
+        sub: [
+          s.speed_kt != null && s.speed_kt > 0 ? `${s.speed_kt.toFixed(0)} kt` : null,
+          s.course_deg != null && s.speed_kt ? `${s.course_deg.toFixed(0)}°` : null,
+          s.distance_km != null ? `${s.distance_km.toFixed(1)} km` : null,
+          s.comment || s.last_message || null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+          .slice(0, 80) || `${s.packets} pkt`,
+        lat: s.lat,
+        lon: s.lon,
+        course: s.course_deg,
+        trail: s.trail,
+        kind: "land",
       })),
     };
   }
@@ -2609,7 +2663,13 @@ function drawScope(): void {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(((c.course ?? 0) * Math.PI) / 180);
-    ctx.fillStyle = selected ? accent : c.kind === "sea" ? "#7fc8ff" : "#8fe0a0";
+    ctx.fillStyle = selected
+      ? accent
+      : c.kind === "sea"
+        ? "#7fc8ff"
+        : c.kind === "land"
+          ? "#f5c26b"
+          : "#8fe0a0";
     if (c.course != null && c.kind === "air") {
       ctx.beginPath();
       ctx.moveTo(0, -6);
@@ -2714,6 +2774,31 @@ function nowPlayingInner(): string {
         ${kv("With position", a ? String(a.with_position) : "—")}
         ${kv("Messages", a ? a.messages.toLocaleString() : "—")}
         ${kv("Message rate", a ? `${a.message_rate.toFixed(1)}/s` : "—")}
+        ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
+        ${kv("Reference", a?.receiver ? `${a.receiver[0].toFixed(3)}, ${a.receiver[1].toFixed(3)}` : "not set")}
+      </div>
+      <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap">
+        <button id="radio-toggle" class="${r.running ? "secondary" : ""}">
+          ${r.running ? "Stop receiver" : "Start receiver"}
+        </button>
+        <button id="radio-options" class="secondary">⚙ Radio options</button>
+      </div>`;
+  }
+
+  if (r.mode === "aprs") {
+    const a = state.aprs;
+    return `
+      <h2>Now tracking</h2>
+      <div class="mode-line">
+        <span class="mode">${esc(meta?.label ?? "APRS")}</span>
+        <span class="freq">144.390 MHz</span>
+        <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "receiving" : "stopped"}</span>
+      </div>
+      <div class="grid">
+        ${kv("Stations", a ? String(a.station_count) : "—")}
+        ${kv("With position", a ? String(a.with_position) : "—")}
+        ${kv("Packets", a ? a.packets.toLocaleString() : "—")}
+        ${kv("Packet rate", a ? `${a.packet_rate.toFixed(1)}/s` : "—")}
         ${kv("Signal", st?.dsp.rssi_dbfs != null ? `${st.dsp.rssi_dbfs.toFixed(1)} dBFS` : "—")}
         ${kv("Reference", a?.receiver ? `${a.receiver[0].toFixed(3)}, ${a.receiver[1].toFixed(3)}` : "not set")}
       </div>

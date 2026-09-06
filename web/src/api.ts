@@ -131,6 +131,7 @@ export class Client {
     this.request<RadioStatus>("GET", "/api/v1/radio/status", { signal });
   adsbAircraft = () => this.request<import("./adsb").AdsbSnapshot>("GET", "/api/v1/adsb/aircraft");
   aisVessels = () => this.request<import("./ais").AisSnapshot>("GET", "/api/v1/ais/vessels");
+  aprsStations = () => this.request<import("./aprs").AprsSnapshot>("GET", "/api/v1/aprs/stations");
   aptStatus = () => this.request<AptStatus>("GET", "/api/v1/apt/status");
 
   /** Binary raster, not JSON — fetched and parsed separately from `request()`.

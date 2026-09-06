@@ -29,6 +29,7 @@ same port also serves the bundled web client and is advertised over mDNS as
 - [Modes](#modes)
 - [ADS-B track export](#adsb-track-export)
 - [AIS vessel-track export](#ais-vessel-track-export)
+- [APRS station-track export](#aprs-station-track-export)
 - [NOAA APT image export](#noaa-apt-image-export)
 - [Presets](#presets)
 - [Radio configuration & control](#radio-configuration--control)
@@ -137,7 +138,7 @@ Server identity and current capability summary.
   "hostname": "bench-linux",
   "scheme": "http",
   "time": "2026-09-03T17:04:11Z",
-  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005, "ais_nmea": 10110 },
+  "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005, "ais_nmea": 10110, "aprs": 10152 },
   "capabilities": ["rx", "webrtc", "nbfm", "wbfm", "am", "adsb", "ais", "debug_tone"],
   "selected_device": {
     "id": "hackrf/0000000000000000457863c8...",
@@ -155,8 +156,10 @@ is then HTTPS-only); a browser served the client over HTTPS is a secure
 context, so `getUserMedia` (push-to-talk mic) and the geolocation button work
 from any LAN address, not just `localhost`.
 `ports.beast` is the TCP port of the [Beast Mode S feed](#adsb-track-export),
-`ports.ais_nmea` the TCP port of the [AIVDM feed](#ais-vessel-track-export);
-either is `0` when disabled (`--beast-port 0` / `--ais-nmea-port 0`).
+`ports.ais_nmea` the TCP port of the [AIVDM feed](#ais-vessel-track-export),
+`ports.aprs` the TCP port of the [TNC2 APRS feed](#aprs-station-track-export);
+each is `0` when disabled (`--beast-port 0` / `--ais-nmea-port 0` /
+`--aprs-port 0`).
 
 ---
 
@@ -371,6 +374,18 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "aprs",
+    "name": "APRS (144.390 MHz packet — position/status/message)",
+    "tx_capable": false,
+    "params": {
+      "reference_lat":  { "type": "number", "default": 0, "min": -90,  "max": 90,   "unit": "deg" },
+      "reference_lon":  { "type": "number", "default": 0, "min": -180, "max": 180,  "unit": "deg" },
+      "max_range_km":   { "type": "number", "default": 300, "min": 10, "max": 2000,  "unit": "km" },
+      "trail_seconds":  { "type": "number", "default": 1800, "min": 60, "max": 21600, "unit": "s" },
+      "forget_seconds": { "type": "number", "default": 3600, "min": 300, "max": 86400, "unit": "s" }
+    }
+  },
+  {
     "id": "ais",
     "name": "AIS (161.975 / 162.025 MHz vessels)",
     "tx_capable": false,
@@ -509,6 +524,16 @@ export](#ais-vessel-track-export) or the AIVDM TCP feed. `mode_params`:
 `reference_lat`/`reference_lon` (receiver position, `0,0` = unset), `max_range_nm`
 (default 60), `trail_seconds` (default 600), `forget_seconds` (default 900).
 
+`aprs` is also **non-audio**: it tunes 144.390 MHz (the North American APRS
+channel) as NBFM, runs a 1200-baud Bell 202 AFSK demodulator → NRZI/HDLC
+deframer → AX.25 UI-frame decode → APRS payload parse (uncompressed and
+compressed position, MIC-E, status, message), and folds the result into a
+per-callsign station table. Read it from [APRS station-track
+export](#aprs-station-track-export) or the TNC2 TCP feed. `mode_params`:
+`reference_lat`/`reference_lon` (receiver position, `0,0` = unset),
+`max_range_km` (default 300), `trail_seconds` (default 1800), `forget_seconds`
+(default 3600).
+
 ---
 
 ## ADS-B track export
@@ -631,6 +656,65 @@ Ring buffer of recent re-armored `!AIVDM` sentences (checksummed, newest last):
 
 A line stream of the same `!AIVDM` sentences (CRLF-terminated). Point OpenCPN,
 AIS-catcher, or `aisdispatcher` at it. Disable with `--ais-nmea-port 0`.
+
+---
+
+## APRS station-track export
+
+Populated only while the `aprs` mode pipeline runs. Unauthenticated, read-only.
+
+### `GET /api/v1/aprs/stations`
+
+```json
+{
+  "time": "2026-09-06T18:20:11Z",
+  "mode": "aprs",
+  "running": true,
+  "receiver": [29.65, -82.33],
+  "packets": 1284,
+  "packet_rate": 0.7,
+  "station_count": 12,
+  "with_position": 10,
+  "stations": [
+    {
+      "call": "KZ4AZ-9",
+      "lat": 29.6421, "lon": -82.3512,
+      "course_deg": 118.0, "speed_kt": 34.0, "altitude_ft": 154.0,
+      "symbol": "/>",
+      "comment": "mobile",
+      "last_message": null,
+      "path": ["WIDE1-1", "WIDE2-1"],
+      "rssi_dbfs": -12.4,
+      "packets": 37,
+      "age_s": 4.1, "pos_age_s": 4.1,
+      "distance_km": 2.3, "bearing_deg": 201.0,
+      "trail": [[29.641, -82.35], [29.6421, -82.3512]]
+    }
+  ]
+}
+```
+
+`packets` is the total AX.25 UI frames folded in since the pipeline started;
+`packet_rate` is a 30-second average (frames/s). `stations` is sorted by
+`distance_km` (positioned stations first, then by recency). `symbol` is the
+2-char APRS symbol (table char + code char) or `null`; `lat`/`lon`,
+`course_deg`, `speed_kt`, `altitude_ft`, `last_message` and the range/bearing
+pair are `null` until a packet carries them. `receiver` is `null` when no
+reference position was configured (no range gate then).
+
+### `GET /api/v1/aprs/packets`
+
+Ring buffer of recent decoded frames as TNC2 monitor lines
+(`SRC>DEST,PATH:info`, no CRLF), newest last:
+
+```json
+{ "time": "…", "count": 512, "packets": ["KZ4AZ-9>APRS,WIDE1-1:>mobile", "…"] }
+```
+
+### TNC2 feed (TCP `ports.aprs`, default `10152`)
+
+A line stream of the same TNC2 monitor lines (CRLF-terminated). Point Xastir,
+YAAC, or an APRS-IS gateway at it. Disable with `--aprs-port 0`.
 
 ---
 

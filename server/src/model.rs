@@ -34,6 +34,8 @@ pub struct Ports {
     pub beast: u16,
     /// AIVDM (NMEA 0183) marine AIS feed. 0 when disabled.
     pub ais_nmea: u16,
+    /// TNC2-format APRS monitor feed. 0 when disabled.
+    pub aprs: u16,
 }
 
 #[derive(Serialize, Clone, Debug)]

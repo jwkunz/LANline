@@ -67,6 +67,10 @@ pub struct Config {
     #[arg(long, env = "LANLINE_AIS_NMEA_PORT", default_value_t = 10110)]
     pub ais_nmea_port: u16,
 
+    /// TCP port for the TNC2-format APRS monitor feed. `0` disables it.
+    #[arg(long, env = "LANLINE_APRS_PORT", default_value_t = 10152)]
+    pub aprs_port: u16,
+
     /// Also write the pre-Opus 48 kHz mono audio to this path as a 16-bit WAV
     /// (diagnostic; overwritten on each pipeline start).
     #[arg(long, env = "LANLINE_DUMP_WAV")]

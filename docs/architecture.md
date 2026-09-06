@@ -35,6 +35,7 @@ Three advertised ports:
 | `audio_in` | UDP | Reserved — inbound Opus to modulate (phase 2) |
 | `beast` | TCP | Beast binary Mode S feed (ADS-B); `0` when disabled |
 | `ais_nmea` | TCP | AIVDM (NMEA 0183) marine AIS feed; `0` when disabled |
+| `aprs` | TCP | TNC2 monitor-line APRS feed; `0` when disabled |
 
 `c2` is **fixed** (default `8730`) so a bookmarked browser URL survives a
 restart; `audio_out`/`audio_in` are random, chosen at startup. Pass `--c2-port 0`
@@ -70,6 +71,7 @@ server/src/
     radio.rs           GET/PATCH /radio, start/stop, GET /radio/status
     adsb.rs            GET /adsb/aircraft, GET /adsb/messages
     ais.rs             GET /ais/vessels, GET /ais/messages
+    aprs.rs            GET /aprs/stations, GET /aprs/packets
     sessions.rs        session CRUD + heartbeat
     audio.rs           WebRTC signaling: offer/ice/state/close
     reserved.rs        phase-2 endpoints -> 501
@@ -93,6 +95,19 @@ server/src/
     tracker.rs         per-MMSI vessel table: position + static merge, trails, expiry
     nmea.rs            AIVDM sentence builder + TCP fan-out server
 
+  aprs/
+    mod.rs             AprsShared: station tracker + TNC2 line ring + TNC2 broadcast
+    demod.rs           1200-baud Bell 202 AFSK: NCO -> decimating FIR -> FM
+                       discriminator -> one-symbol sliding-DFT tone correlator ->
+                       open-loop bit clock -> NRZI -> shared-flag HDLC -> X.25 FCS
+    ax25.rs            AX.25 UI-frame decode (addresses + SSID + digipeater path),
+                       TNC2 rendering, test-only UI-frame encoder
+    parse.rs           APRS payload parse: uncompressed + base-91 compressed
+                       position, MIC-E, status, message; lat/lon/course/speed/alt
+    tracker.rs         per-callsign station table: position + comment merge, trails,
+                       range gate, expiry, JSON snapshot
+    feed.rs            TNC2 monitor-line TCP fan-out server
+
   analysis/
     mod.rs             AnalysisShared: Spectrum (panadapter + waterfall ring) +
                        Analyzer (overlapped windowed rustfft -> dBFS, fftshift)
@@ -102,8 +117,8 @@ server/src/
   radio/
     mod.rs             RadioManager: owns config + pipeline task, hot-apply, telemetry;
                        run_sdr (nbfm/wbfm/am -> Opus, picks FmChain/AmChain via
-                       the Chain enum), run_adsb / run_ais / run_apt / run_analysis
-                       (IQ -> tracks / raster / spectrum, no audio)
+                       the Chain enum), run_adsb / run_ais / run_aprs / run_apt /
+                       run_analysis (IQ -> tracks / raster / spectrum, no audio)
     dsp.rs             FmChain (NBFM/WBFM) + AmChain (AM), sharing one
                        decimate/squelch/resample skeleton; Nco/FirDecimator/
                        Biquad/LinearResampler building blocks
@@ -121,10 +136,10 @@ server/src/
 
 - **One SDR, one DSP pipeline.** `RadioManager` runs the pipeline on a
   dedicated blocking task (SoapySDR reads are blocking). FM modes produce 20 ms
-  Opus frames onto a `broadcast::channel`; the `adsb` and `ais` modes instead
-  feed their decoders and write a track table read over REST + a raw TCP feed
-  (Beast / AIVDM) — no audio path. `run_sdr`, `run_adsb` and `run_ais` are the
-  three pipeline bodies.
+  Opus frames onto a `broadcast::channel`; the `adsb`, `ais` and `aprs` modes
+  instead feed their decoders and write a track table read over REST + a raw
+  TCP feed (Beast / AIVDM / TNC2) — no audio path. `run_sdr`, `run_adsb`,
+  `run_ais` and `run_aprs` are the pipeline bodies.
 - **N sessions, N WebRTC peers, shared audio.** Each peer task holds a
   `broadcast::Receiver` and writes samples into its `TrackLocalStaticSample`.
   Slow/backpressured receivers drop frames (lag), they never stall the
@@ -225,6 +240,12 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   homebrew/experimental transmit gear under an amateur licence (the operator
   holds Amateur Extra, KZ4AZ), so a `ham` TX path is on firmer regulatory
   footing than `frs`'s.
+- **2q** — `aprs` mode: `aprs/` (1200-baud Bell 202 AFSK → NRZI/HDLC → AX.25
+  UI frame → APRS payload parse → per-callsign station table),
+  `GET /api/v1/aprs/{stations,packets}`, a TNC2 monitor-line TCP feed
+  (`--aprs-port`, default 10152), sharing the radar scope. Self-contained
+  unit-tested demod; see [below](#aprs-receive-aprs) for the AFSK/HDLC
+  design notes.
 
 ### CTCSS tone squelch
 
@@ -361,6 +382,55 @@ sweep, so per-channel tone gating is a later refinement. The web client
 builds the channel list from what it already has — the 22 FRS channels,
 nearby NWR transmitters, a ham band's simplex + repeater outputs — or sends
 a `{lo_hz, hi_hz, step_hz}` range for the broadcast bands.
+
+### APRS receive (`aprs/`)
+
+The fifth non-audio decode mode, alongside `adsb`/`ais`/`apt`/`analysis`.
+It tunes 144.390 MHz as NBFM and recovers 1200-baud Bell 202 AFSK
+(mark 1200 Hz, space 2200 Hz) → NRZI/HDLC → AX.25 UI frame → APRS payload →
+a per-callsign station table on the shared radar scope. Same plumbing shape
+as the others: a `SourceKind::Aprs(Box<AprsSdrParams>)` variant, a `run_aprs`
+pipeline body, an `AprsShared` (`Arc<Mutex<Tracker>>` + a TNC2-line ring + a
+`broadcast` feed) hung on `RadioManager`, `api/aprs.rs` handlers, and a TNC2
+TCP fan-out (`feed.rs`, a structural copy of `ais/nmea.rs`).
+
+`demod.rs` is self-contained and unit-tested against a synthesized packet
+(`synth_packet` bit-stuffs + NRZI-encodes an `encode_ui` frame onto an FM
+carrier, no radio needed). The chain: LO-offset NCO → decimating windowed-sinc
+FIR to ~22 kHz (8 kHz cutoff — the earlier 5.5 kHz was too narrow for the FM
+channel and smeared the 2200 Hz space tone) → polar FM discriminator → a
+one-symbol **sliding-DFT tone correlator** (`ToneCorr`: ring-buffered
+per-sample phasor products at 1200/2200 Hz, `soft = |mark| − |space|`) →
+open-loop bit clock → NRZI decode → HDLC deframer → X.25 FCS
+(`crate::ais::message::fcs_ok`, the same CRC-16/X.25 AIS uses).
+
+Three things that cost real debugging time and are worth keeping in mind:
+
+- **Non-coherent AFSK, not a bandpass envelope.** A pair of bandpass filters
+  + envelope detectors rang and smeared across the preamble→data boundary.
+  The one-symbol sliding-DFT correlator has exactly one symbol of memory, so
+  its zero-crossing lands on the *centre* of each new symbol.
+- **Open-loop bit clock.** APRS packets are short. A tracking loop (Gardner,
+  or per-transition nudging) can walk off by a bit when the symbol rhythm
+  changes from the steady preamble to random data. Instead: lock the clock
+  phase on the *first data transition* (emit that sample straight away, since
+  the correlator's zero-crossing is already the symbol centre) and free-run
+  at exactly `sps` samples/symbol with no further correction.
+- **Shared-flag HDLC + trailing-flag flush.** The deframer hunts an 8-bit
+  window for `0x7E`; any flag both closes the current frame and opens the
+  next, so back-to-back preamble flags work. The synth packet needs *five*
+  trailing flags, not one: the FIR + correlator group delay hasn't flushed
+  the last data bits when a single-flag input ends, which truncated the FCS
+  by 2–3 symbols and failed every frame.
+
+`AprsSdrParams` carries `reference` (receiver lat/lon for the range gate),
+`max_range_km`, `trail_secs`, `forget_secs`. The tracker range-gates on a
+haversine distance, keeps a short position trail per station, merges
+comment/symbol/course/speed/altitude as packets arrive, and expires a
+station after `forget_secs` of silence. Payload parse (`parse.rs`) covers
+uncompressed and base-91 compressed position, MIC-E (latitude in the AX.25
+destination field, longitude/course/speed/symbol in the info body), status,
+and `:addressee:text` messages.
 
 ### AM and HackRF MF/LF sensitivity
 

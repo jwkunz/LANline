@@ -14,6 +14,7 @@ pub mod dsp;
 use crate::adsb::AdsbShared;
 use crate::ais::AisShared;
 use crate::analysis::AnalysisShared;
+use crate::aprs::AprsShared;
 use crate::apt::AptShared;
 use crate::audio::{rms_dbfs, AudioFrame};
 use crate::model::{RadioConfig, TxLogEntry};
@@ -176,6 +177,7 @@ pub struct RadioManager {
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    aprs: Arc<AprsShared>,
     analysis: Arc<AnalysisShared>,
     audio_rec: Arc<AudioRecorder>,
     /// Off by default (`--enable-tx`) — a general-purpose SDR transmitting
@@ -406,6 +408,7 @@ impl RadioManager {
             adsb: Arc::new(AdsbShared::new()),
             ais: Arc::new(AisShared::new()),
             apt: Arc::new(AptShared::new()),
+            aprs: Arc::new(AprsShared::new()),
             analysis: Arc::new(AnalysisShared::new(iq_dir.clone())),
             audio_rec: Arc::new(AudioRecorder::new(iq_dir)),
             enable_tx,
@@ -565,6 +568,12 @@ impl RadioManager {
         self.apt.clone()
     }
 
+    /// Shared APRS station table + packet ring (populated only while the
+    /// `aprs` mode pipeline is running).
+    pub fn aprs(&self) -> Arc<AprsShared> {
+        self.aprs.clone()
+    }
+
     /// Shared receiver-analysis spectrum/waterfall + IQ recorder
     /// (populated only while the `analysis` mode pipeline is running).
     pub fn analysis(&self) -> Arc<AnalysisShared> {
@@ -605,6 +614,7 @@ impl RadioManager {
         let adsb = self.adsb.clone();
         let ais = self.ais.clone();
         let apt = self.apt.clone();
+        let aprs = self.aprs.clone();
         let analysis = self.analysis.clone();
         let audio_rec = self.audio_rec.clone();
         let audio_in = self.audio_in.clone();
@@ -618,8 +628,8 @@ impl RadioManager {
             .name("rx-pipeline".into())
             .spawn(move || {
                 run_pipeline(
-                    params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, analysis, audio_rec,
-                    audio_in,
+                    params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, aprs, analysis,
+                    audio_rec, audio_in,
                 )
             })
             .expect("spawn rx-pipeline thread");
@@ -806,6 +816,8 @@ enum SourceKind {
     #[cfg(feature = "soapy")]
     Apt(Box<AptSdrParams>),
     #[cfg(feature = "soapy")]
+    Aprs(Box<AprsSdrParams>),
+    #[cfg(feature = "soapy")]
     Analysis(Box<AnalysisSdrParams>),
 }
 
@@ -841,6 +853,23 @@ struct AisSdrParams {
     freq_correction_ppm: f64,
     reference: Option<(f64, f64)>,
     max_range_nm: f64,
+    trail_secs: f64,
+    forget_secs: f64,
+}
+
+#[cfg(feature = "soapy")]
+struct AprsSdrParams {
+    soapy_args: String,
+    device_rate: f64,
+    channel: usize,
+    antenna: Option<String>,
+    agc: bool,
+    gain_overall_db: Option<f64>,
+    gain_elements_db: Vec<(String, f64)>,
+    settings: Vec<(String, String)>,
+    freq_correction_ppm: f64,
+    reference: Option<(f64, f64)>,
+    max_range_km: f64,
     trail_secs: f64,
     forget_secs: f64,
 }
@@ -1056,6 +1085,48 @@ impl PipelineParams {
                     None => SourceKind::Silence,
                 }
             }
+            "aprs" => {
+                #[cfg(not(feature = "soapy"))]
+                {
+                    let _ = device;
+                    SourceKind::Silence
+                }
+                #[cfg(feature = "soapy")]
+                match device {
+                    Some(dev) => {
+                        let rlat = param("reference_lat", 0.0);
+                        let rlon = param("reference_lon", 0.0);
+                        let reference =
+                            (rlat.abs() > 0.01 || rlon.abs() > 0.01).then_some((rlat, rlon));
+                        SourceKind::Aprs(Box::new(AprsSdrParams {
+                            soapy_args: dev.soapy_args.clone(),
+                            device_rate: cfg.tuner.sample_rate_hz,
+                            channel: cfg.tuner.channel,
+                            antenna: cfg.tuner.antenna.clone(),
+                            agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
+                            gain_overall_db: cfg.tuner.gain_db,
+                            gain_elements_db: cfg
+                                .tuner
+                                .gain_elements_db
+                                .iter()
+                                .map(|(k, v)| (k.clone(), *v))
+                                .collect(),
+                            settings: cfg
+                                .tuner
+                                .device_settings
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                            freq_correction_ppm: cfg.tuner.freq_correction_ppm,
+                            reference,
+                            max_range_km: param("max_range_km", 300.0),
+                            trail_secs: param("trail_seconds", 1800.0),
+                            forget_secs: param("forget_seconds", 3600.0),
+                        }))
+                    }
+                    None => SourceKind::Silence,
+                }
+            }
             "apt" => {
                 #[cfg(not(feature = "soapy"))]
                 {
@@ -1174,11 +1245,12 @@ fn run_pipeline(
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    aprs: Arc<AprsShared>,
     analysis: Arc<AnalysisShared>,
     audio_rec: Arc<AudioRecorder>,
     audio_in: Arc<TxAudioSource>,
 ) {
-    let _ = (&adsb, &ais, &apt, &analysis, &audio_in);
+    let _ = (&adsb, &ais, &apt, &aprs, &analysis, &audio_in);
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
         Ok(w) => {
@@ -1209,6 +1281,8 @@ fn run_pipeline(
         SourceKind::Ais(p) => run_ais(*p, ais, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
         SourceKind::Apt(p) => run_apt(*p, apt, &telemetry, &stop, cmd_rx),
+        #[cfg(feature = "soapy")]
+        SourceKind::Aprs(p) => run_aprs(*p, aprs, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
         SourceKind::Analysis(p) => run_analysis(*p, analysis, &telemetry, &stop, cmd_rx),
     }
@@ -1985,6 +2059,155 @@ fn run_ais(
         };
         chan_a.process(&iq[..n], &mut on_frame);
         chan_b.process(&iq[..n], &mut on_frame);
+
+        if last_status.elapsed() >= Duration::from_millis(500) {
+            last_status = Instant::now();
+            shared.tracker.lock().unwrap().prune(shared.now_s());
+            let mut t = telemetry.lock().unwrap();
+            t.frames_sent = frames;
+            t.rssi_dbfs = Some(rssi_ema);
+            t.squelch_open = frames > 0;
+            t.overruns = overruns;
+        }
+    }
+
+    let _ = stream.deactivate(None);
+}
+
+/// APRS pipeline: tunes 144.390 MHz, feeds the [`crate::aprs`] AFSK/AX.25
+/// decoder, and folds decoded packets into a station track table read over
+/// REST (+ a TNC2 TCP feed). No audio output.
+#[cfg(feature = "soapy")]
+fn run_aprs(
+    p: AprsSdrParams,
+    shared: Arc<AprsShared>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+    cmd_rx: mpsc::Receiver<PipelineCmd>,
+) {
+    use crate::aprs::demod::AprsDemod;
+    use crate::aprs::APRS_HZ;
+    use num_complex::Complex32;
+    use soapysdr::{Device, Direction, ErrorCode};
+
+    let dir = Direction::Rx;
+    let ch = p.channel;
+    // Tune 250 kHz low so 144.390 sits clear of the ZIF DC spike.
+    let lo_offset = 250_000.0;
+    let center = APRS_HZ - lo_offset;
+
+    shared
+        .tracker
+        .lock()
+        .unwrap()
+        .reset(p.reference, p.max_range_km, p.trail_secs, p.forget_secs);
+    shared.packets.lock().unwrap().clear();
+
+    let dev = match Device::new(p.soapy_args.as_str()) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("aprs: cannot open device: {e}");
+            return;
+        }
+    };
+    let log_set = |what: &str, r: Result<(), soapysdr::Error>| {
+        if let Err(e) = r {
+            tracing::warn!("aprs: set {what}: {e}");
+        }
+    };
+    log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
+    log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(center, p.freq_correction_ppm), ""));
+    if let Some(ant) = &p.antenna {
+        log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
+    }
+    if p.agc {
+        log_set("agc", dev.set_gain_mode(dir, ch, true));
+    } else {
+        log_set("gain_mode", dev.set_gain_mode(dir, ch, false));
+        if let Some(g) = p.gain_overall_db {
+            log_set("gain", dev.set_gain(dir, ch, g));
+        }
+        for (name, v) in &p.gain_elements_db {
+            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+        }
+    }
+    for (k, v) in &p.settings {
+        log_set("setting", dev.write_setting(k.as_str(), v.as_str()));
+    }
+
+    let mut stream = match dev.rx_stream::<Complex32>(&[ch]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("aprs: rx_stream: {e}");
+            return;
+        }
+    };
+    if let Err(e) = stream.activate(None) {
+        tracing::error!("aprs: stream activate: {e}");
+        return;
+    }
+
+    let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
+    let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
+    let mut demod = AprsDemod::new(p.device_rate, APRS_HZ - center);
+
+    telemetry.lock().unwrap().source = "aprs";
+    tracing::info!(
+        "aprs: {} @ {:.4} MHz, {:.1} Msps, channel rate {:.0} Hz, ref {}",
+        p.soapy_args,
+        APRS_HZ / 1e6,
+        p.device_rate / 1e6,
+        demod.channel_rate(),
+        match p.reference {
+            Some((la, lo)) => format!("{la:.3},{lo:.3}"),
+            None => "none".into(),
+        },
+    );
+
+    let mut frames: u64 = 0;
+    let mut overruns: u64 = 0;
+    let mut rssi_ema = -70.0f32;
+    let mut last_status = Instant::now();
+
+    while !stop.load(Ordering::SeqCst) {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if let PipelineCmd::Gain { agc, overall, elements } = cmd {
+                log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
+                if !agc {
+                    if let Some(g) = overall {
+                        log_set("gain", dev.set_gain(dir, ch, g));
+                    }
+                    for (name, v) in &elements {
+                        log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+                    }
+                }
+            }
+        }
+
+        let n = match stream.read(&mut [iq.as_mut_slice()], 200_000) {
+            Ok(n) => n,
+            Err(e) => {
+                match e.code {
+                    ErrorCode::Timeout => {}
+                    ErrorCode::Overflow => overruns += 1,
+                    _ => {
+                        tracing::warn!("aprs: stream read: {e}");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                continue;
+            }
+        };
+        if n == 0 {
+            continue;
+        }
+
+        let shared_ref = &shared;
+        demod.process(&iq[..n], |f| {
+            frames += 1;
+            rssi_ema = rssi_ema * 0.9 + f.rssi_dbfs * 0.1;
+            shared_ref.record(&f.octets, f.rssi_dbfs);
+        });
 
         if last_status.elapsed() >= Duration::from_millis(500) {
             last_status = Instant::now();

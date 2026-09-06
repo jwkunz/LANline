@@ -135,6 +135,18 @@ pub fn modes() -> Vec<ModeInfo> {
             ]),
         },
         ModeInfo {
+            id: "aprs",
+            name: "APRS (144.390 MHz packet — position/status/message)",
+            tx_capable: false,
+            params: BTreeMap::from([
+                ("reference_lat", num(0.0, -90.0, 90.0, "deg")),
+                ("reference_lon", num(0.0, -180.0, 180.0, "deg")),
+                ("max_range_km", num(300.0, 10.0, 2000.0, "km")),
+                ("trail_seconds", num(1800.0, 60.0, 21600.0, "s")),
+                ("forget_seconds", num(3600.0, 300.0, 86400.0, "s")),
+            ]),
+        },
+        ModeInfo {
             id: "ais",
             name: "AIS (161.975 / 162.025 MHz vessels)",
             tx_capable: false,
@@ -228,7 +240,10 @@ pub fn presets() -> Vec<Preset> {
 /// Capability strings for `GET /api/v1/server` and the beacon. `tx` is added
 /// by the caller when the selected device supports it.
 pub fn base_capabilities() -> Vec<String> {
-    ["rx", "webrtc", "nbfm", "wbfm", "am", "frs", "ham", "apt", "adsb", "ais", "analysis", "debug_tone"]
+    [
+        "rx", "webrtc", "nbfm", "wbfm", "am", "frs", "ham", "apt", "aprs", "adsb", "ais",
+        "analysis", "debug_tone",
+    ]
         .iter()
         .map(|s| s.to_string())
         .collect()

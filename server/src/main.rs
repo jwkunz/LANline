@@ -9,6 +9,7 @@ mod ais;
 mod analysis;
 mod api;
 mod apt;
+mod aprs;
 mod audio;
 mod catalog;
 mod config;
@@ -107,7 +108,8 @@ async fn main() -> Result<()> {
     let beast = adsb::beast::serve(config.bind, config.beast_port, radio_mgr.adsb().beast_tx.clone());
     let ais_nmea =
         ais::nmea::serve(config.bind, config.ais_nmea_port, radio_mgr.ais().nmea_tx.clone());
-    let ports = Ports { c2: c2_port, audio_out, audio_in, beast, ais_nmea };
+    let aprs = aprs::feed::serve(config.bind, config.aprs_port, radio_mgr.aprs().feed_tx.clone());
+    let ports = Ports { c2: c2_port, audio_out, audio_in, beast, ais_nmea, aprs };
 
     let state = AppState::new(
         config.clone(),
@@ -157,13 +159,14 @@ async fn main() -> Result<()> {
 
     // --- serve -------------------------------------------------------
     tracing::info!(
-        "listening: C2 {scheme}://{host}:{c2}  audio_out udp/{ao}  audio_in udp/{ai}  beast tcp/{be}  ais tcp/{an}  beacon udp/{bp}",
+        "listening: C2 {scheme}://{host}:{c2}  audio_out udp/{ao}  audio_in udp/{ai}  beast tcp/{be}  ais tcp/{an}  aprs tcp/{ap}  beacon udp/{bp}",
         host = advertised_host,
         c2 = ports.c2,
         ao = ports.audio_out,
         ai = ports.audio_in,
         be = ports.beast,
         an = ports.ais_nmea,
+        ap = ports.aprs,
         bp = config.beacon_port,
     );
     let name_url = match (config.no_mdns, advertised_host) {

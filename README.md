@@ -22,9 +22,10 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
   input+offset with an encoded CTCSS uplink tone; Part 97, licensed control
   operator). Off by default (`--enable-tx`); see
   [docs/architecture.md](docs/architecture.md#frs-and-the-transmit-question),
-- **traffic trackers** — **ADS-B** aircraft (1090 MHz) and **AIS** vessels
-  (162 MHz): decoded tracks over REST + a raw TCP feed (Beast / AIVDM), plotted
-  on a self-contained radar scope in the web client,
+- **traffic trackers** — **ADS-B** aircraft (1090 MHz), **AIS** vessels
+  (162 MHz), and **APRS** stations (144.390 MHz, 1200-baud packet): decoded
+  tracks over REST + a raw TCP feed (Beast / AIVDM / TNC2), plotted on a
+  self-contained radar scope in the web client,
 - **NOAA APT** (137 MHz weather satellite): a real-time image downlink decoded
   into a two-channel grayscale raster over REST and rendered to canvas in the
   web client,
@@ -65,6 +66,7 @@ wrapper (`client/android`).
 | 2n | Server-side channel scan — `POST /radio/scan`, sweeps a channel list / band range in the pipeline thread, parks on squelch-open with a hang time; Scan button in the web client for FRS / NWR / ham / broadcast | ✅ |
 | 2o | Repeater directory coverage — hearham region matcher now reads spelled-out state names (83 → ~1460 FL), `HAM_REPEATER_CENTER` distance filter, paste-shorthand in the add form | ✅ |
 | 2p | DCS (Digital Coded Squelch) — decode (134.4 bps Golay(23,12), transition-locked bit clock) + encode in the TX modulator, `dcs_code`/`dcs_invert`/`dcs_squelch` params, wizard picker | ✅ |
+| 2q | APRS receive mode — 1200-baud AFSK/AX.25 decode (position / MIC-E / status / message), per-callsign station tracker on the shared radar scope, `GET /aprs/stations` + `/aprs/packets`, TNC2 TCP feed | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -270,13 +272,15 @@ at max gain; weak/distant ones may not. See
 [architecture.md](docs/architecture.md#am-and-hackrf-mflf-sensitivity) for
 what was actually verified on the bench.
 
-### Traffic trackers (ADS-B / AIS)
+### Traffic trackers (ADS-B / AIS / APRS)
 
-Pick **ADS-B** (aircraft, 1090 MHz) or **AIS** (vessels, 162 MHz) in the mode
-strip. Set your location (for range/bearing and a centred scope) and start the
-receiver — decoded contacts appear on the shared radar scope (range rings in NM,
-heading vectors, position trails; click a target for detail) and in the list
-below it.
+Pick **ADS-B** (aircraft, 1090 MHz), **AIS** (vessels, 162 MHz) or **APRS**
+(stations, 144.390 MHz) in the mode strip. Set your location (for range/bearing
+and a centred scope) and start the receiver — decoded contacts appear on the
+shared radar scope (range rings, heading vectors, position trails; click a
+target for detail) and in the list below it. APRS decodes 1200-baud Bell 202
+AFSK / AX.25 UI frames: uncompressed + compressed positions, **MIC-E** (the
+common tracker format), status and message packets.
 
 The server also exports the tracks over REST and as a raw TCP feed:
 
@@ -284,6 +288,7 @@ The server also exports the tracks over REST and as a raw TCP feed:
 |------|------|----------|
 | ADS-B | `GET /api/v1/adsb/{aircraft,messages}` | **Beast** binary on `30005` (`--beast-port 0` to disable) → `readsb` / `tar1090` / VRS |
 | AIS | `GET /api/v1/ais/{vessels,messages}` | **AIVDM** NMEA on `10110` (`--ais-nmea-port 0` to disable) → OpenCPN / AIS-catcher |
+| APRS | `GET /api/v1/aprs/{stations,packets}` | **TNC2** text on `10152` (`--aprs-port 0` to disable) → Xastir / YAAC / an APRS-IS gateway |
 
 ### NOAA APT (weather satellite)
 
