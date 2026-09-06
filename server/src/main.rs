@@ -4,33 +4,14 @@
 //! audio pipeline (440 Hz `debug_tone` / silence) → Opus → per-session WebRTC.
 //! The real SoapySDR DSP source replaces the synth in phase 1c.
 
-mod adsb;
-mod ais;
-mod analysis;
-mod api;
-mod apt;
-mod aprs;
-mod audio;
-mod catalog;
-mod config;
-mod discovery;
-mod error;
-mod mdns;
-mod media;
-mod model;
-mod net;
-mod radio;
-mod registry;
-mod sessions;
-mod state;
-mod tls;
-mod util;
-
 use anyhow::{Context, Result};
 use clap::Parser;
-use config::Config;
-use model::{Ports, RadioConfig};
-use state::AppState;
+use lanline_server::config::Config;
+use lanline_server::model::{Ports, RadioConfig};
+use lanline_server::state::AppState;
+use lanline_server::{
+    adsb, ais, api, aprs, catalog, discovery, mdns, media, net, radio, registry, sessions, tls,
+};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

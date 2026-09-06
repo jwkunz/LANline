@@ -1,0 +1,31 @@
+# LANline hypervisor fleet definition. Copy somewhere and pass it with
+#   lanline-hypervisor --config fleet.toml
+# See docs/hypervisor.md for the full reference.
+
+# Per-radio defaults. Any key here is overridden by the same key in a
+# [[radio]] block.
+[defaults]
+tls = true
+enable_tx = false
+
+# Base ports. Radio i (0-based) gets <base> + i for each. Bases must be at
+# least "number of radios" apart; the defaults below leave 10 each, so up to
+# 8 radios never collide. Set beast / ais_nmea / aprs to 0 to disable that
+# feed on every child.
+[ports]
+c2 = 8730
+audio_out = 8740
+audio_in = 8750
+beast = 30005
+ais_nmea = 10110
+aprs = 10152
+
+[[radio]]
+label = "VHF"
+device = "driver=hackrf"
+freq_correction_ppm = -8.9
+enable_tx = true
+
+[[radio]]
+label = "APRS"
+device = "driver=plutosdr"

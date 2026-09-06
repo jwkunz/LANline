@@ -83,6 +83,7 @@ impl Beacon {
             "server_id": self.state.server_id,
             "version": SERVER_VERSION,
             "hostname": self.state.hostname,
+            "instance_label": self.state.config.instance_label,
             "advertised_host": host.to_string(),
             "ports": {
                 "c2": ports.c2,

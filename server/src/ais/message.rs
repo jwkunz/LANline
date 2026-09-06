@@ -15,6 +15,9 @@ impl<'a> Bits<'a> {
     pub fn len(&self) -> usize {
         self.len
     }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
     /// Unsigned big-endian field.
     pub fn u(&self, start: usize, n: usize) -> u64 {
         let mut v = 0u64;

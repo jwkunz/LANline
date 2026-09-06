@@ -28,8 +28,8 @@ android {
         applicationId = "land.lanline"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "1.11.0"
+        versionCode = 20
+        versionName = "2.0.0"
         buildConfigField("String", "DEV_SERVER_URL", "\"$devServerUrl\"")
     }
 

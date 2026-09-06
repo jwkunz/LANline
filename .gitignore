@@ -28,3 +28,4 @@ client/android/captures/
 
 # Local server launch overrides
 /scripts/run-server.env
+/scripts/fleet.toml

@@ -15,4 +15,10 @@ class NativeBridge(private val beacon: BeaconListener) {
     /** JSON array of servers currently announcing on the LAN. */
     @JavascriptInterface
     fun discoveredServers(): String = beacon.snapshotJson()
+
+    /** JSON array of hypervisor fleets (each with its radio list) currently
+     *  announcing on the LAN. For a future tabbed web UI; the native chooser
+     *  uses the typed snapshot directly. */
+    @JavascriptInterface
+    fun fleets(): String = beacon.fleetsJson()
 }

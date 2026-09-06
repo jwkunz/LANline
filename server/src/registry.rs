@@ -10,6 +10,7 @@ use std::sync::Mutex;
 #[cfg(feature = "soapy")]
 mod soapy;
 
+#[derive(Default)]
 pub struct DeviceRegistry {
     inner: Mutex<Inner>,
 }
@@ -22,7 +23,7 @@ struct Inner {
 
 impl DeviceRegistry {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(Inner::default()) }
+        Self::default()
     }
 
     /// Fresh enumeration of every SoapySDR device currently attached.

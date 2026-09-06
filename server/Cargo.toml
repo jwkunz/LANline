@@ -1,10 +1,14 @@
 [package]
 name = "lanline-server"
-version = "1.11.0"
+version = "2.0.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 default-run = "lanline-server"
+
+[lib]
+name = "lanline_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "lanline-server"

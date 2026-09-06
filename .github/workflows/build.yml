@@ -1,9 +1,10 @@
 name: build
 
-# Cross-platform build of the server (server/ is the only Rust crate). The web
-# client is embedded into the binary at compile time (build.rs stages web/dist
-# → include_str!), so a single server executable *is* server + client. The
-# Android app is a separate APK and isn't part of this.
+# Cross-platform build of the server (workspace: server/ + hypervisor/). The
+# web client is embedded into the binary at compile time (build.rs stages
+# web/dist → include_str!), so a single server executable *is* server + client.
+# `lanline-hypervisor` (runs one server per radio) ships from the `soapy` leg's
+# artifacts. The Android app is a separate APK and isn't part of this.
 #
 # Two tiers:
 #   standalone — `--no-default-features`: no SoapySDR, no system SDR libs. One
@@ -181,9 +182,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  name: linux,   bin: target/release/lanline-server,     soft: false }
-          - { os: macos-latest,   name: macos,   bin: target/release/lanline-server,     soft: false }
-          - { os: windows-latest, name: windows, bin: target/release/lanline-server.exe, soft: true }
+          - { os: ubuntu-latest,  name: linux,   bin: target/release/lanline-server,     hyp: target/release/lanline-hypervisor,     soft: false }
+          - { os: macos-latest,   name: macos,   bin: target/release/lanline-server,     hyp: target/release/lanline-hypervisor,     soft: false }
+          - { os: windows-latest, name: windows, bin: target/release/lanline-server.exe, hyp: target/release/lanline-hypervisor.exe, soft: true }
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.soft }}
     steps:
@@ -231,16 +232,18 @@ jobs:
           name: web-dist
           path: web/dist
 
-      - run: cargo build --release --locked -p lanline-server
+      - run: cargo build --release --locked -p lanline-server -p lanline-hypervisor
 
       - name: cargo test (Linux only — lib is on the default loader path there)
         if: runner.os == 'Linux'
-        run: cargo test --release --locked -p lanline-server
+        run: cargo test --release --locked -p lanline-server -p lanline-hypervisor
 
       - uses: actions/upload-artifact@v4
         with:
           name: lanline-server-${{ matrix.name }}-soapy
-          path: ${{ matrix.bin }}
+          path: |
+            ${{ matrix.bin }}
+            ${{ matrix.hyp }}
           if-no-files-found: error
 
   clippy:

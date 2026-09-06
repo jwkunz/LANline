@@ -13,6 +13,7 @@ pub async fn server_info(State(st): State<AppState>) -> Json<ServerInfo> {
         protocol_version: PROTOCOL_VERSION,
         version: SERVER_VERSION,
         hostname: st.hostname.clone(),
+        instance_label: st.config.instance_label.clone(),
         scheme: st.scheme(),
         time: now_utc(),
         ports: st.ports,

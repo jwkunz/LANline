@@ -41,7 +41,7 @@ impl AppState {
         webrtc: Arc<WebrtcEngine>,
     ) -> Self {
         AppState(Arc::new(Inner {
-            server_id: Uuid::new_v4(),
+            server_id: config.server_id.unwrap_or_else(Uuid::new_v4),
             hostname: crate::net::hostname(),
             started: Instant::now(),
             ports,

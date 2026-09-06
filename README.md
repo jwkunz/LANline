@@ -67,6 +67,7 @@ wrapper (`client/android`).
 | 2o | Repeater directory coverage — hearham region matcher now reads spelled-out state names (83 → ~1460 FL), `HAM_REPEATER_CENTER` distance filter, paste-shorthand in the add form | ✅ |
 | 2p | DCS (Digital Coded Squelch) — decode (134.4 bps Golay(23,12), transition-locked bit clock) + encode in the TX modulator, `dcs_code`/`dcs_invert`/`dcs_squelch` params, wizard picker | ✅ |
 | 2q | APRS receive mode — 1200-baud AFSK/AX.25 decode (position / MIC-E / status / message), per-callsign station tracker on the shared radar scope, `GET /aprs/stations` + `/aprs/packets`, TNC2 TCP feed | ✅ |
+| 2r | Concurrent radios — `lanline-hypervisor` runs one server per SDR (server split into lib + bin), collision-free port blocks + `serial=`-resolved devices + backoff supervision, aggregated discovery (`LANLINE-FLEET-BEACON`, `GET /api/v1/fleet`, per-child mDNS), native Android radio chooser | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -76,13 +77,15 @@ through the REST API over time.
 ## Layout
 
 ```
-Cargo.toml            workspace root (only member: server/)
-server/               Rust LANline server (SDR + streaming; embeds & serves web/)
+Cargo.toml            workspace root (members: server/, hypervisor/)
+server/               Rust LANline server (SDR + streaming; embeds & serves web/); also a lib
+hypervisor/           lanline-hypervisor: run one server per radio (see docs/hypervisor.md)
 web/                  Vite + TypeScript web client (built bundle is embedded in the server + the APK)
-client/android/       Android WebView wrapper + native beacon listener
-docs/                 rest-api.md, architecture.md, beacon-protocol.md, windows-port.md
+client/android/       Android WebView wrapper + native beacon listener + fleet radio chooser
+docs/                 rest-api.md, architecture.md, beacon-protocol.md, hypervisor.md, windows-port.md
 scripts/dev-env.sh    points the build/runtime at radioconda's SoapySDR
 scripts/run-server.sh build (if needed) + run the server with that env already set up
+scripts/run-fleet.sh  same, for lanline-hypervisor
 ```
 
 ## Download and run (no SDR)
@@ -225,6 +228,24 @@ wideband FM at 4 Msps can starve the WebRTC threads (audio drops).
 
 Sanity-check the radio independently with `SoapySDRUtil --find` from inside the
 same shell.
+
+### Running multiple radios
+
+`lanline-server` is one process, one SDR. To run several at once, the
+`lanline-hypervisor` binary launches one server per radio, keeps their ports
+and state dirs from colliding, resolves each to a distinct physical SDR, and
+aggregates LAN discovery.
+
+```sh
+cp scripts/fleet.toml.sample fleet.toml     # edit the [[radio]] blocks
+scripts/run-fleet.sh --config fleet.toml    # sources dev-env.sh, builds the workspace, runs
+```
+
+Children land on `8730`, `8731`, … ; the fleet index is `http://<host>:8720/`
+(`GET /api/v1/fleet` for JSON). Any LANline client can point at a child port
+directly, and the **Android app** shows a native "Select radio" chooser when
+it hears the fleet on the LAN, with a "Switch radio" action to change later.
+Full reference: [`docs/hypervisor.md`](docs/hypervisor.md).
 
 **Windows:** the server is Linux-first today. The Rust code is portable bar one
 hostname helper, but the SoapySDR/HackRF stack and native build deps need

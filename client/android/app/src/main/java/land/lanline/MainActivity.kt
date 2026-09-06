@@ -3,10 +3,16 @@ package land.lanline
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.http.SslError
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Menu
+import android.view.MenuItem
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
@@ -15,23 +21,36 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.LinearLayout
 import java.net.InetAddress
 import java.net.URI
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
 
 /**
  * Single-activity WebView host. Loads the bundled web client (or a configured
  * dev-server URL), bridges the native UDP beacon listener into it, and holds a
  * Wi-Fi multicast lock while visible so broadcast beacons are delivered.
+ *
+ * When a `lanline-hypervisor` fleet is on the LAN it also shows a small native
+ * chooser (a toolbar + "Switch radio" menu) so the user picks which radio /
+ * port the WebView points at, and can switch later.
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var toolbar: Toolbar
     private val beacon = BeaconListener()
     private var multicastLock: WifiManager.MulticastLock? = null
+
+    private lateinit var prefs: SharedPreferences
+    private val ui = Handler(Looper.getMainLooper())
+    private var autoChooserDone = false
+    private var pickedRadio = false
 
     private var pendingGeo: Pair<String, GeolocationPermissions.Callback>? = null
     private val locationPermission =
@@ -53,13 +72,29 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        prefs = getSharedPreferences("lanline", Context.MODE_PRIVATE)
 
         // It's an appliance you leave running: keep the screen on so the
         // WebView (and its WebRTC audio session) isn't throttled or dropped.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         webView = WebView(this)
-        setContentView(webView)
+        toolbar = Toolbar(this).apply {
+            setBackgroundColor(0xFF1b2330.toInt())
+            setTitleTextColor(0xFFf0f3f7.toInt())
+            title = "LANline"
+        }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(
+            toolbar,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        root.addView(
+            webView,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
+        )
+        setContentView(root)
+        setSupportActionBar(toolbar)
 
         with(webView.settings) {
             javaScriptEnabled = true
@@ -148,9 +183,95 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // Single-file bundle → loads fine straight from assets; `file://` →
-        // `http://<lan>` API calls are not treated as mixed content.
-        val url = BuildConfig.DEV_SERVER_URL.ifEmpty { "file:///android_asset/web/index.html" }
+        val devUrl = BuildConfig.DEV_SERVER_URL
+        val savedUrl = prefs.getString(KEY_RADIO_URL, null)
+        when {
+            devUrl.isNotEmpty() -> {
+                webView.loadUrl(devUrl)
+                autoChooserDone = true
+            }
+            savedUrl != null -> {
+                pickedRadio = true
+                autoChooserDone = true
+                toolbar.title = prefs.getString(KEY_RADIO_LABEL, null) ?: "LANline"
+                webView.loadUrl(savedUrl)
+            }
+            else -> {
+                // Show the bundled UI (it has its own manual/discovery picker),
+                // and pop the native chooser once a fleet becomes visible.
+                webView.loadUrl(BUNDLED_URL)
+                ui.postDelayed(autoChooserPoll, 1_500)
+            }
+        }
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, MENU_SWITCH, 0, "Switch radio").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        menu.add(0, MENU_RELOAD, 1, "Reload")
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
+        MENU_SWITCH -> { showRadioChooser(); true }
+        MENU_RELOAD -> { webView.reload(); true }
+        else -> super.onOptionsItemSelected(item)
+    }
+
+    /** Poll the beacon map; the first time a fleet (or any server) shows up and
+     *  the user has not picked one, pop the chooser. Gives up after ~30 s. */
+    private val autoChooserPoll = object : Runnable {
+        private var elapsed = 0
+        override fun run() {
+            if (autoChooserDone) return
+            val haveSomething =
+                beacon.fleetSnapshot().isNotEmpty() || beacon.standaloneServers().isNotEmpty()
+            if (haveSomething) {
+                autoChooserDone = true
+                showRadioChooser()
+                return
+            }
+            elapsed += 1_500
+            if (elapsed < 30_000) ui.postDelayed(this, 1_500)
+        }
+    }
+
+    private fun showRadioChooser() {
+        data class Entry(val label: String, val url: String)
+
+        val entries = ArrayList<Entry>()
+        for (fleet in beacon.fleetSnapshot()) {
+            for (r in fleet.radios.sortedBy { it.idx }) {
+                val dot = if (r.running) "●" else "○"
+                val dev = r.device?.let { " · $it" } ?: ""
+                val port = runCatching { URI(r.c2BaseUrl).port }.getOrNull()?.takeIf { it > 0 }
+                val portStr = port?.let { " · :$it" } ?: ""
+                entries.add(Entry("$dot ${fleet.hostname} / ${r.label}$dev$portStr", r.c2BaseUrl))
+            }
+        }
+        for (s in beacon.standaloneServers()) {
+            val name = s.label ?: s.hostname
+            val dev = s.device?.let { " · $it" } ?: ""
+            entries.add(Entry("$name$dev · :${s.c2}", s.baseUrl.ifEmpty { "http://${s.hostname}:${s.c2}/" }))
+        }
+
+        val builder = AlertDialog.Builder(this).setTitle("Select radio")
+        if (entries.isEmpty()) {
+            builder.setMessage("No LANline radios found on the network yet.")
+                .setPositiveButton("OK", null)
+        } else {
+            val labels = entries.map { it.label }.toTypedArray()
+            builder.setItems(labels) { _, i -> loadRadio(entries[i].label, entries[i].url) }
+                .setNegativeButton("Cancel", null)
+        }
+        builder.show()
+    }
+
+    private fun loadRadio(label: String, url: String) {
+        pickedRadio = true
+        autoChooserDone = true
+        // Strip the leading run/stop dot from the toolbar title.
+        toolbar.title = label.trimStart('●', '○', ' ')
+        prefs.edit().putString(KEY_RADIO_URL, url).putString(KEY_RADIO_LABEL, toolbar.title.toString()).apply()
         webView.loadUrl(url)
     }
 
@@ -190,7 +311,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
         webView.destroy()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val BUNDLED_URL = "file:///android_asset/web/index.html"
+        private const val KEY_RADIO_URL = "radio_url"
+        private const val KEY_RADIO_LABEL = "radio_label"
+        private const val MENU_SWITCH = 1
+        private const val MENU_RELOAD = 2
     }
 }

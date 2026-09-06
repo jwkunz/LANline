@@ -136,6 +136,7 @@ Server identity and current capability summary.
   "protocol_version": 1,
   "version": "1.1.0",
   "hostname": "bench-linux",
+  "instance_label": null,
   "scheme": "http",
   "time": "2026-09-03T17:04:11Z",
   "ports": { "c2": 8730, "audio_out": 49213, "audio_in": 60731, "beast": 30005, "ais_nmea": 10110, "aprs": 10152 },
@@ -160,6 +161,13 @@ from any LAN address, not just `localhost`.
 `ports.aprs` the TCP port of the [TNC2 APRS feed](#aprs-station-track-export);
 each is `0` when disabled (`--beast-port 0` / `--ais-nmea-port 0` /
 `--aprs-port 0`).
+`instance_label` is a human name for this radio, set with `--instance-label`
+(or by [`lanline-hypervisor`](hypervisor.md) for each child it runs); `null`
+on a plain standalone server. `--server-id <uuid>` pins `server_id` across
+restarts (the hypervisor uses it so clients don't see a supervised restart as
+a new server). The hypervisor itself exposes a `GET /api/v1/fleet` on its own
+port (default `8720`) listing every child radio — see
+[hypervisor.md](hypervisor.md).
 
 ---
 

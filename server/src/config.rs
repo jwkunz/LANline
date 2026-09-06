@@ -3,6 +3,7 @@
 use clap::Parser;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 /// Runtime configuration for the LANline server.
 #[derive(Debug, Clone, Parser)]
@@ -44,6 +45,19 @@ pub struct Config {
     /// mDNS instance/host label: the server is reachable at `http://<name>.local:<c2-port>/`.
     #[arg(long, env = "LANLINE_MDNS_NAME", default_value = "lanline")]
     pub mdns_name: String,
+
+    /// Optional human label for this radio instance (e.g. "VHF", "APRS"),
+    /// surfaced in `GET /api/v1/server` and the discovery beacon. Set
+    /// automatically by `lanline-hypervisor` for each child; unset for a
+    /// plain standalone server.
+    #[arg(long, env = "LANLINE_INSTANCE_LABEL")]
+    pub instance_label: Option<String>,
+
+    /// Stable server identity (UUID). Clients dedupe discovered servers on it.
+    /// Default: a fresh random UUID each run. `lanline-hypervisor` pins one per
+    /// child so a supervised restart keeps the same identity.
+    #[arg(long, env = "LANLINE_SERVER_ID")]
+    pub server_id: Option<Uuid>,
 
     /// Host/IP to advertise to clients. Defaults to the autodetected primary
     /// LAN IPv4 address.

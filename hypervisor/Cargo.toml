@@ -1,0 +1,34 @@
+[package]
+name = "lanline-hypervisor"
+version = "2.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lanline-hypervisor"
+path = "src/main.rs"
+
+[features]
+default = ["soapy"]
+# `soapy` enumerates SoapySDR so each radio's device filter can be resolved to
+# a specific physical unit (serial=…) and collisions refused up front. Without
+# it, device filters are passed to the child servers verbatim and only checked
+# for being distinct strings.
+soapy = ["dep:soapysdr", "lanline-server/soapy"]
+
+[dependencies]
+lanline-server = { path = "../server", default-features = false }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+libc = { workspace = true }
+soapysdr = { workspace = true, optional = true }

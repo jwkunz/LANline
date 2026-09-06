@@ -1,14 +1,17 @@
 # Workspace root for the LANline project.
 #
 # Members:
-#   server/  -- the Rust LANline server (this is the only Rust crate)
+#   server/      -- the LANline server: one SDR, one DSP pipeline. Also a
+#                   library (`lanline_server`) the hypervisor builds on.
+#   hypervisor/  -- launcher that runs one `server` process per radio and
+#                   aggregates their discovery (see docs/hypervisor.md).
 #
 # The web client lives in web/ (npm/Vite) -- the server embeds its built bundle
 # and serves it at `/`. The Android client is in client/android (Gradle).
 # Neither is part of this Cargo workspace.
 [workspace]
 resolver = "2"
-members = ["server"]
+members = ["server", "hypervisor"]
 
 [workspace.package]
 edition = "2021"
@@ -37,6 +40,8 @@ anyhow = "1"
 thiserror = "2"
 soapysdr = "0.4"
 if-addrs = "0.13"
+toml = "0.8"
+libc = "0.2"
 rand = "0.8"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde-well-known"] }
 # 0.13 is the last release of the classic webrtc-rs API (pre-0.20 Sans-I/O

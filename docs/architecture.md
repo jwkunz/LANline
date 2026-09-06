@@ -39,7 +39,9 @@ Three advertised ports:
 
 `c2` is **fixed** (default `8730`) so a bookmarked browser URL survives a
 restart; `audio_out`/`audio_in` are random, chosen at startup. Pass `--c2-port 0`
-for a random C2 port too.
+for a random C2 port too. Under [`lanline-hypervisor`](hypervisor.md) every
+one of these is instead a fixed `base + radio-index`, and the hypervisor adds a
+`fleet` HTTP port (default `8720`, `GET /api/v1/fleet`).
 
 Reaching the server:
 
@@ -53,7 +55,8 @@ Reaching the server:
 
 ```
 server/src/
-  main.rs              wiring: parse config, probe device, start beacon + mDNS + HTTP(S)
+  lib.rs               pub mod list — the `lanline_server` library (the hypervisor builds on it)
+  main.rs              binary shim: parse config, probe device, start beacon + mDNS + HTTP(S)
   config.rs            CLI (clap) + resolved runtime settings
   tls.rs               --tls: load or self-sign (rcgen) the C2 cert, cache it
   mdns.rs              multicast-DNS responder: <name>.local + _lanline._tcp on the C2 port
@@ -130,6 +133,14 @@ server/src/
   webrtc/
     peer.rs            build RTCPeerConnection, attach Opus TrackLocalStaticSample,
                        pump frames from a fanout subscription, expose state
+
+hypervisor/src/        the `lanline-hypervisor` launcher (see hypervisor.md)
+  main.rs              parse CLI, resolve, preflight, spawn, wait for signal
+  config.rs            --config fleet.toml + --radio shorthand -> Vec<RadioSpec>
+  devices.rs           soapysdr::enumerate -> serial=-qualified --device, de-collide
+  alloc.rs             bind-check every base+index TCP port before spawning
+  supervisor.rs        one tokio::process::Command per radio, backoff restart, SIGINT
+  discovery.rs         per-child LANLINE-BEACON + LANLINE-FLEET-BEACON + mDNS + GET /api/v1/fleet
 ```
 
 ## Data / task model
@@ -691,7 +702,7 @@ host inherits the page's scheme. The Android WebView adds an
 address or a `*.local` name (the only things this app ever connects to),
 rejecting anything routable.
 
-### Multiple radios
+### Switching between radios (one at a time)
 
 Device enumeration, probing and selection (`registry.rs` + `registry::soapy`)
 have always been driver-agnostic — `SoapySDRDevice_enumerate("")` then, per
@@ -713,6 +724,37 @@ home frequency is outside the selected device's `frequency_ranges_hz` (AM's
 520 kHz vs the Pluto's 70 MHz floor), and its `pickSampleRate` now handles a
 *continuous* rate range (Pluto: 65 kHz–61 MHz — use the wanted rate as-is)
 as well as a discrete set (HackRF: 1–20 Msps in 1 MHz steps).
+
+### Concurrent radios — the hypervisor
+
+Running **both** radios at once is a separate binary, not a mode of the
+server. `lanline-server`'s whole spine is "one SDR, one DSP pipeline, one
+telemetry, one audio fan-out" — threading a slot index through
+`RadioManager`, the route tree, the decode feeds, the WebRTC engine and the
+web state to make it *N* was a large, invasive change fighting that spine.
+Instead: keep the server exactly as it is and add `lanline-hypervisor`, which
+spawns one server process per radio and aggregates their discovery. Each
+radio stays a fully independent server — the clean base for a later
+cross-radio link or TDOA feature (they would coordinate over REST, not shared
+memory). Full reference: [hypervisor.md](hypervisor.md).
+
+To let the hypervisor reuse the server's non-pipeline pieces (`net` port
+allocation, `mdns`, the beacon payload shape) the crate is now a **library +
+binary**: `server/src/lib.rs` is the `pub mod` list, `src/main.rs` is the
+`async fn main` shim, and `hypervisor/` depends on `lanline_server` as a lib.
+Two small additions to the server itself: `--instance-label` (a human name for
+the radio, echoed in `GET /api/v1/server` and the beacon) and `--server-id`
+(pin the identity so a supervised restart keeps the same `server_id` and
+clients don't see it flap).
+
+The hypervisor gives each child a `base + index` port block (bind-checked up
+front), a private `--iq-dir` / `--tls-dir`, and — with the `soapy` feature —
+a `serial=`-qualified `--device` string resolved from a one-shot
+`soapysdr::enumerate`, refusing two radios that land on the same unit. It
+supervises with exponential-backoff restart, forwards `SIGINT` on shutdown,
+and emits discovery for the whole group: one ordinary `LANLINE-BEACON` per
+child (existing clients see N servers, unchanged), one `LANLINE-FLEET-BEACON`
+describing the group, per-child mDNS, and `GET /api/v1/fleet` on port 8720.
 
 ### Radio options panel
 

@@ -54,7 +54,8 @@ packet):
 |-------|-------|
 | `magic` | Always `"LANLINE-BEACON"`; receivers must drop datagrams that lack it |
 | `protocol_version` | Bump on any breaking change to this payload or the REST contract |
-| `server_id` | Stable for the lifetime of a server process (UUID v4) |
+| `server_id` | Stable for the lifetime of a server process (UUID v4). Under `lanline-hypervisor` it is pinned per radio, so it also survives a supervised restart |
+| `instance_label` | Optional human name for the radio (`--instance-label`; the hypervisor sets it per child). `null` on a plain standalone server |
 | `advertised_host` | The IPv4 address the server believes clients should dial; per-interface datagrams carry that interface's address |
 | `ports.c2` | TCP port of the REST API |
 | `ports.audio_out` | UDP port for the receive WebRTC media (ICE host candidate) |
@@ -67,11 +68,52 @@ packet):
 | `capabilities` | Mirrors `GET /api/v1/server.capabilities` |
 | `timestamp` | RFC 3339 UTC send time |
 
+## Fleet beacon (`LANLINE-FLEET-BEACON`)
+
+[`lanline-hypervisor`](hypervisor.md) runs one `lanline-server` per radio. It
+emits one ordinary `LANLINE-BEACON` per child (real ports, pinned `server_id`,
+`instance_label`) **and**, on the same port `50055`, one extra datagram
+describing the group:
+
+```json
+{
+  "magic": "LANLINE-FLEET-BEACON",
+  "protocol_version": 1,
+  "fleet_id": "b1e0…",
+  "hostname": "bench-linux",
+  "advertised_host": "192.168.1.42",
+  "fleet_base_url": "http://192.168.1.42:8720",
+  "version": "2.0.0",
+  "radios": [
+    {
+      "idx": 0, "label": "VHF",
+      "server_id": "5f2b…", "scheme": "https",
+      "c2_base_url": "https://192.168.1.42:8730",
+      "device": "HackRF One", "device_serial": "0000…",
+      "running": true, "restarts": 0, "pid": 40912, "started_at": 1757181234,
+      "ports": { "c2": 8730, "audio_out": 8740, "audio_in": 8750, "beast": 30005, "ais_nmea": 10110, "aprs": 10152 }
+    },
+    { "idx": 1, "label": "APRS", "server_id": "77c9…", "scheme": "https",
+      "c2_base_url": "https://192.168.1.42:8731", "device": "PlutoSDR",
+      "running": true, "restarts": 0, "pid": 40913, "started_at": 1757181234,
+      "ports": { "c2": 8731, "audio_out": 8741, "audio_in": 8751, "beast": 30006, "ais_nmea": 10111, "aprs": 10153 } }
+  ],
+  "timestamp": "2026-09-06T18:04:11Z"
+}
+```
+
+The same `radios` array (always current, plus a `fleet_base_url`) is served at
+`GET <fleet_base_url>/api/v1/fleet`. A client that only understands
+`LANLINE-BEACON` ignores this datagram and still sees every child; a
+fleet-aware client (the Android chooser) uses it to group the radios under
+their host and offer a switch.
+
 ## Client guidance
 
 1. Bind `0.0.0.0:50055` UDP, enable address reuse.
-2. For each datagram: parse JSON, require `magic == "LANLINE-BEACON"` and
-   `protocol_version == 1`.
+2. For each datagram: parse JSON, require `protocol_version == 1` and
+   `magic == "LANLINE-BEACON"` (or `"LANLINE-FLEET-BEACON"` if you handle
+   fleets; drop anything else).
 3. Key servers by `server_id`; treat a server as gone after ~5 s (5 missed
    beacons) with no datagram.
 4. Connect using `c2_base_url` (or `advertised_host` + `ports.c2`), then drive

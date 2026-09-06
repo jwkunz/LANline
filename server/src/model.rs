@@ -52,6 +52,10 @@ pub struct ServerInfo {
     pub protocol_version: u32,
     pub version: &'static str,
     pub hostname: String,
+    /// Human label for this radio instance, when one was set (`--instance-label`,
+    /// as `lanline-hypervisor` does for each child). `null` for a plain
+    /// standalone server.
+    pub instance_label: Option<String>,
     /// `"http"` or `"https"` — the transport this C2 port is served over.
     pub scheme: &'static str,
     #[serde(with = "time::serde::rfc3339")]
