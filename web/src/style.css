@@ -366,6 +366,27 @@ canvas.apt-canvas {
 .ac-table .s-site,
 .ac-table .s-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
+/* Internet flight lookup, expanded under the selected ADS-B row. */
+.ac-detail {
+  margin: -2px 0 4px 12px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+}
+.ac-detail-line { color: var(--ink); }
+.ac-detail-src { font-size: 11px; }
+.ac-photo {
+  max-height: 120px;
+  width: auto;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  display: block;
+}
+
 .note {
   color: var(--muted);
   font-size: 13px;

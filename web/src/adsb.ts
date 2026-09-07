@@ -20,6 +20,34 @@ export interface Aircraft {
   trail: [number, number][]; // [lat, lon]
 }
 
+/** Internet enrichment for one contact — `GET /api/v1/adsb/flight/{icao}`
+ *  (mirror of the server's `flight::FlightInfo`). Every field is optional;
+ *  `available` is false when nothing came back and `reason` says why
+ *  (`disabled` | `offline` | `unknown` | `pending`). */
+export interface FlightInfo {
+  available: boolean;
+  reason?: string | null;
+  registration?: string | null;
+  aircraft_type?: string | null;
+  icao_type?: string | null;
+  manufacturer?: string | null;
+  owner?: string | null;
+  owner_country?: string | null;
+  photo_thumb_url?: string | null;
+  airline?: string | null;
+  route?: {
+    origin: Airport;
+    destination: Airport;
+  } | null;
+}
+
+export interface Airport {
+  name?: string | null;
+  city?: string | null;
+  iata?: string | null;
+  icao?: string | null;
+}
+
 export interface AdsbSnapshot {
   time: string;
   mode: string;

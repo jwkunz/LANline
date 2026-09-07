@@ -152,7 +152,9 @@ Server identity and current capability summary.
 ```
 
 `capabilities` is dynamic: `"tx"` appears only when the selected device
-supports transmit. `selected_device` is `null` when none is selected.
+supports transmit; `"tts"` / `"stt"` with the `voice-text` build + flags;
+`"flight-lookup"` unless disabled with `--flight-lookup false`.
+`selected_device` is `null` when none is selected.
 `scheme` is `"https"` when the server was started with `--tls` (the C2 port
 is then HTTPS-only); a browser served the client over HTTPS is a secure
 context, so `getUserMedia` (push-to-talk mic) and the geolocation button work
@@ -603,6 +605,43 @@ frame), newest last:
 ```json
 { "time": "…", "count": 512, "messages": ["8dad6d039914c3b4184060783d2b", "…"] }
 ```
+
+### `GET /api/v1/adsb/flight/{icao}`
+
+Internet enrichment for one contact via **adsbdb.com** — tail number, type,
+owner and (with `?callsign=SWA3451`) the origin → destination route.
+Present only when the `flight-lookup` capability is advertised (on by
+default; `--flight-lookup false` / `LANLINE_FLIGHT_LOOKUP=0` disables it and
+drops the capability). `{icao}` is the 6-hex Mode S address. Results are
+cached server-side (24 h for a full hit, 1 h otherwise). Always `200` — an
+unavailable result carries a `reason`:
+
+```json
+{
+  "available": true,
+  "registration": "N628TS",
+  "aircraft_type": "G650 ER",
+  "icao_type": "G650",
+  "manufacturer": "Gulfstream Aerospace",
+  "owner": "Falcon Landing LLC",
+  "owner_country": "United States",
+  "photo_thumb_url": "https://airport-data.com/…/thumb.jpg",
+  "airline": "United Airlines",
+  "route": {
+    "origin":      { "name": "…", "city": "San Francisco", "iata": "SFO", "icao": "KSFO" },
+    "destination": { "name": "…", "city": "Singapore",     "iata": "SIN", "icao": "WSSS" }
+  }
+}
+```
+
+```json
+{ "available": false, "reason": "unknown" }
+```
+
+`reason` is `disabled` (feature off), `offline` (no uplink), `unknown` (no
+match), or `pending` (another client is fetching the same aircraft — retry).
+Every other field is optional. **Privacy:** this is the only endpoint that
+reaches the internet, and it tells adsbdb which aircraft this receiver sees.
 
 ### Beast feed (TCP `ports.beast`, default `30005`)
 

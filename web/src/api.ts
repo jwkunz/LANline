@@ -130,6 +130,15 @@ export class Client {
   radioStatus = (signal?: AbortSignal) =>
     this.request<RadioStatus>("GET", "/api/v1/radio/status", { signal });
   adsbAircraft = () => this.request<import("./adsb").AdsbSnapshot>("GET", "/api/v1/adsb/aircraft");
+  /** Internet enrichment for one ADS-B contact (needs the `flight-lookup`
+   *  capability). Always resolves — an unavailable result carries `reason`. */
+  flightInfo = (icao: string, callsign?: string | null) =>
+    this.request<import("./adsb").FlightInfo>(
+      "GET",
+      `/api/v1/adsb/flight/${encodeURIComponent(icao)}${
+        callsign ? `?callsign=${encodeURIComponent(callsign)}` : ""
+      }`,
+    );
   aisVessels = () => this.request<import("./ais").AisSnapshot>("GET", "/api/v1/ais/vessels");
   aprsStations = () => this.request<import("./aprs").AprsSnapshot>("GET", "/api/v1/aprs/stations");
   aprsPackets = () =>

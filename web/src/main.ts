@@ -5,7 +5,7 @@ import { AnalysisView } from "./analysis";
 import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { haversineMi, parseLatLon, type Located } from "./geo";
-import { altLabel, offsetNm, type AdsbSnapshot } from "./adsb";
+import { altLabel, offsetNm, type AdsbSnapshot, type FlightInfo } from "./adsb";
 import { type AisSnapshot } from "./ais";
 import { aprsSymbolGlyph, parseAprsMessages, type AprsSnapshot } from "./aprs";
 import { loadNwrStations, nearestNwr, NWR_CHANNELS, type NwrStation } from "./nwr";
@@ -227,6 +227,9 @@ interface State {
   transcript: TranscriptEntry[];
   apt: AptStatus | null;
   scopeSel: string | null;
+  /** Internet enrichment for ADS-B contacts, keyed by ICAO hex. `"loading"`
+   *  while the request is in flight. Cleared on mode switch. */
+  acInfo: Record<string, FlightInfo | "loading">;
   scopeRangeNm: number | "auto";
   log: string[];
 }
@@ -271,6 +274,7 @@ const state: State = {
   transcript: [],
   apt: null,
   scopeSel: null,
+  acInfo: {},
   scopeRangeNm: "auto",
   log: [],
 };
@@ -833,7 +837,16 @@ async function switchMode(id: string): Promise<void> {
   }
   try {
     let radio = await state.client.patchRadio(patch);
-    setState({ radio, adsb: null, ais: null, aprs: null, apt: null, scopeSel: null, activeRepeater: null });
+    setState({
+      radio,
+      adsb: null,
+      ais: null,
+      aprs: null,
+      apt: null,
+      scopeSel: null,
+      acInfo: {},
+      activeRepeater: null,
+    });
     logLine(`mode → ${meta?.label ?? id}`);
     void refreshStations();
     if (id === "frs" || id === "ham") void refreshTxLog();
@@ -1580,7 +1593,10 @@ function installDelegates(): void {
     const acRow = t.closest<HTMLButtonElement>(".ac-row");
     if (acRow) {
       const cid = acRow.dataset.cid ?? null;
-      return setState({ scopeSel: cid === state.scopeSel ? null : cid });
+      const next = cid === state.scopeSel ? null : cid;
+      setState({ scopeSel: next });
+      if (next) requestFlightInfo(next);
+      return;
     }
     if (hit("#fm-down")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, -1));
     if (hit("#fm-up")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, 1));
@@ -2792,16 +2808,67 @@ function scopeListInner(): string {
     }</p>`;
   }
   const sel = state.scopeSel;
+  const adsb = state.radio?.mode === "adsb";
   const rows = s.contacts
     .map(
       (c) =>
         `<button class="ac-row${c.id === sel ? " tuned" : ""}${c.lat == null ? " noloc" : ""}" data-cid="${esc(c.id)}">
         <span class="s-call">${esc(c.label)}</span>
         <span class="s-site">${esc(c.sub)}</span>
-      </button>`,
+      </button>${adsb && c.id === sel ? flightDetailHtml(c.id) : ""}`,
     )
     .join("");
   return `<div class="stations ac-table">${rows}</div>`;
+}
+
+/** Expanded internet lookup panel under a selected ADS-B row. Reads
+ *  `state.acInfo` (populated by `requestFlightInfo`); renders nothing until a
+ *  request has been kicked. */
+function flightDetailHtml(icao: string): string {
+  if (!state.server?.capabilities.includes("flight-lookup")) return "";
+  const info = state.acInfo[icao];
+  if (!info) return "";
+  if (info === "loading") {
+    return `<div class="ac-detail"><span class="note">looking up…</span></div>`;
+  }
+  if (!info.available) {
+    const msg =
+      info.reason === "offline"
+        ? "no internet — flight data unavailable"
+        : info.reason === "disabled"
+          ? "flight lookup is disabled on this server"
+          : "no flight data found";
+    return `<div class="ac-detail"><span class="note">${esc(msg)}</span></div>`;
+  }
+
+  const airport = (a: NonNullable<FlightInfo["route"]>["origin"]): string => {
+    const code = a.icao || a.iata || "";
+    const place = a.city || a.name || "";
+    return esc([code, place].filter(Boolean).join(" ") || "?");
+  };
+  const line1 = [info.registration, info.icao_type || info.aircraft_type, info.manufacturer]
+    .filter(Boolean)
+    .map((x) => esc(x as string))
+    .join(" · ");
+  const owner = [info.owner, info.owner_country].filter(Boolean).map((x) => esc(x as string)).join(", ");
+  const routeLine = info.route
+    ? `${info.airline ? esc(info.airline) + " · " : ""}${airport(info.route.origin)} → ${airport(
+        info.route.destination,
+      )}`
+    : "";
+
+  return `<div class="ac-detail">
+    ${
+      info.photo_thumb_url
+        ? `<img class="ac-photo" src="${esc(info.photo_thumb_url)}" alt="" loading="lazy"
+             referrerpolicy="no-referrer" onerror="this.remove()" />`
+        : ""
+    }
+    ${line1 ? `<div class="ac-detail-line">${line1}</div>` : ""}
+    ${owner ? `<div class="ac-detail-line note">${owner}</div>` : ""}
+    ${routeLine ? `<div class="ac-detail-line">${routeLine}</div>` : ""}
+    <div class="ac-detail-src note">via adsbdb.com</div>
+  </div>`;
 }
 
 /** Centre + NM-per-pixel for the current scope, or null if nothing to show. */
@@ -2994,7 +3061,41 @@ function onScopeClick(ev: MouseEvent): void {
     const d = Math.hypot(p.x - px, p.y - py);
     if (d < 16 && (!best || d < best.d)) best = { id: p.id, d };
   }
-  setState({ scopeSel: best ? (best.id === state.scopeSel ? null : best.id) : null });
+  const next = best ? (best.id === state.scopeSel ? null : best.id) : null;
+  setState({ scopeSel: next });
+  if (next) requestFlightInfo(next);
+}
+
+/** Fetch internet enrichment (tail / type / owner / route) for a selected
+ *  ADS-B contact via the server's adsbdb proxy. No-op unless we're in `adsb`
+ *  mode, the server advertises `flight-lookup`, and we don't already have it.
+ *  Retries a couple of times while the server reports the lookup `pending`
+ *  (another client is fetching the same aircraft). */
+function requestFlightInfo(icao: string): void {
+  if (state.radio?.mode !== "adsb") return;
+  if (!state.server?.capabilities.includes("flight-lookup")) return;
+  if (state.acInfo[icao]) return;
+  const callsign = state.adsb?.aircraft.find((a) => a.icao === icao)?.callsign ?? null;
+  state.acInfo[icao] = "loading";
+  setState({ acInfo: state.acInfo });
+  const attempt = (retriesLeft: number): void => {
+    if (!state.client) return;
+    state.client
+      .flightInfo(icao, callsign)
+      .then((info) => {
+        if (info.reason === "pending" && retriesLeft > 0) {
+          window.setTimeout(() => attempt(retriesLeft - 1), 1500);
+          return;
+        }
+        state.acInfo[icao] = info;
+        setState({ acInfo: state.acInfo });
+      })
+      .catch(() => {
+        state.acInfo[icao] = { available: false, reason: "offline" };
+        setState({ acInfo: state.acInfo });
+      });
+  };
+  attempt(3);
 }
 
 function toneWizardHtml(): string {

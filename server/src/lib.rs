@@ -20,6 +20,7 @@ pub mod catalog;
 pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod flight;
 pub mod mdns;
 pub mod media;
 pub mod model;

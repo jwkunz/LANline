@@ -72,7 +72,7 @@ server/src/
     modes.rs           GET /modes
     presets.rs         GET /presets, POST /presets/{id}/apply
     radio.rs           GET/PATCH /radio, start/stop, GET /radio/status
-    adsb.rs            GET /adsb/aircraft, GET /adsb/messages
+    adsb.rs            GET /adsb/aircraft, GET /adsb/messages, GET /adsb/flight/{icao}
     ais.rs             GET /ais/vessels, GET /ais/messages
     aprs.rs            GET /aprs/stations, GET /aprs/packets
     sessions.rs        session CRUD + heartbeat
@@ -80,6 +80,11 @@ server/src/
     reserved.rs        phase-2 endpoints -> 501
 
   discovery.rs         UDP beacon: pick ports, enumerate broadcast addrs, emit JSON at 1 Hz
+
+  flight/
+    mod.rs             FlightLookup (on AppState): adsbdb.com HTTPS proxy + TTL cache
+                       for GET /adsb/flight/{icao} — the one internet-facing feature,
+                       opt-out via --flight-lookup false
 
   adsb/
     mod.rs             AdsbShared: tracker + hex ring + Beast broadcast, on RadioManager
@@ -197,6 +202,15 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   CPR → per-ICAO track table), `GET /api/v1/adsb/{aircraft,messages}`, a Beast
   TCP feed (`--beast-port`, default 30005), and the web client's radar scope
   (canvas, range rings, trails — no tiles).
+- **2v** — flight lookup: `flight/mod.rs` — tapping an ADS-B contact calls
+  `GET /api/v1/adsb/flight/{icao}`, which the server resolves from adsbdb.com
+  (aircraft-by-hex + route-by-callsign, concurrent) into a trimmed
+  `FlightInfo`, TTL-cached and de-duped across clients. The only feature that
+  reaches the internet — on by default, `--flight-lookup false` /
+  `LANLINE_FLIGHT_LOOKUP=0` disables it and drops the `flight-lookup`
+  capability. reqwest with rustls+ring (no OpenSSL/aws-lc). Web client shows
+  an expandable detail panel (tail/type/owner, origin → destination, photo)
+  under the selected row.
 - **2d** — `ais` mode: `ais/` (two-channel 9600-baud GMSK → HDLC → ITU-R
   M.1371 → per-MMSI vessel table), `GET /api/v1/ais/{vessels,messages}`, an
   AIVDM TCP feed (`--ais-nmea-port`, default 10110), sharing the radar scope.

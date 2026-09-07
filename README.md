@@ -71,6 +71,7 @@ wrapper (`client/android`).
 | 2s | APRS transmit — `POST /aprs/tx` (message / position / raw), half-duplex burst in `run_aprs` reusing the demod's modulator, `--enable-tx`-gated, local TNC echo + audit log; web `aprs` panel messaging card → two browser tabs = an APRS chat room between the fleet's two radios | ✅ |
 | 2t | Voice ↔ text for the FM/AM modes (optional, feature `voice-text`) — `POST /radio/tx/say` speaks typed text on the air (espeak-ng / Piper), `GET /radio/transcript` transcribes received overs (pure-Rust Whisper via candle); web "Voice text" card in `frs`/`ham` | ✅ |
 | 2u | Repeater directory is now nationwide (US, ~9k) and the web client sorts it by your location — same as the FM station list; the `FL`-only default is gone | ✅ |
+| 2v | Flight lookup — tapping an ADS-B contact fetches tail number / type / owner / route from adsbdb.com via a server-side `GET /api/v1/adsb/flight/{icao}` proxy (TTL cache, cross-client de-dupe); the one internet-facing feature, on by default, `--flight-lookup false` to disable | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -327,6 +328,12 @@ shared radar scope (range rings, heading vectors, position trails; click a
 target for detail) and in the list below it. APRS decodes 1200-baud Bell 202
 AFSK / AX.25 UI frames: uncompressed + compressed positions, **MIC-E** (the
 common tracker format), status and message packets.
+
+Tapping an aircraft in the ADS-B list also looks it up on **adsbdb.com** —
+tail number, type, operator, and the origin → destination route — and shows
+it inline. This is the only part of LANline that reaches the internet; it is
+on by default and `--flight-lookup false` (or `LANLINE_FLIGHT_LOOKUP=0`)
+turns it off for airgapped use.
 
 The server also exports the tracks over REST and as a raw TCP feed:
 

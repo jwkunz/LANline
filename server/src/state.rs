@@ -26,6 +26,9 @@ pub struct Inner {
     pub radio: Arc<Mutex<RadioConfig>>,
     pub radio_mgr: Arc<RadioManager>,
     pub webrtc: Arc<WebrtcEngine>,
+    /// ADS-B flight enrichment via adsbdb.com (the one internet-facing
+    /// feature). Built from `config`; disabled when `--flight-lookup false`.
+    pub flight: Arc<crate::flight::FlightLookup>,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
             radio,
             radio_mgr,
             webrtc,
+            flight: Arc::new(crate::flight::FlightLookup::new(&config)),
             config,
         }))
     }
@@ -83,6 +87,9 @@ impl AppState {
         }
         if self.0.radio_mgr.stt_enabled() {
             caps.push("stt".to_string());
+        }
+        if self.0.flight.is_enabled() {
+            caps.push("flight-lookup".to_string());
         }
         caps
     }

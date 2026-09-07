@@ -65,3 +65,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 sha2 = "0.10"
+# Outbound HTTPS for ADS-B flight lookup (adsbdb.com). rustls+ring, no
+# OpenSSL and no aws-lc-rs — `rustls-tls` resolves to the ring-backed
+# `rustls-tls-webpki-roots` in reqwest 0.12, matching the stack already here.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
