@@ -22,6 +22,11 @@ client/android/captures/
 *~
 .DS_Store
 
+# Recordings the server drops in its working directory
+/lanline-audio-*.wav
+/*.wav
+/*.iq
+
 # Local environment overrides
 /.env
 /.env.local

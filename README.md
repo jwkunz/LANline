@@ -42,6 +42,27 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
 Clients: a **web app** (`web/`, also served by the server) and an **Android**
 wrapper (`client/android`).
 
+## Legal
+
+**MIT licensed** — see [`LICENSE`](LICENSE). Copyright © 2026 Numerius
+Engineering LLC.
+
+- **Receiving** the services LANline decodes (NOAA WX, FM/AM broadcast, ADS-B,
+  AIS, amateur, APRS, APT) is generally lawful in the U.S. — they are all
+  meant for open reception. Don't record or divulge private communications.
+- **Transmitting is disabled by default.** Nothing keys a radio without
+  `--enable-tx`. A general-purpose SDR is **not FCC-certified** for FRS/GMRS
+  (Part 95) — that path exists only for the operator's own informed
+  experimentation and is **not presented as compliant**. Amateur (Part 97)
+  transmit is legitimate **homebrew operation by a licensed control
+  operator**, who is responsible for band edges, spurious-emission filtering,
+  power, and station ID.
+- **Internet:** the only outbound traffic is the opt-out ADS-B/AIS
+  enrichment lookup (`--flight-lookup false` to disable).
+- **This is not legal advice, and there is no warranty.** Full detail,
+  third-party licenses, and non-U.S. notes: **[`docs/legal.md`](docs/legal.md)**.
+  Your radio, your responsibility.
+
 ## Phase roadmap
 
 | Phase | Scope | Status |
@@ -89,7 +110,7 @@ server/               Rust LANline server (SDR + streaming; embeds & serves web/
 hypervisor/           lanline-hypervisor: run one server per radio (see docs/hypervisor.md)
 web/                  Vite + TypeScript web client (built bundle is embedded in the server + the APK)
 client/android/       Android WebView wrapper + native beacon listener + fleet radio chooser
-docs/                 rest-api.md, architecture.md, beacon-protocol.md, hypervisor.md, windows-port.md
+docs/                 code-map.md, architecture.md, rest-api.md, legal.md, hypervisor.md, beacon-protocol.md, windows-port.md
 scripts/dev-env.sh    points the build/runtime at radioconda's SoapySDR
 scripts/run-server.sh build (if needed) + run the server with that env already set up
 scripts/run-fleet.sh  same, for lanline-hypervisor
@@ -200,9 +221,24 @@ discovery beacon and mDNS advertise the `https://` URL automatically.
 
 ## Building the server
 
-The server links the SoapySDR that ships with
-[radioconda](https://github.com/ryanvolz/radioconda) (`~/radioconda`), which
-already carries the HackRF, PlutoSDR and RTL-SDR modules.
+**Prerequisites**
+
+| Need | Install |
+|---|---|
+| Rust ≥ 1.75 | [`rustup`](https://rustup.rs) |
+| Node ≥ 18 + npm | your package manager, or [nvm](https://github.com/nvm-sh/nvm) — for the web bundle |
+| `clang` / `libclang` | `apt install clang libclang-dev` · `dnf install clang-devel` · `brew install llvm` — the SoapySDR bindings are generated with bindgen |
+| `pkg-config` | `apt install pkg-config` (usually already present) |
+| **SoapySDR + your SDR's plugin** | easiest: [radioconda](https://github.com/ryanvolz/radioconda) into `~/radioconda` (carries HackRF / PlutoSDR / RTL-SDR). Or a system SoapySDR (`apt install libsoapysdr-dev soapysdr-module-hackrf soapysdr-module-rtlsdr …`). |
+
+`scripts/dev-env.sh` points the build and runtime at radioconda: it sets
+`SOAPY_SDR_PLUGIN_PATH` (where the driver `.so`s live), `LIBCLANG_PATH`, and an
+rpath so the binary finds `libSoapySDR` at runtime. Using a system SoapySDR
+instead? Set `SOAPY_SDR_PLUGIN_PATH` and `LIBCLANG_PATH` yourself and skip
+`dev-env.sh`.
+
+USB SDRs need device permissions — install the vendor udev rules
+(`hackrf`, `rtl-sdr` packages ship them) and add your user to `plugdev`.
 
 ```sh
 npm --prefix web install && npm --prefix web run build   # bundle the server embeds & serves
@@ -236,6 +272,23 @@ wideband FM at 4 Msps can starve the WebRTC threads (audio drops).
 Sanity-check the radio independently with `SoapySDRUtil --find` from inside the
 same shell.
 
+### Tested radios
+
+Any SoapySDR-supported device should enumerate and tune; select one with
+`--device driver=<name>` (or the **Radio** picker if several are attached).
+What's actually been exercised:
+
+| Radio | `--device` | Verified | Notes |
+|---|---|---|---|
+| **HackRF One** | `driver=hackrf` | RX all modes **+ TX** (FRS / ham / APRS) | No preselector below ~30 MHz → weak on mediumwave. Gain elements: LNA / VGA / AMP. Set `--freq-correction-ppm` for narrowband UHF (FRS) — [how to measure](docs/architecture.md#hackrf-frequency-calibration). |
+| **ADALM-Pluto** | `driver=plutosdr` | RX (70 MHz – 6 GHz) | Single PGA gain. No MW/HF without the AD936x mod. Wants a band-matched antenna on the RX SMA — a stock 900 MHz whip is poor at VHF. TX is possible but was **not** verified end-to-end here. |
+| **RTL-SDR** ("NESDR" etc.) | `driver=rtlsdr` | *should work, unverified* | RX-only, 24 MHz – 1.7 GHz, 8-bit. Fine for the receive modes in principle; not on the bench for this release. |
+| LimeSDR / Airspy / SDRplay / bladeRF | `driver=lime` / `airspy` / `sdrplay` / `bladerf` | not tested | Expected to enumerate and tune via SoapySDR. |
+
+Switching devices at runtime stops the receiver and greys out modes outside
+the new device's tuning range — see
+[architecture.md](docs/architecture.md#switching-between-radios-one-at-a-time).
+
 ### Voice ↔ text (optional)
 
 Type a message and have the server speak it on the air, and transcribe received
@@ -263,9 +316,11 @@ rolling buffer the worker pulls overlapping ~26 s windows from, stitching the
 de-duplicated text together (~20–30 s behind the broadcast). The `nbfm` panel
 gets a **Weather text** view that fills as the loop is transcribed, plus
 **Download .txt** (`GET /api/v1/radio/transcript.txt`) and **Clear**.
-`whisper-base.en` fumbles some section transitions — `--stt-model
-openai/whisper-small.en` is markedly better and still keeps up on a typical
-CPU.
+`whisper-base.en` is the practical default — it decodes a 26 s window in
+~4–7 s on a stock CPU, well under real time. `whisper-small.en` transcribes
+section transitions better but its ~17–34 s decode can't keep up on a plain
+CPU (it falls behind and starts dropping audio); use it only with a GPU or a
+BLAS-accelerated `candle` build.
 
 ### Running multiple radios
 
@@ -289,12 +344,66 @@ Full reference: [`docs/hypervisor.md`](docs/hypervisor.md).
 hostname helper, but the SoapySDR/HackRF stack and native build deps need
 manual setup — see [`docs/windows-port.md`](docs/windows-port.md).
 
+## Running as a service
+
+LANline is an appliance you leave running. Templates are in `scripts/`.
+
+**Linux — systemd (user service, simplest):**
+
+```sh
+mkdir -p ~/.config/systemd/user ~/.config/lanline ~/.local/bin ~/.local/share/lanline
+cp target/release/lanline-server ~/.local/bin/          # or the downloaded binary
+cp scripts/lanline-server.service ~/.config/systemd/user/
+cp scripts/run-server.env.sample  ~/.config/lanline/server.env    # then edit: device, ppm, TLS, --enable-tx…
+systemctl --user daemon-reload
+systemctl --user enable --now lanline-server
+loginctl enable-linger "$USER"          # keep it running after you log out
+journalctl --user -u lanline-server -f  # logs
+```
+
+The unit reads every `LANLINE_*` variable from `server.env` — the same
+knobs as `lanline-server --help`. For a headless box, either serve plain
+HTTP (`LANLINE_TLS` unset — fine on a trusted LAN, but the mic/location
+buttons won't work off-`localhost`) or issue a warning-free cert with
+[`mkcert`](https://github.com/FiloSottile/mkcert) and set
+`LANLINE_TLS_CERT` / `LANLINE_TLS_KEY`.
+
+`scripts/lanline-server.service` also carries the **system-service** variant
+(dedicated `lanline` account, `/etc/lanline/server.env`, starts at boot) in
+its header comments. `scripts/lanline-fleet.service` is the equivalent for
+`lanline-hypervisor`.
+
+**macOS — launchd:** edit and install `scripts/com.numerius.lanline.plist`
+into `~/Library/LaunchAgents/`, then
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.numerius.lanline.plist`.
+
+**Windows:** run `lanline-server.exe` under [NSSM](https://nssm.cc/) or a Task
+Scheduler task set to "run at startup", with your flags on the command line.
+
 ## Using the web client
 
 The server serves it. With `lanline-server` running, open **`http://lanline.local:8730/`**
 (or `http://<server-ip>:8730/`) in any browser on the LAN — it connects to that
 origin automatically, no host to type. The Android app finds the server over the
 LAN on its own.
+
+**First connection:** the page connects on load (the *Server* card turns
+green). Pick a mode in the **mode strip** at the top → press **Start
+receiver** in the "Now playing" card → the audio card appears and streams
+(browsers may need one click to allow audio). Tune with the per-mode dial /
+picker below. Set **📍 My location** once (needs `--tls` or `localhost`) so
+the station finders, radar scope and satellite passes are centred on you. If
+the server belongs to a hypervisor fleet, a **⇤ Fleet** link in the header
+jumps back to the radio chooser.
+
+Per-mode guides below:
+[AM](#am-radio) ·
+[ADS-B / AIS / APRS](#traffic-trackers-ads-b--ais--aprs) ·
+[NOAA APT](#noaa-apt-weather-satellite) ·
+[FRS](#frs-walkie-talkie-channels) ·
+[Amateur FM](#amateur-fm-vhfuhf-nbfm) ·
+[Receiver Analysis](#receiver-analysis-waterfall).
+NOAA Weather Radio and FM broadcast use the plain NBFM / wideband-FM picker.
 
 **⚙ Radio options** (in the "Now playing" card) opens a panel over the raw
 SoapySDR knobs for the selected device — PPM correction, per-element gain
@@ -344,10 +453,10 @@ common tracker format), status and message packets.
 Tapping an aircraft in the ADS-B list also looks it up on **adsbdb.com** —
 tail number, type, operator, and the origin → destination route — and shows
 it inline; tapping an AIS vessel does the same against **vesselfinder.com**
-(flag, tonnage, year built, dimensions, photo). This is the only part of
-LANline that reaches the internet; it is on by default and
-`--flight-lookup false` (or `LANLINE_FLIGHT_LOOKUP=0`) turns it off for
-airgapped use.
+(flag, tonnage, year built, dimensions, photo). This is the **only** part of
+LANline that reaches the internet — it sends the contact's ICAO hex / MMSI to
+those services. On by default; `--flight-lookup false` (or
+`LANLINE_FLIGHT_LOOKUP=0`) disables it. See [Legal](#legal).
 
 The server also exports the tracks over REST and as a raw TCP feed:
 
@@ -391,16 +500,13 @@ hang time before it resumes — a real scanner, no client round-trips.
 A **push-to-talk** button appears below the channel picker when the server
 is running with `--enable-tx` and a transmit-capable device is selected —
 hold it to key up and talk (live mic audio, not a test tone), release to
-stop; a hard 10s cap auto-releases regardless. This is off by default and
-deliberately so: FRS is a Part 95 certified-equipment service, and a
-general-purpose SDR like a HackRF isn't type-accepted for FRS transmission,
-independent of power level or intent. `--enable-tx` exists for personal,
-non-distributed use at the operator's own informed discretion, not as a
-feature this project is presenting as generally compliant — see
-[architecture.md](docs/architecture.md#frs-and-the-transmit-question) for
-the full design (half-duplex hand-off, the WebRTC mic uplink, and a couple
-of real bugs found and fixed getting it working end-to-end against an
-actual handheld).
+stop; a hard 10s cap auto-releases regardless. It is off by default and
+deliberately so: FRS is a Part 95 certified-equipment service and a
+general-purpose SDR is not type-accepted for it, regardless of power or
+intent — see [Legal](#legal) / [`docs/legal.md`](docs/legal.md). The design
+(half-duplex hand-off, the WebRTC mic uplink, bugs found against a real
+handheld) is in
+[architecture.md](docs/architecture.md#frs-and-the-transmit-question).
 
 If FRS reception sounds distorted or silent despite squelch opening, your
 SDR's crystal is likely just off-frequency enough at UHF to matter — set
@@ -454,8 +560,9 @@ the **uplink signalling** — the repeater's CTCSS tone, or a DCS code you set
 in the wizard. Every key is written to a **transmit audit log**
 (`GET /api/v1/radio/tx/log`, and a collapsible list under the PTT button) —
 time, frequency, offset, tone/code, duration. Part 97 permits homebrew gear
-under an amateur licence — you are the control operator (KZ4AZ). The same UHF
-`freq_correction_ppm` note as FRS applies.
+operated by a licensed control operator; you are responsible for band edges,
+spurious-emission filtering, power and station ID — see
+[Legal](#legal). The same UHF `freq_correction_ppm` note as FRS applies.
 
 ### Receiver Analysis (waterfall)
 
@@ -484,11 +591,20 @@ or open `client/android/` in Android Studio and Run. See
 
 ## Docs
 
+- [`docs/code-map.md`](docs/code-map.md) — one-page orientation: repo layout, request lifecycle, where each mode lives
+- [`docs/architecture.md`](docs/architecture.md) — pipeline & module map, DSP notes, design write-ups
 - [`docs/rest-api.md`](docs/rest-api.md) — full REST API
-- [`docs/architecture.md`](docs/architecture.md) — pipeline & module map
+- [`docs/legal.md`](docs/legal.md) — license, spectrum law, third-party data
+- [`docs/hypervisor.md`](docs/hypervisor.md) — running a multi-radio fleet
 - [`docs/beacon-protocol.md`](docs/beacon-protocol.md) — UDP discovery wire format
 - [`docs/windows-port.md`](docs/windows-port.md) — what a Windows build of the server would take (Linux-first today)
+- [`CHANGELOG.md`](CHANGELOG.md) — release history
 
-## License
+## License & legal
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [`LICENSE`](LICENSE). Copyright © 2026 Numerius Engineering LLC.
+
+Spectrum-law summary, transmit caveats, non-U.S. notes and third-party data
+attribution: **[`docs/legal.md`](docs/legal.md)** (and the [Legal](#legal)
+section above). This is not legal advice and the software comes with no
+warranty.

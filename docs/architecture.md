@@ -1,5 +1,9 @@
 # Architecture
 
+New to the codebase? Start with [`code-map.md`](code-map.md) — a one-page
+orientation to the repo layout and request lifecycle. This document is the
+deep dive: the DSP pipeline, each mode's decoder, and the design write-ups.
+
 ## Overview
 
 ```
@@ -524,10 +528,12 @@ frames — `pcm_to_mel` over-pads), one encoder pass, and a greedy
 no-timestamps decode (`.en` models) with a repetition-cycle guard;
 `clean()` drops non-speech junk (bare stop-words, subtitle markup, prices,
 low-diversity loops). The model is a local HF-layout dir (`--stt-model`;
-`whisper-base.en` by default — `whisper-small.en` transcribes section
-transitions noticeably better and still runs faster than real time on a
-typical CPU). Text lands in a 200-entry ring + broadcast, served at
-`GET /radio/transcript`; `DspStatus.transcribing` flags a decode in flight.
+`whisper-base.en` by default — ~4–7 s to decode a 26 s window on a stock CPU,
+comfortably under real time. `whisper-small.en` reads section transitions
+better but its ~17–34 s decode falls behind and starts dropping audio on a
+plain CPU — reserve it for a GPU / BLAS-accelerated `candle` build). Text
+lands in a 200-entry ring + broadcast, served at `GET /radio/transcript`;
+`DspStatus.transcribing` flags a decode in flight.
 
 **TTS (`voice/tts.rs`, feature `tts`)** — no Rust engine dep: it shells
 `espeak-ng --stdout` (robotic formant synth, no model — fine for automated

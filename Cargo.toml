@@ -17,7 +17,10 @@ members = ["server", "hypervisor"]
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
-repository = "local"
+authors = ["Jake Kunzler"]
+repository = "https://github.com/jwkunz/LANline"
+homepage = "https://github.com/jwkunz/LANline"
+description = "LAN-native SDR command & control — receive (and, opt-in, transmit) from a browser or Android app"
 
 # Release binaries are shipped as standalone downloads (the web client is
 # embedded at build time, so one file is the whole server). Strip symbols to

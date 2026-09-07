@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd LaunchAgent template for a single LANline server.
+
+  1. Edit the two paths below (binary + working dir) and add any flags to
+     ProgramArguments, or drop LANLINE_* keys into EnvironmentVariables.
+  2. Install and load:
+       cp scripts/com.numerius.lanline.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.numerius.lanline.plist
+       launchctl kickstart -k gui/$(id -u)/com.numerius.lanline
+  3. Logs: ~/Library/Logs/lanline.out.log / lanline.err.log
+  4. Remove:
+       launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.numerius.lanline.plist
+
+  The downloaded binary is unsigned — run once from a terminal first and clear
+  Gatekeeper (`xattr -d com.apple.quarantine ./lanline-server`).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.numerius.lanline</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/lanline-server</string>
+    <!-- <string>- -tls</string> -->
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- <key>LANLINE_DEVICE</key><string>driver=hackrf</string> -->
+    <!-- <key>LANLINE_TLS</key><string>true</string> -->
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/CHANGEME/Library/Application Support/lanline</string>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/CHANGEME/Library/Logs/lanline.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/CHANGEME/Library/Logs/lanline.err.log</string>
+</dict>
+</plist>

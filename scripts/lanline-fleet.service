@@ -1,0 +1,36 @@
+# systemd unit template for a LANline fleet (lanline-hypervisor: one server
+# process per SDR). See scripts/lanline-server.service for the install flow;
+# the only differences are the binary and that it takes a --config file.
+#
+#   cp scripts/fleet.toml.sample ~/.config/lanline/fleet.toml    # edit [[radio]] blocks
+#   cp scripts/lanline-fleet.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now lanline-fleet
+#   journalctl --user -u lanline-fleet -f
+#
+# The fleet index is served on port 8720 by default; children take 8730, 8731,
+# ... . Put shared LANLINE_* defaults (TLS cert paths, ppm) in the
+# EnvironmentFile; per-radio settings go in fleet.toml.
+
+[Unit]
+Description=LANline SDR fleet (hypervisor)
+Documentation=https://github.com/jwkunz/LANline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+#User=lanline
+#Group=lanline
+EnvironmentFile=%h/.config/lanline/server.env
+#EnvironmentFile=/etc/lanline/server.env
+ExecStart=%h/.local/bin/lanline-hypervisor --config %h/.config/lanline/fleet.toml
+#ExecStart=/usr/local/bin/lanline-hypervisor --config /etc/lanline/fleet.toml
+Restart=on-failure
+RestartSec=3
+WorkingDirectory=%h/.local/share/lanline
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
+# system service: WantedBy=multi-user.target

@@ -1,0 +1,66 @@
+# systemd unit template for a single LANline server.
+#
+# ---- as a user service (simplest; runs as you, no root) ------------------
+#   mkdir -p ~/.config/systemd/user ~/.config/lanline
+#   cp scripts/lanline-server.service ~/.config/systemd/user/
+#   cp scripts/run-server.env.sample  ~/.config/lanline/server.env   # then edit
+#   # edit the unit: set ExecStart to your absolute binary path
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now lanline-server
+#   loginctl enable-linger "$USER"        # keep it running after you log out
+#   journalctl --user -u lanline-server -f
+#
+# ---- as a system service (dedicated account, starts at boot) ------------
+#   sudo useradd --system --home /var/lib/lanline --create-home lanline
+#   sudo usermod -aG plugdev lanline      # HackRF/RTL USB access (udev rules)
+#   sudo install -Dm644 scripts/lanline-server.service /etc/systemd/system/lanline-server.service
+#   sudo install -Dm640 scripts/run-server.env.sample  /etc/lanline/server.env
+#   #   then, in the installed unit: uncomment User=/Group=, and change the
+#   #   EnvironmentFile / WantedBy lines as noted below.
+#   sudo systemctl daemon-reload && sudo systemctl enable --now lanline-server
+#   sudo journalctl -u lanline-server -f
+#
+# The binary reads every LANLINE_* variable in the EnvironmentFile (see
+# `lanline-server --help`): LANLINE_DEVICE, LANLINE_ENABLE_TX, LANLINE_TLS,
+# LANLINE_TLS_CERT/KEY, LANLINE_FREQ_CORRECTION_PPM, LANLINE_C2_PORT, ...
+# For an unattended HTTPS box, issue a real cert with mkcert and point
+# LANLINE_TLS_CERT / LANLINE_TLS_KEY at it so there is no browser warning.
+
+[Unit]
+Description=LANline SDR server
+Documentation=https://github.com/jwkunz/LANline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- system service: uncomment and set the account ---
+#User=lanline
+#Group=lanline
+
+# --- user service: this path; system service: /etc/lanline/server.env ---
+EnvironmentFile=%h/.config/lanline/server.env
+#EnvironmentFile=/etc/lanline/server.env
+
+# Absolute path to the binary you built or downloaded. Flags can also live
+# here, but prefer LANLINE_* vars in the EnvironmentFile.
+ExecStart=%h/.local/bin/lanline-server
+#ExecStart=/usr/local/bin/lanline-server
+
+Restart=on-failure
+RestartSec=3
+# The server writes recordings to its working dir; give it a stable one.
+WorkingDirectory=%h/.local/share/lanline
+#WorkingDirectory=/var/lib/lanline
+
+# Light hardening (loosen if a recording/cert path lives elsewhere).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/lanline %h/.local/state/lanline %h/.config/lanline
+PrivateTmp=yes
+
+[Install]
+# user service:
+WantedBy=default.target
+# system service: WantedBy=multi-user.target
