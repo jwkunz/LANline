@@ -624,9 +624,20 @@ A second raster mode alongside `apt`, but **audio-rate** and colour. The
 Output is `sstv::Image` — an RGBA canvas that resizes on a mode change and
 clears on each frame's first row — encoded as `[u32 w][u32 h][RGBA]` at
 `GET /api/v1/sstv/image` (+ `/sstv/status`), rendered straight into a
-`<canvas>` `ImageData` in the web client. No FEC, no image crate. The
-decoder logic is unit-tested against a synthetic FM SSTV encoder
-(`sstv::demod::tests`). Analog **television** (composite video) is a
+`<canvas>` `ImageData` in the web client. No FEC, no image crate.
+
+**Transmit** (`sstv::encode`, `--enable-tx`-gated, FM only). `encode(rgb,
+mode)` is the inverse of the decoder: a phase-continuous oscillator emits the
+VIS header then, per line, sync + porch + each component as `width` tones of
+`mode.pixel` seconds at `1500 + level·800` Hz, with a running sample-accurate
+time target so per-tone rounding never accumulates. `fm_iq_chunk` upsamples
+that 48 kHz audio and FM-modulates it to IQ, phase-continuous across calls.
+`POST /api/v1/sstv/tx` → `RadioManager::sstv_tx` → `PipelineCmd::SstvTx` →
+`sstv_tx_burst` inside `run_sstv` (mirrors `aprs_tx_burst`): deactivate RX,
+key the dial frequency straight, stream the modulated picture in ~0.25 s
+slabs (abortable via `stop`, capped at `MAX_SSTV_TX_SECS`), flush, retune and
+reactivate RX. The encoder ↔ decoder round trip is the primary unit test
+(`sstv::encode::tests`). Analog **television** (composite video) is a
 separate, wideband effort (planned).
 
 ### FRS and the transmit question

@@ -6,7 +6,15 @@ import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { haversineMi, parseLatLon, type Located } from "./geo";
 import { altLabel, offsetNm, type AdsbSnapshot, type FlightInfo } from "./adsb";
-import { type SstvImage, type SstvStatus, SSTV_MODES, SSTV_PRESETS } from "./sstv";
+import {
+  imageToRgb,
+  type SstvImage,
+  type SstvStatus,
+  SSTV_MODE_DIMS,
+  SSTV_MODES,
+  SSTV_PRESETS,
+  SSTV_TX_MODES,
+} from "./sstv";
 import { type AisSnapshot, type VesselInfo } from "./ais";
 import { aprsSymbolGlyph, parseAprsMessages, type AprsSnapshot } from "./aprs";
 import { loadNwrStations, nearestNwr, NWR_CHANNELS, type NwrStation } from "./nwr";
@@ -305,6 +313,9 @@ let aptImg: AptImage | null = null;
 let aptImageFetchedAt = 0;
 let sstvImg: SstvImage | null = null;
 let sstvImgFetchedAt = 0;
+/** Live webcam stream for SSTV transmit (released on mode switch / teardown). */
+let sstvCamStream: MediaStream | null = null;
+let sstvTxBusy = false;
 let analysisView: AnalysisView | null = null;
 
 function readSavedLoc(): Located | null {
@@ -651,6 +662,7 @@ async function teardownAudio(): Promise<void> {
     micStream.getTracks().forEach((t) => t.stop());
     micStream = null;
   }
+  stopSstvCam();
 }
 
 // --- radio / mode / tuning -------------------------------------------
@@ -856,6 +868,7 @@ async function switchMode(id: string): Promise<void> {
     micStream.getTracks().forEach((t) => t.stop());
     micStream = null;
   }
+  stopSstvCam();
   try {
     let radio = await state.client.patchRadio(patch);
     setState({
@@ -1664,6 +1677,10 @@ function installDelegates(): void {
     if (hit("#apt-go")) return aptManualGo();
     if (hit("#sstv-go")) return sstvManualGo();
     if (hit("#sstv-save")) return saveSstvPng();
+    if (hit("#sstv-tx-send-file")) return sendSstvImageFile();
+    if (hit("#sstv-cam-start")) return void startSstvCam();
+    if (hit("#sstv-cam-send")) return void sendSstvCamFrame();
+    if (hit("#sstv-cam-stop")) return stopSstvCam();
     { const p = t.closest<HTMLElement>("[data-sstv-preset]"); if (p) return applySstvPreset(Number(p.dataset.sstvPreset)); }
     if (hit("#ham-down")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, -1));
     if (hit("#ham-up")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, 1));
@@ -2831,7 +2848,39 @@ function sstvWizardHtml(): string {
         <canvas id="sstv-canvas" class="apt-canvas"></canvas>
       </div>
       <p class="note" id="sstv-status" style="margin:8px 0 0">${sstvStatusInner()}</p>
+      ${sstvTxHtml()}
     </section>`;
+}
+
+function sstvTxHtml(): string {
+  if (!state.server?.capabilities.includes("ptt")) return "";
+  const opts = SSTV_TX_MODES.map((m) => {
+    const [w, h] = SSTV_MODE_DIMS[m];
+    return `<option value="${m}"${m === "scottie1" ? " selected" : ""}>${m} (${w}×${h})</option>`;
+  }).join("");
+  return `
+    <div class="sstv-tx">
+      <h3 style="margin:16px 0 4px">Transmit a picture</h3>
+      <p class="note" style="margin:0 0 8px">FM SSTV on the tuned frequency
+      (2 m amateur — Part 97; use an <b>SSTV calling frequency such as
+      144.500 MHz</b>, not 145.800). The image is resized to the mode's
+      geometry and plays out over 30 s – 2 min with the receiver muted.</p>
+      <div class="sstv-tools">
+        <label>Mode <select id="sstv-tx-mode">${opts}</select></label>
+        <label>Image <input id="sstv-tx-file" type="file" accept="image/*" /></label>
+        <button id="sstv-tx-send-file" class="secondary">Send image</button>
+      </div>
+      <div class="sstv-tools" style="margin-top:8px">
+        <button id="sstv-cam-start" class="secondary">Start camera</button>
+        <button id="sstv-cam-send" class="secondary" hidden>Send frame</button>
+        <button id="sstv-cam-stop" class="secondary" hidden>Stop camera</button>
+      </div>
+      <div class="apt-wrap" style="margin-top:8px">
+        <video id="sstv-cam" autoplay muted playsinline hidden
+               style="max-width:320px;border-radius:6px"></video>
+      </div>
+      <p class="note" id="sstv-tx-status" style="margin:8px 0 0"></p>
+    </div>`;
 }
 
 function sstvStatusInner(): string {
@@ -2922,6 +2971,105 @@ function saveSstvPng(): void {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }, "image/png");
+}
+
+// --- SSTV transmit (uploaded image + webcam) --------------------------
+
+function sstvTxMode(): string {
+  return panels.querySelector<HTMLSelectElement>("#sstv-tx-mode")?.value ?? "scottie1";
+}
+
+function setSstvTxStatus(msg: string): void {
+  const el = panels.querySelector<HTMLElement>("#sstv-tx-status");
+  if (el) el.textContent = msg;
+}
+
+async function sendSstvRgb(source: CanvasImageSource, what: string): Promise<void> {
+  if (!state.client || sstvTxBusy) return;
+  const mode = sstvTxMode();
+  const dims = SSTV_MODE_DIMS[mode];
+  if (!dims) return;
+  sstvTxBusy = true;
+  setSstvTxStatus(`encoding ${what}…`);
+  try {
+    const rgb = imageToRgb(source, dims[0], dims[1]);
+    const r = await state.client.sstvTx(mode, rgb);
+    setSstvTxStatus(`transmitting ${r.mode} — ~${r.secs}s (receiver muted)`);
+    logLine(`sstv tx — ${r.mode}, ~${r.secs}s`);
+  } catch (e) {
+    const msg = e instanceof ApiError ? e.message : String(e);
+    setSstvTxStatus(`transmit failed — ${msg}`);
+    logLine(`sstv tx failed — ${msg}`);
+  } finally {
+    sstvTxBusy = false;
+  }
+}
+
+function sendSstvImageFile(): void {
+  const input = panels.querySelector<HTMLInputElement>("#sstv-tx-file");
+  const file = input?.files?.[0];
+  if (!file) {
+    setSstvTxStatus("pick an image file first");
+    return;
+  }
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    void sendSstvRgb(img, file.name).finally(() => URL.revokeObjectURL(url));
+  };
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    setSstvTxStatus("could not decode that image");
+  };
+  img.src = url;
+}
+
+async function startSstvCam(): Promise<void> {
+  if (sstvCamStream) return;
+  try {
+    sstvCamStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" },
+    });
+  } catch (e) {
+    setSstvTxStatus(`camera unavailable — ${(e as Error).message}`);
+    return;
+  }
+  const video = panels.querySelector<HTMLVideoElement>("#sstv-cam");
+  if (video) {
+    video.srcObject = sstvCamStream;
+    video.hidden = false;
+  }
+  panels.querySelector<HTMLElement>("#sstv-cam-start")?.setAttribute("hidden", "");
+  panels.querySelector<HTMLElement>("#sstv-cam-send")?.removeAttribute("hidden");
+  panels.querySelector<HTMLElement>("#sstv-cam-stop")?.removeAttribute("hidden");
+}
+
+function stopSstvCam(): void {
+  if (sstvCamStream) {
+    sstvCamStream.getTracks().forEach((t) => t.stop());
+    sstvCamStream = null;
+  }
+  const video = panels.querySelector<HTMLVideoElement>("#sstv-cam");
+  if (video) {
+    video.srcObject = null;
+    video.hidden = true;
+  }
+  panels.querySelector<HTMLElement>("#sstv-cam-start")?.removeAttribute("hidden");
+  panels.querySelector<HTMLElement>("#sstv-cam-send")?.setAttribute("hidden", "");
+  panels.querySelector<HTMLElement>("#sstv-cam-stop")?.setAttribute("hidden", "");
+}
+
+async function sendSstvCamFrame(): Promise<void> {
+  const video = panels.querySelector<HTMLVideoElement>("#sstv-cam");
+  if (!video || !sstvCamStream || video.videoWidth === 0) {
+    setSstvTxStatus("camera not ready");
+    return;
+  }
+  for (let n = 3; n >= 1; n--) {
+    setSstvTxStatus(`sending frame in ${n}…`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  await sendSstvRgb(video, "webcam frame");
 }
 
 // --- radar scope (shared by ADS-B + AIS) -------------------------------

@@ -61,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .route("/apt/status", get(apt::status))
         .route("/sstv/image", get(sstv::image))
         .route("/sstv/status", get(sstv::status))
+        .route("/sstv/tx", post(sstv::tx))
         .route("/analysis/spectrum", get(analysis::spectrum))
         .route("/analysis/status", get(analysis::status))
         .route("/analysis/record", post(analysis::record))
@@ -644,6 +645,48 @@ mod tests {
 
         let (_, modes) = send(&app, get("/api/v1/modes")).await;
         assert!(modes.as_array().unwrap().iter().any(|m| m["id"] == "apt"));
+    }
+
+    #[tokio::test]
+    async fn sstv_tx_is_gated_and_advertised() {
+        let app = app().await;
+
+        // catalog marks sstv tx-capable now
+        let (_, modes) = send(&app, get("/api/v1/modes")).await;
+        let sstv = modes.as_array().unwrap().iter().find(|m| m["id"] == "sstv").unwrap();
+        assert_eq!(sstv["tx_capable"], true);
+        assert!(sstv["params"].get("tx_gain_db").is_some());
+
+        let (_, b) = send(
+            &app,
+            json_req("POST", "/api/v1/sessions", None, json!({ "client": { "name": "t" } })),
+        )
+        .await;
+        let token = b["token"].as_str().unwrap().to_string();
+
+        // TX off by default → 403 before any body / mode checks
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/sstv/tx?mode=scottie1")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/octet-stream")
+            .body(Body::empty())
+            .unwrap();
+        let (s, b) = send(&app, req).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert_eq!(b["error"]["code"], "forbidden");
+
+        // unknown mode key → 400 (still before the enable-tx path? no —
+        // enable-tx is checked first, so this stays 403 with TX off)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/sstv/tx?mode=bogus")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/octet-stream")
+            .body(Body::empty())
+            .unwrap();
+        let (s, _) = send(&app, req).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

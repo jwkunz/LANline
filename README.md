@@ -29,6 +29,10 @@ ADALM-Pluto / RTL-SDR "NESDR" later) and exposes:
 - **NOAA APT** (137 MHz weather satellite): a real-time image downlink decoded
   into a two-channel grayscale raster over REST and rendered to canvas in the
   web client,
+- **SSTV** (slow-scan TV): a pure-Rust decoder for Robot 36 / Scottie /
+  Martin / PD pictures (2 m FM, HF SSB, ISS), and — with `--enable-tx` — an
+  **FM SSTV transmitter** that sends an uploaded image or a live webcam frame
+  (Part 97 amateur),
 - **Receiver Analysis**: a server-computed FFT panadapter + waterfall,
   rendered as an interactive (zoom / pan / click-to-tune) plot in the web
   client, with IQ `.wav` recording,
@@ -97,6 +101,7 @@ Engineering LLC.
 | 2x | NOAA Weather Radio speech-to-text — a "Weather text" panel in the `nbfm` web UI fills live, with `GET /radio/transcript.txt` download + `POST /radio/transcript/clear`; Android WebView gains a `DownloadListener` | ✅ |
 | 2y | STT engine reworked for the continuous carriers — a 45 s rolling `AudioRing` fed a persistent 48→16 k resampler, the worker pulls overlapping ~26 s windows and `stitch`es the de-duplicated text, greedy decode gets a repetition-cycle guard + junk filter, empty windows retry once; fixes the mid-sentence chunk butchery (fragments / "$1.00" / 47 s loops) | ✅ |
 | 2z | **SSTV** receive mode — pure-Rust decoder (`sstv/`): FM (2 m / ISS 145.800) or SSB (HF) demod → 1900 Hz subcarrier discriminator → VIS header (or a forced mode) → Robot 36 / Scottie 1·2·DX / Martin 1·2 / PD 120·180 line decode with slant correction, into an RGBA canvas (`GET /api/v1/sstv/image`); web panel with mode/demod pickers, band presets, and Save PNG | ✅ |
+| 3a | **SSTV transmit** (`sstv/encode.rs`) — an uploaded image or a live webcam frame → SSTV audio → FM IQ streamed in `sstv_tx_burst` (mirrors `aprs_tx_burst`), `POST /api/v1/sstv/tx?mode=<key>`, `--enable-tx`-gated Part 97 FM; web `sstv` panel gains a "Transmit a picture" block (file upload + `getUserMedia` webcam), Android gains the `CAMERA` permission. The encoder ↔ decoder round trip is the unit test | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -593,6 +598,17 @@ arrives without a readable header — the usual case on the ISS — set the mode
 by hand and the decoder starts on the next sync pulse. A tilted image means
 the clocks don't quite agree: nudge the **Slant** (ppm) field. **Save PNG**
 exports the current canvas.
+
+**Transmit a picture** (only shown with `--enable-tx` and a tx-capable
+device). Pick a TX mode, then either choose an **image file** and press
+**Send image**, or **Start camera**, frame the shot, and **Send frame** (a
+3-2-1 countdown, then the current video frame). LANline resizes the source to
+the mode's geometry and plays it out as **FM SSTV on the tuned frequency**
+with the receiver muted for the ~30 s – 2 min it takes. This is amateur
+Part 97 operation — transmit on an **SSTV calling frequency such as 144.500
+MHz**, never 145.800 (the ISS downlink), and see the
+[Legal section](#legal). A webcam broadcasts whatever it sees, in the clear,
+to anyone in range.
 
 ## Building the Android client
 

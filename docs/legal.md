@@ -110,7 +110,19 @@ transmitting on FRS/GMRS with an SDR.
 Part 97 **permits home-built and non-certified equipment** operated by a
 **licensed control operator** on amateur frequencies (§ 97.5, § 97.109). This
 is the legitimate use of LANline's transmit feature. The APRS transmit path
-(144.390 MHz) is amateur operation.
+(144.390 MHz) and the **FM SSTV transmit** path are amateur operation.
+
+**FM SSTV transmit** (`POST /sstv/tx`, or the web panel's "Transmit a
+picture") sends an uploaded image or a live webcam frame as an analog picture
+on the tuned 2 m frequency — use an **SSTV calling frequency such as 144.500
+MHz**. All the control-operator duties below apply. In addition:
+
+- **Do not transmit on 145.800 MHz** — that is the ISS SSTV *downlink*; nor on
+  the HF SSB SSTV frequencies (LANline FM-modulates, it does not do SSB TX).
+- A webcam sends **whatever the camera sees**, unencrypted, to anyone in
+  range. Part 97 (§ 97.113) forbids messages "encoded for the purpose of
+  obscuring their meaning," so there is deliberately **no privacy mode** —
+  do not point it at anything you would not broadcast.
 
 As the control operator you remain responsible for:
 

@@ -234,6 +234,51 @@ export class Client {
     return parseSstvImage(await res.arrayBuffer());
   }
 
+  /** Transmit `rgb` (row-major, `width*height*3` for `mode`'s geometry) as an
+   *  FM SSTV picture. Raw octet-stream body, not JSON — its own fetch. The
+   *  server returns once the burst is queued; the picture then plays out over
+   *  30 s – 4 min with RX suspended. */
+  async sstvTx(
+    mode: string,
+    rgb: Uint8Array,
+    timeoutMs = 15_000,
+  ): Promise<{ transmitted: boolean; mode: string; secs: number; bytes: number }> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const headers: Record<string, string> = { "content-type": "application/octet-stream" };
+    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    let res: Response;
+    try {
+      res = await fetch(this.base + `/api/v1/sstv/tx?mode=${encodeURIComponent(mode)}`, {
+        method: "POST",
+        headers,
+        body: rgb,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if (timedOut) throw new ApiError(0, "timeout", `sstv/tx timed out after ${timeoutMs}ms`);
+      throw new ApiError(0, "network", `cannot reach ${this.base} (${(e as Error).message})`);
+    } finally {
+      clearTimeout(timer);
+    }
+    const text = await res.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!res.ok) {
+      const err = (json as ApiErrorBody | null)?.error;
+      throw new ApiError(
+        res.status,
+        err?.code ?? "http_error",
+        err?.message ?? `${res.status} ${res.statusText}`,
+        err?.details,
+      );
+    }
+    return json;
+  }
+
   createSession = (
     client: { name: string; user_agent: string; capabilities: string[] },
     signal?: AbortSignal,

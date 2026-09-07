@@ -19,6 +19,12 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
+    <!-- optional: SSTV transmit's webcam (web/src/sstv.ts startSstvCam ←
+         getUserMedia video). Runtime permission — prompted on first use,
+         handled by MainActivity.onPermissionRequest / cameraPermission. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

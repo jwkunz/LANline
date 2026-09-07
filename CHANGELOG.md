@@ -4,6 +4,25 @@ All notable changes, newest first. LANline is versioned `MAJOR.MINOR.PATCH`;
 the phase letters (`2a`, `2b`, …) in the [README roadmap](README.md#phase-roadmap)
 are the development log this summarizes.
 
+## v2.7.0 (2026-09)
+
+- **SSTV transmit** (`--enable-tx`) — send an uploaded image or a live webcam
+  frame as an analog **FM SSTV** picture on the tuned 2 m frequency (amateur
+  Part 97). New `sstv::encode`: a phase-continuous oscillator turns RGB (at a
+  mode's geometry) into the VIS header + per-line sync/porch/component tones,
+  and `fm_iq_chunk` FM-modulates it to IQ; `POST /api/v1/sstv/tx?mode=<key>`
+  streams it through `sstv_tx_burst` inside `run_sstv` (deactivate RX → TX the
+  picture in ~0.25 s slabs, abortable, capped at 240 s → retune + reactivate
+  RX), mirroring the APRS burst. `sstv` is now `tx_capable` (`tx_gain_db`,
+  `tx_deviation_hz`). Web `sstv` panel gains a "Transmit a picture" block:
+  a mode picker, a file upload, and a `getUserMedia` webcam with a 3-2-1
+  countdown; the image is cover-fitted to the mode geometry client-side. The
+  Android wrapper gains the `CAMERA` permission and a `RESOURCE_VIDEO_CAPTURE`
+  branch in `onPermissionRequest`. The encoder ↔ decoder round trip (Scottie 1
+  and Robot 36 rasters, VIS bits) is the primary unit test; fixing it also
+  fixed a latent RX bug where `step_frame` could decode a scan line before its
+  audio had fully buffered (black-padded tail).
+
 ## v2.6.0 (2026-09)
 
 - **SSTV receive mode** (`sstv`) — pure-Rust decoder: FM (2 m FM SSTV,

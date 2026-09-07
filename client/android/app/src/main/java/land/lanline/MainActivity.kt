@@ -75,6 +75,15 @@ class MainActivity : AppCompatActivity() {
             pendingAudio = null
         }
 
+    // SSTV transmit's webcam (web/src/sstv.ts imageToRgb ← getUserMedia
+    // video). Same request-then-resolve shape as the mic above.
+    private var pendingVideo: PermissionRequest? = null
+    private val cameraPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            pendingVideo?.let { req -> if (granted) req.grant(req.resources) else req.deny() }
+            pendingVideo = null
+        }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -165,19 +174,32 @@ class MainActivity : AppCompatActivity() {
         }
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
-                // FRS's push-to-talk mic is the only capture this app ever
-                // asks for (see acquireMicIfNeeded in web/src/main.ts) —
-                // everything else stays receive-only WebRTC, denied here.
-                if (request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) {
+                // Two captures this app asks for: FRS push-to-talk's mic (see
+                // acquireMicIfNeeded in web/src/main.ts) and SSTV transmit's
+                // webcam (startSstvCam). Everything else stays receive-only
+                // WebRTC, denied here.
+                val res = request.resources
+                if (res.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) {
                     val granted = ContextCompat.checkSelfPermission(
                         this@MainActivity,
                         Manifest.permission.RECORD_AUDIO,
                     ) == PackageManager.PERMISSION_GRANTED
                     if (granted) {
-                        request.grant(request.resources)
+                        request.grant(res)
                     } else {
                         pendingAudio = request
                         micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                } else if (res.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) {
+                    val granted = ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.CAMERA,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (granted) {
+                        request.grant(res)
+                    } else {
+                        pendingVideo = request
+                        cameraPermission.launch(Manifest.permission.CAMERA)
                     }
                 } else {
                     request.deny()

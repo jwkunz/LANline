@@ -299,6 +299,9 @@ enum PipelineCmd {
     Scan(Option<ScanConfig>),
     /// Transmit one APRS packet then return to RX (`run_aprs` only).
     AprsTx(AprsTxSpec),
+    /// Encode an image as SSTV, FM-transmit it, then return to RX
+    /// (`run_sstv` only). Boxed — the RGB payload is large.
+    SstvTx(Box<SstvTxSpec>),
 }
 
 /// One APRS transmit burst: a ready-built AX.25 UI frame (no FCS) plus the
@@ -310,6 +313,19 @@ struct AprsTxSpec {
     frame: Vec<u8>,
     /// TNC2 monitor line, for the log + local echo.
     tnc2: String,
+    gain_db: f64,
+    deviation_hz: f64,
+}
+
+/// One SSTV transmit burst: a raw RGB frame at the mode's geometry plus the
+/// RF knobs. `run_sstv` drops RX, keys the current frequency straight (FM),
+/// modulates `crate::sstv::encode::encode`'s audio, then resumes RX.
+#[cfg(feature = "soapy")]
+struct SstvTxSpec {
+    /// `mode.width * mode.height * 3` bytes, row-major RGB.
+    rgb: Vec<u8>,
+    /// A `crate::sstv::modes::by_key` key (`scottie1`, `robot36`, …).
+    mode_key: String,
     gain_db: f64,
     deviation_hz: f64,
 }
@@ -638,6 +654,39 @@ impl RadioManager {
         &self,
         _frame: Vec<u8>,
         _tnc2: String,
+        _gain_db: f64,
+        _deviation_hz: f64,
+    ) -> Result<(), &'static str> {
+        Err("built without SDR support")
+    }
+
+    /// Transmit `rgb` (row-major, `w*h*3` for `mode_key`'s geometry) as an FM
+    /// SSTV picture on the running `sstv` pipeline — a streamed half-duplex
+    /// burst (RX drops for the picture's length, 30 s–4 min). Gated by
+    /// `--enable-tx`; the API handler checks the mode / geometry.
+    #[cfg(feature = "soapy")]
+    pub fn sstv_tx(
+        &self,
+        rgb: Vec<u8>,
+        mode_key: String,
+        gain_db: f64,
+        deviation_hz: f64,
+    ) -> Result<(), &'static str> {
+        if !self.enable_tx {
+            return Err("transmit is disabled on this server — see --enable-tx");
+        }
+        let run = self.run.lock().unwrap();
+        let cmd_tx = run.cmd_tx.as_ref().ok_or("radio is not running")?;
+        cmd_tx
+            .send(PipelineCmd::SstvTx(Box::new(SstvTxSpec { rgb, mode_key, gain_db, deviation_hz })))
+            .map_err(|_| "pipeline is not accepting commands")
+    }
+
+    #[cfg(not(feature = "soapy"))]
+    pub fn sstv_tx(
+        &self,
+        _rgb: Vec<u8>,
+        _mode_key: String,
         _gain_db: f64,
         _deviation_hz: f64,
     ) -> Result<(), &'static str> {
@@ -1775,8 +1824,8 @@ fn run_sdr(
                 // or arrived after `key_tx` already returned) is a no-op —
                 // the real unkey path is the `cmd_rx` check inside `key_tx`.
                 PipelineCmd::Unkey => {}
-                // APRS bursts are `run_aprs` only.
-                PipelineCmd::AprsTx(_) => {}
+                // APRS / SSTV bursts belong to their own pipelines.
+                PipelineCmd::AprsTx(_) | PipelineCmd::SstvTx(_) => {}
             }
         }
 
@@ -2559,6 +2608,117 @@ fn aprs_tx_burst(
     Ok(())
 }
 
+/// Longest SSTV picture we will transmit (PD 180 is ~187 s; this leaves head
+/// room and caps pathological requests).
+#[cfg(feature = "soapy")]
+const MAX_SSTV_TX_SECS: f64 = 240.0;
+
+/// One streamed SSTV transmit burst: drop RX, key `tx_freq_hz` straight (FM,
+/// no LO offset — like [`aprs_tx_burst`]), encode `spec.rgb` to SSTV audio via
+/// [`crate::sstv::encode`], FM-modulate it in slabs and write it, then retune
+/// and reactivate RX. `stop` aborts a long transmission mid-picture. `Err(())`
+/// means RX could not be brought back — the caller lets the pipeline restart.
+#[cfg(feature = "soapy")]
+#[allow(clippy::too_many_arguments)]
+fn sstv_tx_burst(
+    dev: &soapysdr::Device,
+    ch: usize,
+    log_set: &dyn Fn(&str, Result<(), soapysdr::Error>),
+    p: &SstvSdrParams,
+    tx_freq_hz: f64,
+    rx_lo_hz: f64,
+    spec: &SstvTxSpec,
+    rx_stream: &mut soapysdr::RxStream<num_complex::Complex32>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+) -> Result<(), ()> {
+    use num_complex::Complex32;
+    use soapysdr::Direction;
+
+    let Some(mode) = crate::sstv::modes::by_key(&spec.mode_key) else {
+        tracing::error!("sstv: TX unknown mode key {:?}", spec.mode_key);
+        return Ok(());
+    };
+    let want = mode.width * mode.height * 3;
+    if spec.rgb.len() != want {
+        tracing::error!(
+            "sstv: TX {} needs {want} RGB bytes, got {}",
+            mode.name,
+            spec.rgb.len()
+        );
+        return Ok(());
+    }
+
+    let _ = rx_stream.deactivate(None);
+    telemetry.lock().unwrap().tx_keyed = true;
+
+    let mut audio = crate::sstv::encode::encode(&spec.rgb, mode);
+    let max_samps = (MAX_SSTV_TX_SECS * crate::sstv::encode::TX_AUDIO_RATE) as usize;
+    audio.truncate(max_samps);
+    let secs = audio.len() as f64 / crate::sstv::encode::TX_AUDIO_RATE;
+    tracing::info!(
+        "sstv: TX — {} on {:.4} MHz ({:.1} s, {:.0} Hz dev, {:.1} dB gain)",
+        mode.name,
+        tx_freq_hz / 1e6,
+        secs,
+        spec.deviation_hz,
+        spec.gain_db,
+    );
+
+    let txdir = Direction::Tx;
+    log_set(
+        "tx frequency",
+        dev.set_frequency(txdir, ch, apply_ppm(tx_freq_hz, p.freq_correction_ppm), ""),
+    );
+    log_set("tx gain", dev.set_gain(txdir, ch, spec.gain_db));
+
+    let tx_result = (|| -> Result<(), soapysdr::Error> {
+        let mut txs = dev.tx_stream::<Complex32>(&[ch])?;
+        txs.activate(None)?;
+        let mtu = txs.mtu().unwrap_or(65_536).max(1);
+        let mut phase = 0.0f64;
+        // ~0.25 s of audio per slab keeps the IQ buffer bounded on the
+        // slowest modes while still amortising the per-write overhead.
+        let slab = (crate::sstv::encode::TX_AUDIO_RATE * 0.25) as usize;
+        for chunk in audio.chunks(slab) {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let iq = crate::sstv::encode::fm_iq_chunk(
+                chunk,
+                p.device_rate,
+                spec.deviation_hz,
+                &mut phase,
+            );
+            let mut off = 0;
+            while off < iq.len() {
+                let end = (off + mtu).min(iq.len());
+                let w = txs.write(&[&iq[off..end]], None, false, 1_000_000)?;
+                off += w.max(1);
+            }
+        }
+        // Flush the tail before tearing the stream down.
+        let _ = txs.write(&[&[Complex32::new(0.0, 0.0); 256][..]], None, true, 500_000);
+        txs.deactivate(None)
+    })();
+    if let Err(e) = tx_result {
+        tracing::error!("sstv: TX: {e}");
+    }
+
+    telemetry.lock().unwrap().tx_keyed = false;
+
+    // Back to RX.
+    log_set(
+        "frequency",
+        dev.set_frequency(Direction::Rx, ch, apply_ppm(rx_lo_hz, p.freq_correction_ppm), ""),
+    );
+    if let Err(e) = rx_stream.activate(None) {
+        tracing::error!("sstv: RX reactivate after TX: {e}");
+        return Err(());
+    }
+    Ok(())
+}
+
 /// NOAA APT pipeline: tunes 137 MHz, feeds the [`crate::apt`] demod, and
 /// accumulates decoded scan lines into a growing image read over REST. No
 /// audio output.
@@ -2672,7 +2832,8 @@ fn run_apt(
                 PipelineCmd::Key(_)
                 | PipelineCmd::Unkey
                 | PipelineCmd::Scan(_)
-                | PipelineCmd::AprsTx(_) => {}
+                | PipelineCmd::AprsTx(_)
+                | PipelineCmd::SstvTx(_) => {}
             }
         }
 
@@ -2755,6 +2916,10 @@ fn run_sstv(
     };
     log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
     let lo = p.freq_hz - p.sstv.lo_offset_hz;
+    // Track the live dial / LO across `Retune` so a TX burst keys the right
+    // frequency and restores the right RX LO afterwards.
+    let mut cur_freq = p.freq_hz;
+    let mut cur_lo = lo;
     log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(lo, p.freq_correction_ppm), ""));
     if let Some(ant) = &p.antenna {
         log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
@@ -2808,10 +2973,11 @@ fn run_sstv(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 PipelineCmd::Retune(hz) => {
-                    let new_lo = hz - p.sstv.lo_offset_hz;
+                    cur_freq = hz;
+                    cur_lo = hz - p.sstv.lo_offset_hz;
                     log_set(
                         "frequency",
-                        dev.set_frequency(dir, ch, apply_ppm(new_lo, p.freq_correction_ppm), ""),
+                        dev.set_frequency(dir, ch, apply_ppm(cur_lo, p.freq_correction_ppm), ""),
                     );
                     tracing::info!("sstv: retuned to {:.4} MHz (live)", hz / 1e6);
                 }
@@ -2824,6 +2990,18 @@ fn run_sstv(
                         for (name, v) in &elements {
                             log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
                         }
+                    }
+                }
+                PipelineCmd::SstvTx(spec) => {
+                    if sstv_tx_burst(
+                        &dev, ch, &log_set, &p, cur_freq, cur_lo, &spec, &mut stream, telemetry,
+                        stop,
+                    )
+                    .is_err()
+                    {
+                        // RX could not be brought back up — let the pipeline
+                        // die and be restarted.
+                        return;
                     }
                 }
                 PipelineCmd::Demod(_)
@@ -2998,7 +3176,8 @@ fn run_analysis(
                 | PipelineCmd::Key(_)
                 | PipelineCmd::Unkey
                 | PipelineCmd::Scan(_)
-                | PipelineCmd::AprsTx(_) => {}
+                | PipelineCmd::AprsTx(_)
+                | PipelineCmd::SstvTx(_) => {}
             }
         }
 

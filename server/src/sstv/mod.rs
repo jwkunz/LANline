@@ -5,6 +5,7 @@
 //! shape as [`crate::apt`].
 
 pub mod demod;
+pub mod encode;
 pub mod modes;
 
 use bytes::Bytes;

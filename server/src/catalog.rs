@@ -137,7 +137,10 @@ pub fn modes() -> Vec<ModeInfo> {
         ModeInfo {
             id: "sstv",
             name: "SSTV (slow-scan TV — HF SSB / 2 m FM / ISS 145.800)",
-            tx_capable: false,
+            // Transmit is FM-only (2 m amateur SSTV, Part 97); the RX path
+            // still does SSB for HF. `POST /sstv/tx` sends an uploaded image
+            // or a webcam frame.
+            tx_capable: true,
             // `mode` (auto|robot36|scottie1|scottie2|scottiedx|martin1|martin2
             // |pd120|pd180) and `demod` (usb|lsb|fm) are string params the web
             // client sets directly — the catalog only carries the numeric knobs.
@@ -146,6 +149,10 @@ pub fn modes() -> Vec<ModeInfo> {
                 ("channel_bw_hz", num(16000.0, 6000.0, 40000.0, "Hz")),
                 ("bfo_offset_hz", num(0.0, -3000.0, 3000.0, "Hz")),
                 ("slant_ppm", num(0.0, -2000.0, 2000.0, "ppm")),
+                // TX-only: SDR TX gain, and the FM deviation used when
+                // modulating the encoded SSTV audio.
+                ("tx_gain_db", num(30.0, 0.0, 89.0, "dB")),
+                ("tx_deviation_hz", num(5000.0, 1000.0, 8000.0, "Hz")),
             ]),
         },
         ModeInfo {

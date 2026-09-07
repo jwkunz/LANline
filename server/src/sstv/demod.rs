@@ -515,7 +515,10 @@ impl SstvDemod {
             .map(|m| m < 1250.0)
             .unwrap_or(false);
         let parity_ok = ((ones + par as u32) % 2) == 0;
-        let after = bit0 + (9.5 * bit) as u64;
+        // 8 data + 1 parity + 1 stop bit, then a hair into the picture's
+        // first sync (row 0 has no previous line to track from, so bias late
+        // — into the 9 ms sync rather than before it).
+        let after = bit0 + (10.2 * bit) as u64;
         self.drop_to(after);
         self.reset_runs();
         self.state = State::Search;
@@ -542,12 +545,20 @@ impl SstvDemod {
         let fs = AUDIO_RATE;
         let ms = fs / 1000.0;
         let m = f.mode;
-        if self.interp(f.line_start + m.line * fs + 24.0 * ms).is_none() {
+        // Need the *current* line fully buffered before decoding it. For rows
+        // ≥ 1 `f.line_start` still points at the previous line's sync here
+        // (it's advanced below), so look a whole line further ahead — otherwise
+        // `scan`'s `unwrap_or(0.0)` pads the unread tail with black.
+        let line_base = if f.rows == 0 { f.line_start } else { f.line_start + f.line_est };
+        let need_through = line_base + m.line * fs + 24.0 * ms;
+        if self.interp(need_through).is_none() {
             self.state = State::Frame(f);
             return false;
         }
 
-        // refine this line's sync leading edge (slant / drift correction)
+        // Re-find this line's sync leading edge (slant / drift correction).
+        // Row 0 refines against a ±12 ms window too — it has no previous line
+        // but `line_start` from the VIS decode is only roughly placed.
         let expect = if f.rows == 0 { f.line_start } else { f.line_start + f.line_est };
         let sync = m.sync * fs;
         let sep = m.sep * fs;
@@ -562,11 +573,13 @@ impl SstvDemod {
                     edge = expect + k;
                 }
             }
-            k += ms;
+            k += 0.5 * ms;
         }
-        if f.rows > 0 && best < 120.0 {
-            let measured = (edge - f.line_start).clamp(m.line * fs * 0.9, m.line * fs * 1.1);
-            f.line_est = f.line_est * 0.8 + measured * 0.2;
+        if best < 120.0 {
+            if f.rows > 0 {
+                let measured = (edge - f.line_start).clamp(m.line * fs * 0.9, m.line * fs * 1.1);
+                f.line_est = f.line_est * 0.8 + measured * 0.2;
+            }
             f.line_start = edge;
         } else if f.rows > 0 {
             f.line_start = expect;

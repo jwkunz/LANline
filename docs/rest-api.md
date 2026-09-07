@@ -935,6 +935,32 @@ Binary (`content-type: application/octet-stream`):
 Unfilled rows are transparent. The client reads it straight into a canvas
 `ImageData`; a "Save PNG" button exports the canvas.
 
+### `POST /api/v1/sstv/tx?mode=<key>`
+
+Transmit an image as **FM SSTV** on the tuned frequency — a streamed
+half-duplex burst (RX drops for the whole picture, ~30 s – 2 min). Needs
+`--enable-tx`, `sstv` mode, a tx-capable device, and the radio running. `sstv`
+is `tx_capable` with two TX-only mode params: `tx_gain_db` (default 30) and
+`tx_deviation_hz` (default 5000). FM only — the RX path still does SSB for HF,
+but transmit does not.
+
+Session-authenticated. Query param `mode` is one of `scottie1`, `scottie2`,
+`scottiedx`, `martin1`, `martin2`, `robot36`, `pd120`, `pd180`. Body is
+`application/octet-stream`: **raw row-major RGB**, exactly `width*height*3`
+bytes for that mode's geometry (`320×256` for Scottie/Martin, `320×240` for
+Robot 36, `640×496` for PD) — the caller resizes to fit.
+
+```json
+// response
+{ "transmitted": true, "mode": "Scottie 1", "secs": 110.5, "bytes": 245760 }
+```
+
+`secs` is the estimated on-air time. Appends a `mode: "sstv"` entry to
+[`GET /api/v1/radio/tx/log`](#radio-configuration--control). `403` when
+`--enable-tx` is off, `400` on an unknown mode key or a wrong body length,
+`409` when the mode isn't `sstv` or the radio isn't running, `503` when the
+device can't transmit.
+
 ---
 
 ## Presets
