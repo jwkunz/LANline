@@ -3064,11 +3064,12 @@ function nowPlayingInner(): string {
 
   if (r.mode === "aprs") {
     const a = state.aprs;
+    const std = Math.abs(r.frequency_hz - 144_390_000) < 1;
     return `
       <h2>Now tracking</h2>
       <div class="mode-line">
         <span class="mode">${esc(meta?.label ?? "APRS")}</span>
-        <span class="freq">144.390 MHz</span>
+        <span class="freq">${freqLabel(r.mode, r.frequency_hz)}${std ? " · 2 m" : ""}</span>
         <span class="badge"><span class="dot ${r.running ? "ok live" : ""}"></span>${r.running ? "receiving" : "stopped"}</span>
       </div>
       <div class="grid">
