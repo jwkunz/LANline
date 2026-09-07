@@ -1158,7 +1158,14 @@ async function rebuildRepeaterList(bandId?: string): Promise<void> {
     if (b.distance_mi == null) return -1;
     return a.distance_mi - b.distance_mi;
   });
-  setState({ repeaters: withDist });
+  // `repeaters.json` is nationwide (~9k), so show the nearest slice — the
+  // operator's own manual rows are always kept regardless of distance.
+  const LIMIT = 60;
+  const shown = withDist.slice(0, LIMIT);
+  for (const r of withDist) {
+    if (r.manual && !shown.includes(r)) shown.push(r);
+  }
+  setState({ repeaters: shown });
 }
 
 async function refreshStations(): Promise<void> {
@@ -2341,10 +2348,9 @@ function hamRepeaterSection(bandId: string): string {
   const tunedHz = state.radio!.frequency_hz;
   const rows = list.length
     ? list.map((rp) => repeaterRow(rp, tunedHz)).join("")
-    : `<p class="note" style="margin:8px 0">No repeaters listed for this band.${
-        state.loc ? "" : " Set your location above to sort by distance."
-      } Add one below, or rebuild the bundle for your area with
-      <code>HAM_REPEATER_CENTER="lat,lon" node scripts/fetch-repeaters.mjs</code>.</p>`;
+    : `<p class="note" style="margin:8px 0">No repeaters listed for this band nearby.${
+        state.loc ? "" : " Set your location above to sort the nationwide list by distance."
+      } Add one below.</p>`;
 
   const addForm = state.rpAddOpen
     ? `<div class="rp-add">

@@ -305,7 +305,9 @@ export interface Repeater {
   manual?: boolean;
 }
 
-/** Bundled regional list — regenerate with `node scripts/fetch-repeaters.mjs`. */
+/** Bundled nationwide (US) list — the web client filters/sorts it by the
+ *  operator's location, like fm-stations.json. Regenerate with
+ *  `node scripts/fetch-repeaters.mjs`. */
 export const loadRepeaters = () => loadJson<Repeater[]>("./repeaters.json");
 
 /** "−600 kHz" / "+5 MHz" / "simplex" — the split for a repeater's offset. */

@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "lanline-hypervisor"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "lanline-server"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "audiopus",

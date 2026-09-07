@@ -53,7 +53,7 @@ browser pointed at the server's own address connects with nothing to type
 | `GET /fm-stations.json` | `application/json` — bundled FCC FM broadcast station directory |
 | `GET /am-stations.json` | `application/json` — bundled FCC AM broadcast station directory |
 | `GET /apt-tle.json` | `application/json` — bundled NOAA-15/18/19 orbital elements (TLE), for the client-side pass predictor |
-| `GET /repeaters.json` | `application/json` — bundled regional amateur repeater directory (`scripts/fetch-repeaters.mjs` from hearham.com; `HAM_REPEATER_REGIONS` state codes, or `HAM_REPEATER_CENTER`/`HAM_REPEATER_RADIUS_MI` for a distance filter), for the `ham` mode repeater picker |
+| `GET /repeaters.json` | `application/json` — bundled **nationwide (US)** amateur repeater directory (`scripts/fetch-repeaters.mjs` from hearham.com; the web client sorts/filters it by the operator's location like `fm-stations.json`. `HAM_REPEATER_REGIONS` / `HAM_REPEATER_CENTER`+`HAM_REPEATER_RADIUS_MI` build a smaller bundle if wanted) |
 
 These are unauthenticated and cached (`Cache-Control: public, max-age=86400`).
 The same bundle is what the Android APK embeds as local assets.
@@ -486,10 +486,11 @@ Live-editable via `PATCH /api/v1/radio` (`mode_params` is deep-merged), so
 changing the tone/code or toggling monitor mode takes effect without a
 restart.
 
-The repeater picker (a bundled regional directory at `GET /repeaters.json`
-plus browser-stored manual entries) is entirely client-side: selecting a
-repeater issues a `PATCH /api/v1/radio` that sets `frequency_hz` to the
-repeater's output and `mode_params.ctcss_hz` to its transmitted tone, if any.
+The repeater picker (a bundled nationwide directory at `GET /repeaters.json`,
+distance-sorted client-side to the operator's location, plus browser-stored
+manual entries) is entirely client-side: selecting a repeater issues a
+`PATCH /api/v1/radio` that sets `frequency_hz` to the repeater's output and
+`mode_params.ctcss_hz` to its transmitted tone, if any.
 `ham` is `tx_capable` — Part 97 permits homebrew transmit equipment under an
 amateur licence (firmer footing than `frs`'s Part 95 situation). PTT is still
 `--enable-tx`-gated; `POST /api/v1/radio/tx/key` takes `offset_hz` plus an

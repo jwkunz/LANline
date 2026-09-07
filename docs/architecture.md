@@ -349,15 +349,20 @@ rows that aren't marked off-air and land in our VHF/UHF bands, dedupes a
 machine listed twice to the more complete row, and writes a compact file.
 `build.rs` + `webui.rs` embed it the same way as the FM/AM/NWR station DBs.
 
-**Region matching** was the coverage bug worth recording: hearham's `city`
-string comes in two shapes — `"Town, FL USA"` *and* `"Town, Florida"` — and
-the first cut only matched the trailing 2-letter code, so it silently
-dropped ~95 % of a state (83 Florida rows out of ~1700). The matcher now
-also recognises the 50 spelled-out state names. `HAM_REPEATER_REGIONS`
-takes a comma list of codes; `HAM_REPEATER_CENTER="lat,lon"` +
-`HAM_REPEATER_RADIUS_MI` (default 150) filters by transmitter distance
-instead and sorts the output nearest-first — the better default for "what
-can I hit from here". The default `FL` bundle is ~1460 repeaters.
+The committed bundle is **nationwide (US)** — every state + DC, ~9k FM
+repeaters, ~1.6 MB, the same shape and size as `fm-stations.json`. The web
+client (`main.ts::rebuildRepeaterList`) filters it to the current band,
+distance-sorts against the operator's location, and shows the nearest ~60
+(the operator's own manual rows always survive). So a repeater picker that
+works anywhere in the US needs no rebuild — just set your location.
+
+**Region matching** was the earlier coverage bug worth recording: hearham's
+`city` string comes in two shapes — `"Town, FL USA"` *and* `"Town, Florida"`
+— and the first cut only matched the trailing 2-letter code, so it silently
+dropped ~95 % of a state. The matcher recognises both. `HAM_REPEATER_REGIONS`
+takes a comma list of codes and `HAM_REPEATER_CENTER="lat,lon"` +
+`HAM_REPEATER_RADIUS_MI` (default 150) filters by transmitter distance — both
+just make a *smaller* bundle now that the default is the whole country.
 
 The add-repeater form has a **paste box** (`ham::parseRepeaterShorthand`):
 `146.94 - 100.0` or `442.100 +5 PL 131.8 W4ABC` — order-independent, a bare

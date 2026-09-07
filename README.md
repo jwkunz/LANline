@@ -70,6 +70,7 @@ wrapper (`client/android`).
 | 2r | Concurrent radios — `lanline-hypervisor` runs one server per SDR (server split into lib + bin), collision-free port blocks + `serial=`-resolved devices + backoff supervision, aggregated discovery (`LANLINE-FLEET-BEACON`, `GET /api/v1/fleet`, per-child mDNS), native Android radio chooser | ✅ |
 | 2s | APRS transmit — `POST /aprs/tx` (message / position / raw), half-duplex burst in `run_aprs` reusing the demod's modulator, `--enable-tx`-gated, local TNC echo + audit log; web `aprs` panel messaging card → two browser tabs = an APRS chat room between the fleet's two radios | ✅ |
 | 2t | Voice ↔ text for the FM/AM modes (optional, feature `voice-text`) — `POST /radio/tx/say` speaks typed text on the air (espeak-ng / Piper), `GET /radio/transcript` transcribes received overs (pure-Rust Whisper via candle); web "Voice text" card in `frs`/`ham` | ✅ |
+| 2u | Repeater directory is now nationwide (US, ~9k) and the web client sorts it by your location — same as the FM station list; the `FL`-only default is gone | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -411,18 +412,19 @@ Golay-coded stream. The panel also shows the **CTCSS tone actually on the
 air** (an always-on 50-tone Goertzel scanner) with a one-tap "use it" — so
 an unknown repeater's tone identifies itself.
 
-A **Simplex / Repeaters** toggle switches the channel list to a regional
-repeater directory (~1460 for the default Florida bundle, from
-[hearham.com](https://hearham.com)). Each row shows the output frequency,
-offset (−0.6 / +5 MHz …), uplink/output tones, town and distance. Tapping one
-tunes the repeater's output and, if it transmits a tone, sets that as your
-receive tone squelch; the offset and uplink tone are remembered for transmit.
+A **Simplex / Repeaters** toggle switches the channel list to a **nationwide**
+(US) repeater directory (~9k FM repeaters from
+[hearham.com](https://hearham.com)) — the client sorts it by your location
+just like the FM station list, showing the nearest ~60 for the band. Each row
+shows the output frequency, offset (−0.6 / +5 MHz …), uplink/output tones,
+town and distance. Tapping one tunes the repeater's output and, if it
+transmits a tone, sets that as your receive tone squelch; the offset and
+uplink tone are remembered for transmit.
 
-Regenerate for your own area with
-`HAM_REPEATER_CENTER="lat,lon" node scripts/fetch-repeaters.mjs` (a distance
-filter, sorted nearest-first; or `HAM_REPEATER_REGIONS="FL,GA"` for whole
-states). **+ Add repeater** stores your own in the browser — its paste box
-takes shorthand like `146.94 - 100.0` or `442.100 +5 PL 131.8 W4ABC`.
+`node scripts/fetch-repeaters.mjs` rebuilds the bundle
+(`HAM_REPEATER_CENTER="lat,lon"` or `HAM_REPEATER_REGIONS="SC,NC,GA"` make a
+smaller one). **+ Add repeater** stores your own in the browser — its paste
+box takes shorthand like `146.94 - 100.0` or `442.100 +5 PL 131.8 W4ABC`.
 
 **Transmit** (`--enable-tx`, off by default): the same hold-to-talk button
 FRS uses appears in *Now playing*. On simplex it keys the tuned frequency;

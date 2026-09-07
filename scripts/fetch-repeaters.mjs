@@ -1,12 +1,16 @@
 #!/usr/bin/env node
-// Regenerate web/public/repeaters.json — amateur VHF/UHF FM repeaters for a
-// region (callsign, output frequency, offset, CTCSS uplink/downlink tones,
+// Regenerate web/public/repeaters.json — amateur VHF/UHF FM repeaters
+// (callsign, output frequency, offset, CTCSS uplink/downlink tones,
 // transmitter lat/lon, town, open/closed).
 //
-//   node scripts/fetch-repeaters.mjs                          # default: FL
+//   node scripts/fetch-repeaters.mjs                          # default: all US
 //   HAM_REPEATER_REGIONS="FL,GA,AL" node scripts/fetch-repeaters.mjs
-//   HAM_REPEATER_CENTER="29.65,-82.32" \
+//   HAM_REPEATER_CENTER="34.0,-81.0" \
 //     HAM_REPEATER_RADIUS_MI=150 node scripts/fetch-repeaters.mjs
+//
+// The committed default is **nationwide** — same as fm-stations.json — so the
+// web client filters/sorts it by your location client-side, wherever you are.
+// The region / center overrides just make a smaller bundle if you want one.
 //
 // Source: hearham.com's open repeater API (one ~9 MB global JSON, no key, no
 // rate limit) — https://hearham.com/api/repeaters/v1. The output is committed
@@ -26,8 +30,12 @@ import { dirname, resolve } from "node:path";
 const OUT = resolve(dirname(fileURLToPath(import.meta.url)), "../web/public/repeaters.json");
 const SOURCE = "https://hearham.com/api/repeaters/v1";
 
-const REGIONS = (process.env.HAM_REPEATER_REGIONS || "FL")
-  .split(",")
+// Default: every US state + DC (nationwide, like fm-stations.json).
+const US_ALL =
+  "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS " +
+  "MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY";
+const REGIONS = (process.env.HAM_REPEATER_REGIONS || US_ALL)
+  .split(/[\s,]+/)
   .map((s) => s.trim().toUpperCase())
   .filter(Boolean);
 
