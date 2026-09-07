@@ -153,7 +153,7 @@ Server identity and current capability summary.
 
 `capabilities` is dynamic: `"tx"` appears only when the selected device
 supports transmit; `"tts"` / `"stt"` with the `voice-text` build + flags;
-`"flight-lookup"` unless disabled with `--flight-lookup false`.
+`"flight-lookup"` / `"vessel-lookup"` unless disabled with `--flight-lookup false`.
 `selected_device` is `null` when none is selected.
 `scheme` is `"https"` when the server was started with `--tls` (the C2 port
 is then HTTPS-only); a browser served the client over HTTPS is a secure
@@ -704,6 +704,46 @@ Ring buffer of recent re-armored `!AIVDM` sentences (checksummed, newest last):
 ```json
 { "time": "…", "count": 512, "sentences": ["!AIVDM,1,1,,A,15N...,0*4B", "…"] }
 ```
+
+### `GET /api/v1/ais/vessel/{mmsi}`
+
+Internet enrichment for one contact via **vesselfinder.com** — flag, gross
+tonnage, deadweight, year built, dimensions, destination, and a **photo**,
+plus name/type as a fallback before the vessel has broadcast its static
+report. Present only when the `vessel-lookup` capability is advertised (the
+same `--flight-lookup` toggle as [ADS-B flight lookup](#adsb-track-export)
+governs both; `--flight-lookup false` / `LANLINE_FLIGHT_LOOKUP=0` disables
+it and drops the capability). `{mmsi}` is 7–9 digits. Cached server-side.
+Always `200` — an unavailable result carries a `reason`
+(`disabled` / `offline` / `unknown` / `pending`):
+
+```json
+{
+  "available": true,
+  "name": "SFERA",
+  "ship_type": "Bulk Carrier",
+  "flag": "Marshall Islands",
+  "flag_iso": "MH",
+  "imo": 9304576,
+  "gross_tonnage": 40042,
+  "deadweight_t": 76801,
+  "year_built": 2006,
+  "length_m": 225,
+  "beam_m": 32,
+  "draught_m": 16.3,
+  "destination": "RUULU",
+  "eta": 1802077200,
+  "photo_url": "https://static.vesselfinder.net/ship-photo/…/1"
+}
+```
+
+```json
+{ "available": false, "reason": "unknown" }
+```
+
+Every field except `available` is optional. **Privacy:** like the ADS-B
+lookup, this reaches the internet and tells vesselfinder which vessels this
+receiver sees.
 
 ### AIVDM feed (TCP `ports.ais_nmea`, default `10110`)
 

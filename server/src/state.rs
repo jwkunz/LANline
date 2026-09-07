@@ -29,6 +29,9 @@ pub struct Inner {
     /// ADS-B flight enrichment via adsbdb.com (the one internet-facing
     /// feature). Built from `config`; disabled when `--flight-lookup false`.
     pub flight: Arc<crate::flight::FlightLookup>,
+    /// AIS vessel enrichment via vesselfinder.com — same `--flight-lookup`
+    /// toggle as `flight`.
+    pub vessel: Arc<crate::vessel::VesselLookup>,
 }
 
 impl AppState {
@@ -55,6 +58,7 @@ impl AppState {
             radio_mgr,
             webrtc,
             flight: Arc::new(crate::flight::FlightLookup::new(&config)),
+            vessel: Arc::new(crate::vessel::VesselLookup::new(&config)),
             config,
         }))
     }
@@ -90,6 +94,9 @@ impl AppState {
         }
         if self.0.flight.is_enabled() {
             caps.push("flight-lookup".to_string());
+        }
+        if self.0.vessel.is_enabled() {
+            caps.push("vessel-lookup".to_string());
         }
         caps
     }

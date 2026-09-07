@@ -4,7 +4,8 @@
 use crate::ais::Snapshot;
 use crate::model::now_utc;
 use crate::state::AppState;
-use axum::extract::State;
+use crate::vessel::VesselInfo;
+use axum::extract::{Path, State};
 use axum::Json;
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -41,4 +42,17 @@ pub struct SentencesResponse {
 pub async fn sentences(State(st): State<AppState>) -> Json<SentencesResponse> {
     let sentences = st.radio_mgr.ais().recent_sentences();
     Json(SentencesResponse { time: now_utc(), count: sentences.len(), sentences })
+}
+
+/// `GET /api/v1/ais/vessel/{mmsi}` — flag, tonnage, year built, photo and
+/// (as a fallback) name/type for one contact, via vesselfinder.com (see
+/// `crate::vessel`). Always 200: an unavailable result carries a `reason`
+/// (`disabled` / `offline` / `unknown` / `pending`). Present only when the
+/// `vessel-lookup` capability is advertised. Unauthenticated, read-only.
+pub async fn vessel(State(st): State<AppState>, Path(mmsi): Path<String>) -> Json<VesselInfo> {
+    let mmsi: String = mmsi.trim().chars().filter(|c| c.is_ascii_digit()).take(9).collect();
+    if mmsi.len() < 7 {
+        return Json(VesselInfo { available: false, reason: Some("unknown".into()), ..Default::default() });
+    }
+    Json(st.vessel.lookup(&mmsi).await)
 }

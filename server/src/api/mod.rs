@@ -50,6 +50,7 @@ pub fn router(state: AppState) -> Router {
         .route("/adsb/flight/{icao}", get(adsb::flight))
         .route("/ais/vessels", get(ais::vessels))
         .route("/ais/messages", get(ais::sentences))
+        .route("/ais/vessel/{mmsi}", get(ais::vessel))
         .route("/aprs/stations", get(aprs::stations))
         .route("/aprs/packets", get(aprs::packets))
         .route("/aprs/tx", post(aprs::tx))

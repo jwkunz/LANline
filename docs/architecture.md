@@ -85,6 +85,9 @@ server/src/
     mod.rs             FlightLookup (on AppState): adsbdb.com HTTPS proxy + TTL cache
                        for GET /adsb/flight/{icao} — the one internet-facing feature,
                        opt-out via --flight-lookup false
+  vessel/
+    mod.rs             VesselLookup (on AppState): vesselfinder.com proxy + TTL cache
+                       for GET /ais/vessel/{mmsi}; same --flight-lookup toggle
 
   adsb/
     mod.rs             AdsbShared: tracker + hex ring + Beast broadcast, on RadioManager
@@ -211,6 +214,12 @@ Examples: HackRF 2 000 000 → ÷40 → 50 000 → ×24/25 → 48 000; a NESDR a
   capability. reqwest with rustls+ring (no OpenSSL/aws-lc). Web client shows
   an expandable detail panel (tail/type/owner, origin → destination, photo)
   under the selected row.
+- **2w** — vessel lookup: `vessel/mod.rs` — the same for AIS. Tapping a
+  vessel calls `GET /api/v1/ais/vessel/{mmsi}`, resolved from
+  vesselfinder.com's public embed JSON (`/api/pub/click/{mmsi}`) into a
+  `VesselInfo` (flag, GT/DWT, year built, dimensions, destination, photo;
+  name/type as a fallback). Same `--flight-lookup` toggle, separate
+  `vessel-lookup` capability. Detail panel reuses the `.ac-detail` styling.
 - **2d** — `ais` mode: `ais/` (two-channel 9600-baud GMSK → HDLC → ITU-R
   M.1371 → per-MMSI vessel table), `GET /api/v1/ais/{vessels,messages}`, an
   AIVDM TCP feed (`--ais-nmea-port`, default 10110), sharing the radar scope.

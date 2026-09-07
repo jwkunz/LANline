@@ -31,4 +31,5 @@ pub mod sessions;
 pub mod state;
 pub mod tls;
 pub mod util;
+pub mod vessel;
 pub mod voice;

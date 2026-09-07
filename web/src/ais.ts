@@ -30,6 +30,29 @@ export interface Vessel {
   trail: [number, number][];
 }
 
+/** Internet enrichment for one vessel — `GET /api/v1/ais/vessel/{mmsi}`
+ *  (mirror of the server's `vessel::VesselInfo`). Every field is optional;
+ *  `available` is false when nothing identifying came back and `reason` says
+ *  why (`disabled` | `offline` | `unknown` | `pending`). */
+export interface VesselInfo {
+  available: boolean;
+  reason?: string | null;
+  name?: string | null;
+  ship_type?: string | null;
+  flag?: string | null;
+  flag_iso?: string | null;
+  imo?: number | null;
+  gross_tonnage?: number | null;
+  deadweight_t?: number | null;
+  year_built?: number | null;
+  length_m?: number | null;
+  beam_m?: number | null;
+  draught_m?: number | null;
+  destination?: string | null;
+  eta?: number | null;
+  photo_url?: string | null;
+}
+
 export interface AisSnapshot {
   time: string;
   mode: string;

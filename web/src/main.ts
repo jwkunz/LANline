@@ -6,7 +6,7 @@ import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { haversineMi, parseLatLon, type Located } from "./geo";
 import { altLabel, offsetNm, type AdsbSnapshot, type FlightInfo } from "./adsb";
-import { type AisSnapshot } from "./ais";
+import { type AisSnapshot, type VesselInfo } from "./ais";
 import { aprsSymbolGlyph, parseAprsMessages, type AprsSnapshot } from "./aprs";
 import { loadNwrStations, nearestNwr, NWR_CHANNELS, type NwrStation } from "./nwr";
 import {
@@ -230,6 +230,8 @@ interface State {
   /** Internet enrichment for ADS-B contacts, keyed by ICAO hex. `"loading"`
    *  while the request is in flight. Cleared on mode switch. */
   acInfo: Record<string, FlightInfo | "loading">;
+  /** Same, for AIS contacts, keyed by MMSI. */
+  vesselInfo: Record<string, VesselInfo | "loading">;
   scopeRangeNm: number | "auto";
   log: string[];
 }
@@ -275,6 +277,7 @@ const state: State = {
   apt: null,
   scopeSel: null,
   acInfo: {},
+  vesselInfo: {},
   scopeRangeNm: "auto",
   log: [],
 };
@@ -845,6 +848,7 @@ async function switchMode(id: string): Promise<void> {
       apt: null,
       scopeSel: null,
       acInfo: {},
+      vesselInfo: {},
       activeRepeater: null,
     });
     logLine(`mode → ${meta?.label ?? id}`);
@@ -1595,7 +1599,7 @@ function installDelegates(): void {
       const cid = acRow.dataset.cid ?? null;
       const next = cid === state.scopeSel ? null : cid;
       setState({ scopeSel: next });
-      if (next) requestFlightInfo(next);
+      if (next) enrichSelected(next);
       return;
     }
     if (hit("#fm-down")) return void tuneFrequency(stepFm(state.radio!.frequency_hz, -1));
@@ -2808,14 +2812,16 @@ function scopeListInner(): string {
     }</p>`;
   }
   const sel = state.scopeSel;
-  const adsb = state.radio?.mode === "adsb";
+  const mode = state.radio?.mode;
+  const detailFor = (id: string): string =>
+    mode === "adsb" ? flightDetailHtml(id) : mode === "ais" ? vesselDetailHtml(id) : "";
   const rows = s.contacts
     .map(
       (c) =>
         `<button class="ac-row${c.id === sel ? " tuned" : ""}${c.lat == null ? " noloc" : ""}" data-cid="${esc(c.id)}">
         <span class="s-call">${esc(c.label)}</span>
         <span class="s-site">${esc(c.sub)}</span>
-      </button>${adsb && c.id === sel ? flightDetailHtml(c.id) : ""}`,
+      </button>${c.id === sel ? detailFor(c.id) : ""}`,
     )
     .join("");
   return `<div class="stations ac-table">${rows}</div>`;
@@ -2868,6 +2874,67 @@ function flightDetailHtml(icao: string): string {
     ${owner ? `<div class="ac-detail-line note">${owner}</div>` : ""}
     ${routeLine ? `<div class="ac-detail-line">${routeLine}</div>` : ""}
     <div class="ac-detail-src note">via adsbdb.com</div>
+  </div>`;
+}
+
+/** Expanded internet lookup panel under a selected AIS row. Reads
+ *  `state.vesselInfo` (populated by `requestVesselInfo`). */
+function vesselDetailHtml(mmsi: string): string {
+  if (!state.server?.capabilities.includes("vessel-lookup")) return "";
+  const info = state.vesselInfo[mmsi];
+  if (!info) return "";
+  if (info === "loading") {
+    return `<div class="ac-detail"><span class="note">looking up…</span></div>`;
+  }
+  if (!info.available) {
+    const msg =
+      info.reason === "offline"
+        ? "no internet — vessel data unavailable"
+        : info.reason === "disabled"
+          ? "vessel lookup is disabled on this server"
+          : "no vessel data found";
+    return `<div class="ac-detail"><span class="note">${esc(msg)}</span></div>`;
+  }
+
+  const j = (parts: (string | number | null | undefined)[]): string =>
+    parts.filter((x) => x != null && x !== "").map((x) => esc(String(x))).join(" · ");
+  const line1 = j([
+    info.name,
+    info.ship_type,
+    info.flag,
+  ]);
+  const line2 = j([
+    info.imo ? `IMO ${info.imo}` : null,
+    info.gross_tonnage ? `${info.gross_tonnage.toLocaleString()} GT` : null,
+    info.year_built ? `built ${info.year_built}` : null,
+  ]);
+  const dims = j([
+    info.length_m ? `${info.length_m} × ${info.beam_m ?? "?"} m` : null,
+    info.draught_m ? `${info.draught_m.toFixed(1)} m draught` : null,
+  ]);
+  const eta =
+    info.eta && info.eta > 0
+      ? ` · ETA ${new Date(info.eta * 1000).toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })}`
+      : "";
+  const dest = info.destination ? `→ ${esc(info.destination)}${eta}` : "";
+
+  return `<div class="ac-detail">
+    ${
+      info.photo_url
+        ? `<img class="ac-photo" src="${esc(info.photo_url)}" alt="" loading="lazy"
+             referrerpolicy="no-referrer" onerror="this.remove()" />`
+        : ""
+    }
+    ${line1 ? `<div class="ac-detail-line">${line1}</div>` : ""}
+    ${line2 ? `<div class="ac-detail-line note">${line2}</div>` : ""}
+    ${dims ? `<div class="ac-detail-line note">${dims}</div>` : ""}
+    ${dest ? `<div class="ac-detail-line">${dest}</div>` : ""}
+    <div class="ac-detail-src note">via vesselfinder.com</div>
   </div>`;
 }
 
@@ -3063,7 +3130,43 @@ function onScopeClick(ev: MouseEvent): void {
   }
   const next = best ? (best.id === state.scopeSel ? null : best.id) : null;
   setState({ scopeSel: next });
-  if (next) requestFlightInfo(next);
+  if (next) enrichSelected(next);
+}
+
+/** Kick the right internet lookup for a just-selected scope contact. */
+function enrichSelected(id: string): void {
+  if (state.radio?.mode === "adsb") requestFlightInfo(id);
+  else if (state.radio?.mode === "ais") requestVesselInfo(id);
+}
+
+/** Fetch vessel enrichment (flag / tonnage / year / photo) for a selected
+ *  AIS contact via the server's vesselfinder proxy. No-op unless we're in
+ *  `ais` mode, the server advertises `vessel-lookup`, and we don't already
+ *  have it. Retries once while the server reports the lookup `pending`. */
+function requestVesselInfo(mmsi: string): void {
+  if (state.radio?.mode !== "ais") return;
+  if (!state.server?.capabilities.includes("vessel-lookup")) return;
+  if (state.vesselInfo[mmsi]) return;
+  state.vesselInfo[mmsi] = "loading";
+  setState({ vesselInfo: state.vesselInfo });
+  const attempt = (retriesLeft: number): void => {
+    if (!state.client) return;
+    state.client
+      .vesselInfo(mmsi)
+      .then((info) => {
+        if (info.reason === "pending" && retriesLeft > 0) {
+          window.setTimeout(() => attempt(retriesLeft - 1), 1500);
+          return;
+        }
+        state.vesselInfo[mmsi] = info;
+        setState({ vesselInfo: state.vesselInfo });
+      })
+      .catch(() => {
+        state.vesselInfo[mmsi] = { available: false, reason: "offline" };
+        setState({ vesselInfo: state.vesselInfo });
+      });
+  };
+  attempt(3);
 }
 
 /** Fetch internet enrichment (tail / type / owner / route) for a selected

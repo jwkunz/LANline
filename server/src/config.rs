@@ -183,19 +183,27 @@ pub struct Config {
     #[arg(long, env = "LANLINE_TLS_DIR")]
     pub tls_dir: Option<PathBuf>,
 
-    /// Look up tail number, type, owner and route for ADS-B contacts via
-    /// adsbdb.com (`GET /api/v1/adsb/flight/{icao}`). On by default; this is
-    /// the only feature that reaches the internet, and it tells adsbdb which
-    /// aircraft your receiver is watching. Disable for airgapped use with
-    /// `--flight-lookup false` or `LANLINE_FLIGHT_LOOKUP=0`.
+    /// Internet enrichment for traffic-tracker contacts: tap an ADS-B
+    /// aircraft (`GET /api/v1/adsb/flight/{icao}`, adsbdb.com) or an AIS
+    /// vessel (`GET /api/v1/ais/vessel/{mmsi}`, vesselfinder.com) for its
+    /// registration/type/owner/route or flag/tonnage/photo. On by default;
+    /// this is the only feature that reaches the internet, and it tells
+    /// those services which aircraft and ships your receiver sees. Disable
+    /// for airgapped use with `--flight-lookup false` or
+    /// `LANLINE_FLIGHT_LOOKUP=0`.
     #[arg(long, env = "LANLINE_FLIGHT_LOOKUP", default_value_t = true,
           action = clap::ArgAction::Set)]
     pub flight_lookup: bool,
 
-    /// Base URL of the adsbdb-compatible API used by `--flight-lookup`
+    /// Base URL of the adsbdb-compatible API used for ADS-B flight lookup
     /// (override to point at a self-hosted mirror). No trailing slash.
     #[arg(long, env = "LANLINE_FLIGHT_LOOKUP_URL", default_value = "https://api.adsbdb.com/v0", hide = true)]
     pub flight_lookup_url: String,
+
+    /// Base URL for AIS vessel lookup — a vesselfinder.com-compatible host
+    /// exposing `/api/pub/click/{mmsi}`. No trailing slash.
+    #[arg(long, env = "LANLINE_VESSEL_LOOKUP_URL", default_value = "https://www.vesselfinder.com", hide = true)]
+    pub vessel_lookup_url: String,
 }
 
 impl Config {

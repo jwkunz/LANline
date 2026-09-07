@@ -140,6 +140,13 @@ export class Client {
       }`,
     );
   aisVessels = () => this.request<import("./ais").AisSnapshot>("GET", "/api/v1/ais/vessels");
+  /** Internet enrichment for one AIS contact (needs the `vessel-lookup`
+   *  capability). Always resolves — an unavailable result carries `reason`. */
+  vesselInfo = (mmsi: string) =>
+    this.request<import("./ais").VesselInfo>(
+      "GET",
+      `/api/v1/ais/vessel/${encodeURIComponent(mmsi)}`,
+    );
   aprsStations = () => this.request<import("./aprs").AprsSnapshot>("GET", "/api/v1/aprs/stations");
   aprsPackets = () =>
     this.request<{ time: string; count: number; packets: string[] }>("GET", "/api/v1/aprs/packets");
