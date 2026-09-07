@@ -498,18 +498,35 @@ APRS chat room, each side driving its own radio.
 Optional, feature-gated (`tts` / `stt` / `voice-text`), off by default — the
 standalone and soapy CI tiers don't build it.
 
-**STT (`voice/stt.rs`, feature `stt`)** — pure-Rust Whisper via `candle`.
-`run_sdr` calls `VoiceShared::stt_feed(&pcm, squelch_open, rssi)` every audio
-frame (right next to `audio_rec.write`); it accumulates while the squelch is
-open and, on close (0.3 s hang), at 30 s, or every 10 s of an unbroken
-carrier (`CONT_SEG` — so NOAA Weather Radio and other continuous
-transmissions stream rather than wait for the 30 s cap), ships the chunk to a
-worker thread over an `mpsc`. The worker pre-filters + linear-resamples 48 k → 16 k,
-runs `whisper::audio::pcm_to_mel` (80-bin filterbank vendored as
-`melfilters.bytes`), one 30 s encoder pass and a greedy no-timestamps decode
-(`.en` models), and pushes a `TranscriptEntry` to a 200-entry ring +
-broadcast. The model is a local HF-layout dir (`--stt-model`:
-`config.json` / `tokenizer.json` / `model.safetensors`). Served at
+**STT (`voice/stt.rs`, feature `stt`)** — pure-Rust Whisper via `candle`. One
+worker thread; `run_sdr` calls `VoiceShared::stt_feed(&pcm, squelch_open,
+rssi)` every audio frame (next to `audio_rec.write`). Two segmentation
+strategies, picked by `RadioManager::start` (`set_continuous`):
+
+- **PTT modes** (`frs` / `ham`): squelch-gated. Audio accumulates while the
+  squelch is open; on close (0.3 s hang) or at 30 s the over is resampled
+  48 k → 16 k and sent to the worker over an `mpsc` — one `TranscriptEntry`
+  per over, with its own RSSI.
+- **Continuous modes** (`nbfm` / `wbfm` / `am`): the carrier never drops the
+  squelch. Frames are LPF'd + resampled to 16 k on ingest into a 45 s
+  `AudioRing`. Between `mpsc` polls the worker pulls a window `[committed −
+  5 s lead … head]`, capped at 26 s, transcribes it, and `stitch`es the text
+  onto the running transcript — a ≥ 2-word run shared by the committed tail
+  and the window head marks the re-read overlap, which is dropped. `committed`
+  advances to `head − 2 s` (the guard is re-read next window). An empty decode
+  rolls `committed` back once for a second pass with a shifted boundary; a
+  window that clamps to 26 s because the decoder fell behind logs how much
+  audio it skipped.
+
+The decoder runs `whisper::audio::pcm_to_mel` (80-bin filterbank vendored as
+`melfilters.bytes`; the result is trimmed to `2 * max_source_positions`
+frames — `pcm_to_mel` over-pads), one encoder pass, and a greedy
+no-timestamps decode (`.en` models) with a repetition-cycle guard;
+`clean()` drops non-speech junk (bare stop-words, subtitle markup, prices,
+low-diversity loops). The model is a local HF-layout dir (`--stt-model`;
+`whisper-base.en` by default — `whisper-small.en` transcribes section
+transitions noticeably better and still runs faster than real time on a
+typical CPU). Text lands in a 200-entry ring + broadcast, served at
 `GET /radio/transcript`; `DspStatus.transcribing` flags a decode in flight.
 
 **TTS (`voice/tts.rs`, feature `tts`)** — no Rust engine dep: it shells

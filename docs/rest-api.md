@@ -1226,10 +1226,12 @@ started with `--tts-voice <model.onnx>`. A spoken message can run up to 30 s
 ### `GET /api/v1/radio/transcript`
 
 Recognized text from received transmissions (feature `stt` + `--stt`), newest
-last. Unauthenticated, read-only. Each over is transcribed on a worker thread
-when its squelch closes — or, on a **continuous** carrier that never closes
-the squelch (NOAA Weather Radio on `nbfm`), in rolling ~10 s chunks so text
-streams during the broadcast.
+last. Unauthenticated, read-only. On the PTT modes (`frs` / `ham`) each over
+is transcribed when its squelch closes — one segment per over. On a
+**continuous** carrier that never closes the squelch (`nbfm` / `wbfm` / `am`,
+e.g. NOAA Weather Radio) the worker instead pulls overlapping ~26 s windows
+from a rolling buffer and stitches the de-duplicated text together; expect
+each segment to trail the broadcast by 20–30 s.
 
 ```json
 {

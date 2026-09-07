@@ -726,11 +726,15 @@ impl RadioManager {
         if run.running {
             return;
         }
-        let params = {
+        let (params, mode) = {
             let cfg = self.cfg.lock().unwrap();
             let device = self.registry.selected();
-            PipelineParams::from_config(&cfg, device.as_ref())
+            (PipelineParams::from_config(&cfg, device.as_ref()), cfg.mode.clone())
         };
+        // Continuous carriers (weather radio, broadcast) never drop the
+        // squelch — the STT worker windows them instead of segmenting on
+        // squelch-close (which is right for the PTT modes).
+        self.voice.set_continuous(matches!(mode.as_str(), "nbfm" | "wbfm" | "am"));
         let stop = Arc::new(AtomicBool::new(false));
         let tx = self.tx.clone();
         let tele = self.telemetry.clone();
@@ -778,6 +782,7 @@ impl RadioManager {
         if let Some(info) = self.audio_rec.stop() {
             tracing::info!("audio recording finalized: {} ({:.1}s)", info.filename, info.secs);
         }
+        self.voice.set_continuous(false);
         let (stop, handle) = {
             let mut run = self.run.lock().unwrap();
             run.running = false;

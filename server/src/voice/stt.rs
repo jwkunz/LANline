@@ -1,18 +1,20 @@
-//! Speech-to-text: pure-Rust Whisper (candle). A worker thread receives one
-//! finished over at a time, resamples 48 kHz → 16 kHz, runs a single 30 s
-//! Whisper window (greedy decode, English `.en` models), and appends the text
-//! to the transcript ring.
+//! Speech-to-text: pure-Rust Whisper (candle). One worker thread, two feeds:
+//! a `Segment` mpsc for finished PTT overs, and — polled between — a rolling
+//! `AudioRing` for the continuous carriers, from which it pulls overlapping
+//! ~26 s windows and stitches the text together. Greedy decode with a
+//! repetition-loop guard, English `.en` models.
 
-use super::{Segment, RING_CAP};
+use super::{repetition_cycle_len, stitch, AudioRing, Segment, RING_CAP};
 use crate::model::TranscriptEntry;
-use crate::radio::dsp::LinearResampler;
 use anyhow::{bail, Context, Result};
 use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::whisper::{self as m, audio, Config};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 use tokio::sync::broadcast;
 
@@ -23,6 +25,7 @@ pub(super) fn spawn_worker(
     tx: broadcast::Sender<TranscriptEntry>,
     ring: Arc<Mutex<VecDeque<TranscriptEntry>>>,
     transcribing: Arc<AtomicBool>,
+    audio: Arc<Mutex<AudioRing>>,
 ) -> Result<mpsc::Sender<Segment>> {
     let dir = cfg
         .stt_model
@@ -36,42 +39,100 @@ pub(super) fn spawn_worker(
         .name("stt-whisper".into())
         .spawn(move || {
             let mut engine = engine;
-            while let Ok(seg) = seg_rx.recv() {
-                transcribing.store(true, Ordering::Relaxed);
-                let t0 = std::time::Instant::now();
-                match engine.transcribe(&seg.pcm) {
-                    Ok(text) if !text.is_empty() => {
-                        tracing::info!(
-                            "stt: [{:.1}s over, {:.0} dBFS] \"{text}\" ({:.1}s decode)",
-                            seg.secs,
-                            seg.rssi_dbfs,
-                            t0.elapsed().as_secs_f32()
-                        );
-                        let entry = TranscriptEntry {
-                            time: time::OffsetDateTime::now_utc(),
-                            text,
-                            rssi_dbfs: seg.rssi_dbfs,
-                            secs: seg.secs,
-                        };
-                        {
-                            let mut r = ring.lock().unwrap();
-                            if r.len() >= RING_CAP {
-                                r.pop_front();
+            loop {
+                match seg_rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok(seg) => {
+                        transcribing.store(true, Ordering::Relaxed);
+                        let t0 = Instant::now();
+                        match engine.transcribe(&seg.pcm16) {
+                            Ok(text) if !text.is_empty() => {
+                                tracing::info!(
+                                    "stt: [{:.1}s over, {:.0} dBFS] \"{text}\" ({:.1}s decode)",
+                                    seg.secs,
+                                    seg.rssi_dbfs,
+                                    t0.elapsed().as_secs_f32()
+                                );
+                                push_entry(&ring, &tx, text, seg.rssi_dbfs, seg.secs);
                             }
-                            r.push_back(entry.clone());
+                            Ok(_) => {
+                                tracing::debug!("stt: empty transcript for a {:.1}s over", seg.secs)
+                            }
+                            Err(e) => tracing::warn!("stt: transcribe failed: {e:#}"),
                         }
-                        let _ = tx.send(entry);
+                        transcribing.store(false, Ordering::Relaxed);
                     }
-                    Ok(_) => tracing::debug!("stt: empty transcript for a {:.1}s over", seg.secs),
-                    Err(e) => tracing::warn!("stt: transcribe failed: {e:#}"),
+                    Err(RecvTimeoutError::Timeout) => {
+                        let Some(win) = audio.lock().unwrap().take_window() else {
+                            continue;
+                        };
+                        transcribing.store(true, Ordering::Relaxed);
+                        let t0 = Instant::now();
+                        match engine.transcribe(&win.pcm16) {
+                            Ok(text) if !text.is_empty() => {
+                                let (delta, new_tail) =
+                                    stitch(&win.tail_words, &text, win.overlap_secs);
+                                let delta = delta.trim().to_string();
+                                // Discard if a clear / mode switch happened
+                                // while this window was decoding.
+                                let mut a = audio.lock().unwrap();
+                                if a.generation == win.generation {
+                                    a.note_commit();
+                                    if !delta.is_empty() {
+                                        a.tail_words = new_tail;
+                                    }
+                                    drop(a);
+                                    if !delta.is_empty() {
+                                        tracing::info!(
+                                            "stt: window +{:.0}s (overlap {:.0}s, {:.0} dBFS) \"{delta}\" ({:.1}s decode)",
+                                            win.new_secs,
+                                            win.overlap_secs,
+                                            win.rssi_dbfs,
+                                            t0.elapsed().as_secs_f32()
+                                        );
+                                        push_entry(
+                                            &ring,
+                                            &tx,
+                                            delta,
+                                            win.rssi_dbfs,
+                                            win.new_secs,
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                tracing::debug!("stt: empty window ({:.0}s) — retrying span", win.new_secs);
+                                audio.lock().unwrap().retry_empty(win.generation, win.new_secs);
+                            }
+                            Err(e) => tracing::warn!("stt: window transcribe failed: {e:#}"),
+                        }
+                        transcribing.store(false, Ordering::Relaxed);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
-                transcribing.store(false, Ordering::Relaxed);
             }
             tracing::info!("stt: worker stopped");
         })
         .context("spawning the STT worker thread")?;
 
     Ok(seg_tx)
+}
+
+fn push_entry(
+    ring: &Arc<Mutex<VecDeque<TranscriptEntry>>>,
+    tx: &broadcast::Sender<TranscriptEntry>,
+    text: String,
+    rssi_dbfs: f32,
+    secs: f32,
+) {
+    let entry = TranscriptEntry { time: time::OffsetDateTime::now_utc(), text, rssi_dbfs, secs };
+    {
+        let mut r = ring.lock().unwrap();
+        if r.len() >= RING_CAP {
+            r.pop_front();
+        }
+        r.push_back(entry.clone());
+    }
+    let _ = tx.send(entry);
 }
 
 struct Engine {
@@ -85,7 +146,6 @@ struct Engine {
     transcribe: u32,
     eot: u32,
     no_ts: u32,
-    lpf_a: f32,
 }
 
 impl Engine {
@@ -126,9 +186,6 @@ impl Engine {
             .collect();
         let suppress = Tensor::new(suppress.as_slice(), &device)?;
 
-        // Anti-alias pre-filter for the 48 k → 16 k decimation (1-pole, ~7 kHz).
-        let lpf_a = 1.0 - (-2.0 * std::f32::consts::PI * 7_000.0 / 48_000.0).exp();
-
         Ok(Self {
             device,
             config,
@@ -140,24 +197,16 @@ impl Engine {
             transcribe,
             eot,
             no_ts,
-            lpf_a,
         })
     }
 
-    /// One over (48 kHz mono) → text. Pads/cuts to a single 30 s Whisper window.
-    fn transcribe(&mut self, pcm48: &[f32]) -> Result<String> {
-        // Pre-filter, then linear resample to 16 kHz.
-        let mut y = 0.0f32;
-        let filtered: Vec<f32> = pcm48
-            .iter()
-            .map(|&x| {
-                y += self.lpf_a * (x - y);
-                y
-            })
-            .collect();
-        let mut pcm = Vec::with_capacity(WHISPER_SR * 30);
-        LinearResampler::new(48_000.0, WHISPER_SR as f64).process(&filtered, &mut pcm);
+    /// One 16 kHz mono clip (already LPF'd + resampled by the feed side) →
+    /// text. Padded/cut to a single 30 s Whisper window.
+    fn transcribe(&mut self, pcm16: &[f32]) -> Result<String> {
+        let audio_secs = (pcm16.len() as f32 / WHISPER_SR as f32).max(0.1);
+        let mut pcm = pcm16.to_vec();
         pcm.resize(WHISPER_SR * 30, 0.0); // exactly N_FRAMES worth
+        pcm.truncate(WHISPER_SR * 30);
 
         let mel = audio::pcm_to_mel(&self.config, &pcm, &self.mel_filters);
         let n_mels = self.config.num_mel_bins;
@@ -205,17 +254,44 @@ impl Engine {
             if next == self.eot || tokens.len() > self.config.max_target_positions {
                 break;
             }
+            // Greedy decode sometimes collapses into a loop ("the south coast
+            // of the south coast of…"). Cut it and keep one copy of the cycle.
+            if let Some(l) = repetition_cycle_len(&tokens) {
+                tokens.truncate(tokens.len() - 2 * l);
+                break;
+            }
         }
 
         let text = self
             .tokenizer
             .decode(&tokens, true)
             .map_err(|e| anyhow::anyhow!("detokenize: {e}"))?;
-        Ok(clean(&text))
+        let text = clean(&text);
+        if text.is_empty() {
+            return Ok(text);
+        }
+        // Discard obvious garbage — a low unique-word ratio (residual looping)
+        // or an implausible speaking rate. The window's GUARD re-read gives
+        // the audio another pass with a different boundary.
+        let ws: Vec<String> = text.split_whitespace().map(|w| w.to_lowercase()).collect();
+        if ws.len() > 12 {
+            let uniq = ws.iter().collect::<std::collections::HashSet<_>>().len();
+            if (uniq as f32) / (ws.len() as f32) < 0.35 {
+                tracing::debug!("stt: dropped a low-diversity decode: \"{text}\"");
+                return Ok(String::new());
+            }
+        }
+        if text.chars().count() as f32 / audio_secs > 25.0 {
+            tracing::debug!("stt: dropped an implausibly dense decode ({audio_secs:.0}s)");
+            return Ok(String::new());
+        }
+        Ok(text)
     }
 }
 
-/// Whisper hallucinates canned phrases on near-silence; drop the usual ones.
+/// Whisper emits junk on non-speech audio (silence between products, the SAME
+/// data burst / warning-alarm tone): canned hallucinations, a lone stop-word,
+/// or a bare number. Drop those so they don't land in the transcript.
 fn clean(text: &str) -> String {
     let t = text.trim();
     let low = t.to_lowercase();
@@ -225,12 +301,70 @@ fn clean(text: &str) -> String {
         "thank you.",
         "thanks for watching!",
         "thank you for watching.",
+        "thanks for watching.",
         "(buzzing)",
         ".",
+        "...",
         "bye.",
+        "$1.00",
     ];
     if JUNK.contains(&low.as_str()) {
         return String::new();
     }
+    // No letters at all — a bare "$1.00", "72.", "- -".
+    if !t.chars().any(|c| c.is_alphabetic()) {
+        return String::new();
+    }
+    // Whisper was trained on subtitles and spits their markup ("{\an2}",
+    // "{\fonttbl…}") or a stray price ("$10.00 per hour") on non-speech
+    // audio — the SAME data burst, the warning-alarm tone, dead air. None of
+    // those characters occur in a spoken weather bulletin.
+    if t.contains(['$', '{', '}', '\\', '|']) {
+        return String::new();
+    }
+    // A one- or two-word output made only of stop-words is a decode that
+    // gave up on the first token ("The", "The the", "a and").
+    let ws: Vec<String> = t
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .collect();
+    if ws.len() <= 2
+        && ws.iter().all(|w| {
+            matches!(
+                w.as_str(),
+                "" | "the" | "a" | "an" | "and" | "of" | "to" | "in" | "is" | "it" | "for" | "so"
+            )
+        })
+    {
+        return String::new();
+    }
     t.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean;
+
+    #[test]
+    fn clean_drops_non_speech_junk() {
+        for j in [
+            "The",
+            "the the",
+            "$1.00",
+            "72.",
+            "  ...  ",
+            "thank you.",
+            r"This {\an2{\fonttbl{\f1",
+            "$10.00 per hour",
+        ] {
+            assert_eq!(clean(j), "", "{j:?} should be dropped");
+        }
+    }
+
+    #[test]
+    fn clean_keeps_real_text() {
+        let s = "The temperature was 78 degrees.";
+        assert_eq!(clean(s), s);
+        assert_eq!(clean("  A trace of rain fell yesterday.  "), "A trace of rain fell yesterday.");
+    }
 }
