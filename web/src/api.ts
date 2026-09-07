@@ -308,6 +308,14 @@ export class Client {
       "/api/v1/radio/transcript",
     );
 
+  /** Empty the transcript ring + drop the in-progress chunk. */
+  clearTranscript = () =>
+    this.request<{ cleared: boolean }>("POST", "/api/v1/radio/transcript/clear", { auth: true });
+
+  /** Direct URL to the whole transcript as a `.txt` attachment (for a
+   *  plain download link — no `fetch`). */
+  transcriptTxtUrl = () => `${this.base}/api/v1/radio/transcript.txt`;
+
   /** Start / stop a server-side recording of the demodulated audio (48 kHz
    *  mono WAV). Status comes back in `RadioStatus.recording`. */
   recordAudio = (action: "start" | "stop", maxSecs?: number) =>

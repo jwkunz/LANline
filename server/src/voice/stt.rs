@@ -161,8 +161,23 @@ impl Engine {
 
         let mel = audio::pcm_to_mel(&self.config, &pcm, &self.mel_filters);
         let n_mels = self.config.num_mel_bins;
-        let n_frames = mel.len() / n_mels;
-        let mel = Tensor::from_vec(mel, (1, n_mels, n_frames), &self.device)?;
+        let n_len = mel.len() / n_mels;
+        // `pcm_to_mel` always pads by an extra 1500 frames, so a 30 s window
+        // comes back as 4500 frames. Whisper's encoder positional table is
+        // `2 * max_source_positions` (3000) — feed it exactly that, trimming
+        // the pad. (The upstream example instead slides a 3000-frame window;
+        // one window is all we need for a single 30 s chunk.)
+        let want = (2 * self.config.max_source_positions).min(n_len);
+        let mel = if want == n_len {
+            mel
+        } else {
+            let mut trimmed = Vec::with_capacity(n_mels * want);
+            for j in 0..n_mels {
+                trimmed.extend_from_slice(&mel[j * n_len..j * n_len + want]);
+            }
+            trimmed
+        };
+        let mel = Tensor::from_vec(mel, (1, n_mels, want), &self.device)?;
 
         let audio_features = self.model.encoder.forward(&mel, true)?;
 

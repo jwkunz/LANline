@@ -1512,6 +1512,27 @@ function patchLive(): void {
     vtSay.textContent = keyed ? "on air…" : "Speak";
   }
 
+  // NWR (nbfm) weather-text panel: stream the transcript in without rebuild.
+  const nwrBody = q<HTMLElement>("#nwr-text #nwr-body, #nwr-body");
+  if (nwrBody) {
+    const atBottom = nwrBody.scrollHeight - nwrBody.scrollTop - nwrBody.clientHeight < 40;
+    const html = nwrTextInner();
+    if (nwrBody.innerHTML !== html) {
+      nwrBody.innerHTML = html;
+      if (atBottom) nwrBody.scrollTop = nwrBody.scrollHeight;
+    }
+    const live = q<HTMLElement>("#nwr-live");
+    if (live) live.hidden = !(state.status?.dsp.transcribing ?? false);
+    const count = q<HTMLElement>("#nwr-count");
+    if (count) {
+      const n = state.transcript.reduce(
+        (a, s) => a + s.text.trim().split(/\s+/).filter(Boolean).length,
+        0,
+      );
+      count.textContent = `${n} word${n === 1 ? "" : "s"}`;
+    }
+  }
+
   // Keep the manual-tune dial's number in sync as +/- and Seek move the
   // frequency — structKey() ignores frequency_hz, so the panel isn't
   // rebuilt. Don't stomp a value the user is mid-edit on.
@@ -1584,6 +1605,7 @@ function installDelegates(): void {
     if (hit("#aprs-beacon")) return void beaconAprs();
     if (hit("#aprs-freq-go")) return void aprsTune();
     if (hit("#vt-say")) return void sendVoiceText();
+    if (hit("#nwr-clear")) return void clearNwrText();
     if (hit("#audio-toggle")) return void toggleAudio();
     if (hit("#audio-rec")) return void toggleAudioRecord();
     if (hit("#loc-find")) return findFromInput();
@@ -2019,10 +2041,50 @@ async function sendVoiceText(): Promise<void> {
   }
 }
 
+/** The whole received transcript as one flowing block (NWR is a continuous
+ *  read, so segment boundaries aren't meaningful to show). */
+function nwrTextInner(): string {
+  const words = state.transcript
+    .map((s) => s.text.trim())
+    .filter(Boolean)
+    .join(" ");
+  return words || `<span class="note">Listening… recognized text will appear here.</span>`;
+}
+
+/** Speech-to-text panel for NOAA Weather Radio (nbfm): a live text view that
+ *  fills as the broadcast is transcribed in ~10 s chunks, with download +
+ *  clear. Hidden unless the server was built/started with `--stt`. */
+function nwrTextCard(): string {
+  if (!state.server?.capabilities.includes("stt")) return "";
+  const n = state.transcript.reduce((a, s) => a + (s.text.trim().split(/\s+/).filter(Boolean).length), 0);
+  return `
+    <section class="card" id="nwr-text">
+      <h2>Weather text <span id="nwr-live" class="note" hidden>· transcribing…</span></h2>
+      <div id="nwr-body" class="nwr-text">${nwrTextInner()}</div>
+      <div class="nwr-actions">
+        <a id="nwr-dl" class="nwr-dl" href="${esc(state.client?.transcriptTxtUrl() ?? "#")}"
+           download="weather-text.txt">Download .txt</a>
+        <button id="nwr-clear" class="secondary">Clear</button>
+        <span id="nwr-count" class="note" style="margin-left:auto">${n} word${n === 1 ? "" : "s"}</span>
+      </div>
+    </section>`;
+}
+
+async function clearNwrText(): Promise<void> {
+  if (!state.client) return;
+  try {
+    await state.client.clearTranscript();
+    setState({ transcript: [] });
+    logLine("weather text cleared");
+  } catch (e) {
+    logLine(`clear failed: ${e instanceof ApiError ? e.message : String(e)}`);
+  }
+}
+
 function wizardHtml(): string {
   switch (state.radio?.mode) {
     case "nbfm":
-      return nwrWizardHtml();
+      return nwrWizardHtml() + nwrTextCard();
     case "wbfm":
       return fmWizardHtml();
     case "am":

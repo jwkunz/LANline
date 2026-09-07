@@ -550,6 +550,39 @@ h3.ham-sub {
   gap: 4px;
 }
 
+/* --- NOAA weather-radio speech-to-text --------------------------- */
+.nwr-text {
+  max-height: min(45vh, 260px);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.nwr-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.nwr-dl {
+  display: inline-block;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 14px;
+}
+.nwr-dl:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .tx-log {
   margin-top: 10px;
   font-size: 12px;

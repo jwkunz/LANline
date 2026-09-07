@@ -304,6 +304,39 @@ pub async fn transcript(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
+/// The whole transcript as one plain-text file (for the NWR "Download"
+/// button). Unauth, same posture as `transcript`.
+pub async fn transcript_txt(State(st): State<AppState>) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let body = st.radio_mgr.voice().transcript_text();
+    let stamp = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+        .replace([':', '-'], "")
+        .replace('T', "-");
+    let name = format!("nwr-transcript-{}.txt", stamp.split('.').next().unwrap_or("out"));
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Clear the transcript ring + drop the in-progress chunk (NWR "Clear").
+pub async fn transcript_clear(
+    State(st): State<AppState>,
+    _auth: AuthedSession,
+) -> Json<Value> {
+    st.radio_mgr.voice().clear_transcript();
+    Json(serde_json::json!({ "cleared": true }))
+}
+
 pub async fn status(State(st): State<AppState>) -> Json<RadioStatus> {
     let (mode, frequency_hz, bitrate_bps, sample_rate_hz, channels) = {
         let r = st.radio.lock().unwrap();

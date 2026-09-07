@@ -45,6 +45,8 @@ pub fn router(state: AppState) -> Router {
         .route("/radio/tx/log", get(radio::tx_log))
         .route("/radio/tx/say", post(radio::say))
         .route("/radio/transcript", get(radio::transcript))
+        .route("/radio/transcript.txt", get(radio::transcript_txt))
+        .route("/radio/transcript/clear", post(radio::transcript_clear))
         .route("/adsb/aircraft", get(adsb::aircraft))
         .route("/adsb/messages", get(adsb::messages))
         .route("/adsb/flight/{icao}", get(adsb::flight))

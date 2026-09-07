@@ -2,12 +2,15 @@ package land.lanline
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.http.SslError
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.view.Menu
@@ -17,11 +20,13 @@ import android.view.WindowManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.SslErrorHandler
+import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
+import android.widget.Toast
 import java.net.InetAddress
 import java.net.URI
 import androidx.activity.OnBackPressedCallback
@@ -114,6 +119,31 @@ class MainActivity : AppCompatActivity() {
             setGeolocationEnabled(true)
         }
         WebView.setWebContentsDebuggingEnabled(true)
+
+        // The web client offers file downloads (demod-audio WAV, the NOAA
+        // weather-radio transcript .txt) as plain <a download> / attachment
+        // links. A WebView does nothing with those unless a DownloadListener
+        // is wired up — hand them to the system DownloadManager, which drops
+        // the file in the public Downloads folder and posts a notification.
+        // Servers reached over --tls use a self-signed cert; DownloadManager
+        // uses the system trust store, so an https LAN download can fail —
+        // acceptable, the file is also reachable directly by URL.
+        webView.setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+            try {
+                val name = URLUtil.guessFileName(url, contentDisposition, mimeType)
+                val req = DownloadManager.Request(Uri.parse(url))
+                    .setMimeType(mimeType)
+                    .addRequestHeader("User-Agent", webView.settings.userAgentString)
+                    .setNotificationVisibility(
+                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED,
+                    )
+                    .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+                (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
+                Toast.makeText(this, "Downloading $name", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
 
         webView.webViewClient = object : WebViewClient() {
             // A LANline server run with --tls serves a self-signed cert that

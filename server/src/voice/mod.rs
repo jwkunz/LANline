@@ -35,6 +35,11 @@ const HANG: usize = SR * 3 / 10; // 0.3 s
 /// Whisper's native window — longer overs are cut here.
 #[cfg(feature = "stt")]
 const MAX_SEG: usize = SR * 30;
+/// A continuous carrier (NOAA weather radio, a long net turn) never closes
+/// the squelch — chunk it at this cadence so text streams instead of waiting
+/// for `MAX_SEG`.
+#[cfg(feature = "stt")]
+const CONT_SEG: usize = SR * 10; // 10 s
 
 /// A finished over handed to the STT worker (48 kHz mono).
 #[cfg(feature = "stt")]
@@ -51,6 +56,9 @@ struct SegAccum {
     rssi_sum: f64,
     rssi_n: u64,
     closed_run: usize,
+    /// Samples the squelch has been continuously open since the last flush —
+    /// drives the `CONT_SEG` chunking of a non-stop transmission.
+    open_run: usize,
 }
 
 pub struct VoiceShared {
@@ -127,6 +135,29 @@ impl VoiceShared {
         self.transcript.lock().unwrap().iter().cloned().collect()
     }
 
+    /// The whole ring as one flowing block of text (for the `.txt` download).
+    pub fn transcript_text(&self) -> String {
+        let ring = self.transcript.lock().unwrap();
+        let mut out = ring
+            .iter()
+            .map(|e| e.text.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push('\n');
+        out
+    }
+
+    /// Empty the transcript ring and drop any half-accumulated chunk. Backs
+    /// the web "Clear" button (`POST /radio/transcript/clear`).
+    pub fn clear_transcript(&self) {
+        self.transcript.lock().unwrap().clear();
+        #[cfg(feature = "stt")]
+        {
+            *self.seg.lock().unwrap() = SegAccum::default();
+        }
+    }
+
     /// Called every audio frame from `run_sdr`. Accumulates while the squelch
     /// is open; ships the over to the STT worker when it closes. No-op unless
     /// STT is active.
@@ -140,9 +171,10 @@ impl VoiceShared {
             if squelch_open {
                 s.closed_run = 0;
                 s.buf.extend_from_slice(pcm);
+                s.open_run += pcm.len();
                 s.rssi_sum += rssi_dbfs as f64;
                 s.rssi_n += 1;
-                if s.buf.len() >= MAX_SEG {
+                if s.buf.len() >= MAX_SEG || s.open_run >= CONT_SEG {
                     flush(&mut s, tx);
                 }
             } else if !s.buf.is_empty() {
@@ -166,8 +198,58 @@ fn flush(s: &mut SegAccum, tx: &std::sync::mpsc::Sender<Segment>) {
     s.rssi_sum = 0.0;
     s.rssi_n = 0;
     s.closed_run = 0;
+    s.open_run = 0;
     if pcm.len() >= MIN_SEG {
         let secs = pcm.len() as f32 / SR as f32;
         let _ = tx.send(Segment { pcm, rssi_dbfs: rssi, secs });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn clear_transcript_empties_ring_and_text() {
+        let cfg = crate::config::Config::parse_from(["lanline-server"]);
+        let v = VoiceShared::new(&cfg);
+        v.transcript.lock().unwrap().push_back(TranscriptEntry {
+            time: time::OffsetDateTime::now_utc(),
+            text: "  hello world  ".into(),
+            rssi_dbfs: -40.0,
+            secs: 3.0,
+        });
+        assert_eq!(v.transcript().len(), 1);
+        assert_eq!(v.transcript_text(), "hello world\n");
+        v.clear_transcript();
+        assert!(v.transcript().is_empty());
+        assert_eq!(v.transcript_text(), "\n");
+    }
+
+    /// A carrier that never drops the squelch is chunked at `CONT_SEG`, not
+    /// held back to `MAX_SEG`.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn continuous_carrier_chunks_at_cont_seg() {
+        let (tx, rx) = std::sync::mpsc::channel::<Segment>();
+        let mut s = SegAccum::default();
+        let frame = vec![0.2f32; SR / 10]; // 100 ms
+        let mut flushed = 0;
+        for _ in 0..250 {
+            // 25 s of continuous audio
+            s.buf.extend_from_slice(&frame);
+            s.open_run += frame.len();
+            if s.buf.len() >= MAX_SEG || s.open_run >= CONT_SEG {
+                flush(&mut s, &tx);
+                flushed += 1;
+            }
+        }
+        assert_eq!(flushed, 2, "25 s / 10 s → two chunks");
+        let secs: Vec<f32> = rx.try_iter().map(|seg| seg.secs).collect();
+        assert_eq!(secs.len(), 2);
+        for x in secs {
+            assert!((x - 10.0).abs() < 0.2, "each chunk ≈ 10 s, got {x}");
+        }
     }
 }

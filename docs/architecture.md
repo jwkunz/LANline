@@ -501,8 +501,10 @@ standalone and soapy CI tiers don't build it.
 **STT (`voice/stt.rs`, feature `stt`)** — pure-Rust Whisper via `candle`.
 `run_sdr` calls `VoiceShared::stt_feed(&pcm, squelch_open, rssi)` every audio
 frame (right next to `audio_rec.write`); it accumulates while the squelch is
-open and, on close (0.3 s hang) or at 30 s, ships the whole over to a worker
-thread over an `mpsc`. The worker pre-filters + linear-resamples 48 k → 16 k,
+open and, on close (0.3 s hang), at 30 s, or every 10 s of an unbroken
+carrier (`CONT_SEG` — so NOAA Weather Radio and other continuous
+transmissions stream rather than wait for the 30 s cap), ships the chunk to a
+worker thread over an `mpsc`. The worker pre-filters + linear-resamples 48 k → 16 k,
 runs `whisper::audio::pcm_to_mel` (80-bin filterbank vendored as
 `melfilters.bytes`), one 30 s encoder pass and a greedy no-timestamps decode
 (`.en` models), and pushes a `TranscriptEntry` to a 200-entry ring +
@@ -521,7 +523,11 @@ auto-unkeys. The audit log gets a `say (<backend>): <text>` entry.
 
 Web: a **"Voice text"** card in the `frs` / `ham` panels (each half shown per
 `capabilities`) — a text field that transmits as speech, and a live transcript
-log of received overs. No mic involved.
+log of received overs. No mic involved. The `nbfm` (NOAA Weather Radio) panel
+gets a **"Weather text"** card instead: the running transcript as one flowing
+block that fills during a session, a **Download** link
+(`GET /radio/transcript.txt`) and a **Clear** button
+(`POST /radio/transcript/clear`).
 
 ### AM and HackRF MF/LF sensitivity
 

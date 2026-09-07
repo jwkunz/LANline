@@ -1227,7 +1227,9 @@ started with `--tts-voice <model.onnx>`. A spoken message can run up to 30 s
 
 Recognized text from received transmissions (feature `stt` + `--stt`), newest
 last. Unauthenticated, read-only. Each over is transcribed on a worker thread
-when its squelch closes.
+when its squelch closes — or, on a **continuous** carrier that never closes
+the squelch (NOAA Weather Radio on `nbfm`), in rolling ~10 s chunks so text
+streams during the broadcast.
 
 ```json
 {
@@ -1243,6 +1245,17 @@ when its squelch closes.
 `DspStatus.transcribing` (in `/radio/status`) is `true` while a segment is
 being decoded. STT (`stt`) and TTS (`tts`) also appear in
 `GET /api/v1/server`'s `capabilities`.
+
+### `GET /api/v1/radio/transcript.txt`
+
+The whole transcript ring as one flowing plain-text block, served as a file
+attachment (`Content-Disposition: attachment; filename="nwr-transcript-<UTC
+timestamp>.txt"`). Unauthenticated. Backs the NWR panel's "Download" button.
+
+### `POST /api/v1/radio/transcript/clear`
+
+Empties the transcript ring and drops the in-progress chunk. Authenticated.
+Returns `{ "cleared": true }`.
 
 ---
 

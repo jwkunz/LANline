@@ -73,6 +73,7 @@ wrapper (`client/android`).
 | 2u | Repeater directory is now nationwide (US, ~9k) and the web client sorts it by your location — same as the FM station list; the `FL`-only default is gone | ✅ |
 | 2v | Flight lookup — tapping an ADS-B contact fetches tail number / type / owner / route from adsbdb.com via a server-side `GET /api/v1/adsb/flight/{icao}` proxy (TTL cache, cross-client de-dupe); the one internet-facing feature, on by default, `--flight-lookup false` to disable | ✅ |
 | 2w | Vessel lookup — the same for AIS: tapping a ship fetches flag / tonnage / year built / dimensions / photo from vesselfinder.com via `GET /api/v1/ais/vessel/{mmsi}`; shares the `--flight-lookup` toggle | ✅ |
+| 2x | NOAA Weather Radio speech-to-text — the continuous carrier is transcribed in rolling ~10 s chunks (`CONT_SEG` flush in `stt_feed`); a "Weather text" panel in the `nbfm` web UI fills live, with `GET /radio/transcript.txt` download + `POST /radio/transcript/clear`; Android WebView gains a `DownloadListener` | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -255,6 +256,11 @@ returns the recognized overs. The web client shows a **Voice text** card in the
 voice for a Piper neural one (needs the `piper` binary). See
 [`docs/rest-api.md`](docs/rest-api.md) and the "Voice ↔ text" section of
 [`docs/architecture.md`](docs/architecture.md).
+
+On **NOAA Weather Radio** (`nbfm`) the carrier never stops, so STT runs in
+rolling ~10 s chunks and the `nbfm` panel gets a **Weather text** view that
+fills as the loop is transcribed, plus **Download .txt**
+(`GET /api/v1/radio/transcript.txt`) and **Clear**.
 
 ### Running multiple radios
 
