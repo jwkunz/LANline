@@ -27,7 +27,7 @@ pub async fn patch_radio(
     }
 
     let new_mode = obj.get("mode").and_then(Value::as_str).map(str::to_string);
-    let has_mode_params = obj.contains_key("mode_params");
+    let supplied_mode_params = obj.get("mode_params").cloned();
 
     let new_cfg = {
         let radio = st.radio.lock().unwrap();
@@ -35,12 +35,15 @@ pub async fn patch_radio(
             serde_json::to_value(&*radio).map_err(|e| ApiError::internal(e.to_string()))?;
         merge_json(&mut merged, &patch);
 
-        // Switching mode without supplying params resets them to that mode's
-        // defaults.
+        // A mode switch always rebuilds `mode_params` from that mode's
+        // defaults (so stale keys from the previous mode don't leak through),
+        // with any `mode_params` supplied in the same PATCH layered on top.
         if let Some(mode) = &new_mode {
-            if !has_mode_params {
-                merged["mode_params"] = crate::catalog::default_mode_params(mode);
+            let mut mp = crate::catalog::default_mode_params(mode);
+            if let Some(supplied) = &supplied_mode_params {
+                merge_json(&mut mp, supplied);
             }
+            merged["mode_params"] = mp;
         }
 
         let cfg: RadioConfig = serde_json::from_value(merged)

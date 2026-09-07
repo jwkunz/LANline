@@ -16,6 +16,7 @@ import type {
   TxLogEntry,
 } from "./types";
 import { parseAptImage, type AptImage, type AptStatus } from "./apt";
+import { parseSstvImage, type SstvImage, type SstvStatus } from "./sstv";
 
 export class ApiError extends Error {
   constructor(
@@ -204,6 +205,33 @@ export class Client {
       throw new ApiError(res.status, "http_error", `${res.status} ${res.statusText}`);
     }
     return parseAptImage(await res.arrayBuffer());
+  }
+
+  sstvStatus = () => this.request<SstvStatus>("GET", "/api/v1/sstv/status");
+
+  /** Binary RGBA raster — same treatment as `aptImage`. */
+  async sstvImage(signal?: AbortSignal, timeoutMs = 10_000): Promise<SstvImage> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    signal?.addEventListener("abort", onExternalAbort);
+    let res: Response;
+    try {
+      res = await fetch(this.base + "/api/v1/sstv/image", { signal: controller.signal });
+    } catch (e) {
+      if (timedOut) throw new ApiError(0, "timeout", `sstv/image timed out after ${timeoutMs}ms`);
+      if (signal?.aborted) throw new ApiError(0, "cancelled", "sstv/image cancelled");
+      throw new ApiError(0, "network", `cannot reach ${this.base} (${(e as Error).message})`);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onExternalAbort);
+    }
+    if (!res.ok) throw new ApiError(res.status, "http_error", `${res.status} ${res.statusText}`);
+    return parseSstvImage(await res.arrayBuffer());
   }
 
   createSession = (

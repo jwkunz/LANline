@@ -5,6 +5,7 @@ mod analysis;
 mod ais;
 mod apt;
 mod aprs;
+mod sstv;
 mod audio;
 mod devices;
 mod meta;
@@ -58,6 +59,8 @@ pub fn router(state: AppState) -> Router {
         .route("/aprs/tx", post(aprs::tx))
         .route("/apt/image", get(apt::image))
         .route("/apt/status", get(apt::status))
+        .route("/sstv/image", get(sstv::image))
+        .route("/sstv/status", get(sstv::status))
         .route("/analysis/spectrum", get(analysis::spectrum))
         .route("/analysis/status", get(analysis::status))
         .route("/analysis/record", post(analysis::record))

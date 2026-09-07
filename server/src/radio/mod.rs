@@ -16,6 +16,7 @@ use crate::ais::AisShared;
 use crate::analysis::AnalysisShared;
 use crate::aprs::AprsShared;
 use crate::apt::AptShared;
+use crate::sstv::SstvShared;
 use crate::audio::{rms_dbfs, AudioFrame};
 use crate::model::{RadioConfig, TxLogEntry};
 use crate::radio::audio_rec::AudioRecorder;
@@ -181,6 +182,7 @@ pub struct RadioManager {
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    sstv: Arc<SstvShared>,
     aprs: Arc<AprsShared>,
     analysis: Arc<AnalysisShared>,
     audio_rec: Arc<AudioRecorder>,
@@ -454,6 +456,7 @@ impl RadioManager {
             adsb: Arc::new(AdsbShared::new()),
             ais: Arc::new(AisShared::new()),
             apt: Arc::new(AptShared::new()),
+            sstv: Arc::new(SstvShared::new()),
             aprs: Arc::new(AprsShared::new()),
             analysis: Arc::new(AnalysisShared::new(iq_dir.clone())),
             audio_rec: Arc::new(AudioRecorder::new(iq_dir)),
@@ -695,6 +698,11 @@ impl RadioManager {
         self.apt.clone()
     }
 
+    /// Shared SSTV image (populated only while the `sstv` mode pipeline runs).
+    pub fn sstv(&self) -> Arc<SstvShared> {
+        self.sstv.clone()
+    }
+
     /// Shared APRS station table + packet ring (populated only while the
     /// `aprs` mode pipeline is running).
     pub fn aprs(&self) -> Arc<AprsShared> {
@@ -745,6 +753,7 @@ impl RadioManager {
         let adsb = self.adsb.clone();
         let ais = self.ais.clone();
         let apt = self.apt.clone();
+        let sstv = self.sstv.clone();
         let aprs = self.aprs.clone();
         let analysis = self.analysis.clone();
         let audio_rec = self.audio_rec.clone();
@@ -760,8 +769,8 @@ impl RadioManager {
             .name("rx-pipeline".into())
             .spawn(move || {
                 run_pipeline(
-                    params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, aprs, analysis,
-                    audio_rec, audio_in, voice,
+                    params, tx, tele, stop_thread, dump, cmd_rx, adsb, ais, apt, sstv, aprs,
+                    analysis, audio_rec, audio_in, voice,
                 )
             })
             .expect("spawn rx-pipeline thread");
@@ -949,6 +958,8 @@ enum SourceKind {
     #[cfg(feature = "soapy")]
     Apt(Box<AptSdrParams>),
     #[cfg(feature = "soapy")]
+    Sstv(Box<SstvSdrParams>),
+    #[cfg(feature = "soapy")]
     Aprs(Box<AprsSdrParams>),
     #[cfg(feature = "soapy")]
     Analysis(Box<AnalysisSdrParams>),
@@ -1024,6 +1035,21 @@ struct AptSdrParams {
     freq_correction_ppm: f64,
     apt: crate::apt::demod::AptParams,
     max_lines: usize,
+}
+
+#[cfg(feature = "soapy")]
+struct SstvSdrParams {
+    soapy_args: String,
+    device_rate: f64,
+    freq_hz: f64,
+    channel: usize,
+    antenna: Option<String>,
+    agc: bool,
+    gain_overall_db: Option<f64>,
+    gain_elements_db: Vec<(String, f64)>,
+    settings: Vec<(String, String)>,
+    freq_correction_ppm: f64,
+    sstv: crate::sstv::demod::SstvParams,
 }
 
 #[cfg(feature = "soapy")]
@@ -1307,6 +1333,55 @@ impl PipelineParams {
                     None => SourceKind::Silence,
                 }
             }
+            "sstv" => {
+                #[cfg(not(feature = "soapy"))]
+                {
+                    let _ = device;
+                    SourceKind::Silence
+                }
+                #[cfg(feature = "soapy")]
+                match device {
+                    Some(dev) => {
+                        let sstr = |k: &str| cfg.mode_params.get(k).and_then(|v| v.as_str());
+                        let demod = crate::sstv::demod::Demod::parse(sstr("demod").unwrap_or("usb"));
+                        let manual = sstr("mode")
+                            .map(|s| s.to_string())
+                            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"));
+                        SourceKind::Sstv(Box::new(SstvSdrParams {
+                            soapy_args: dev.soapy_args.clone(),
+                            device_rate: cfg.tuner.sample_rate_hz,
+                            freq_hz: cfg.frequency_hz as f64,
+                            channel: cfg.tuner.channel,
+                            antenna: cfg.tuner.antenna.clone(),
+                            agc: matches!(cfg.tuner.gain_mode, crate::model::GainMode::Agc),
+                            gain_overall_db: cfg.tuner.gain_db,
+                            gain_elements_db: cfg
+                                .tuner
+                                .gain_elements_db
+                                .iter()
+                                .map(|(k, v)| (k.clone(), *v))
+                                .collect(),
+                            settings: cfg
+                                .tuner
+                                .device_settings
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                            freq_correction_ppm: cfg.tuner.freq_correction_ppm,
+                            sstv: crate::sstv::demod::SstvParams {
+                                demod,
+                                deviation_hz: param("deviation_hz", 5_000.0),
+                                channel_bw_hz: param("channel_bw_hz", 16_000.0),
+                                bfo_offset_hz: param("bfo_offset_hz", 0.0),
+                                lo_offset_hz: cfg.tuner.lo_offset_hz.abs().max(1.0),
+                                manual_mode: manual,
+                                slant_ppm: param("slant_ppm", 0.0),
+                            },
+                        }))
+                    }
+                    None => SourceKind::Silence,
+                }
+            }
             "analysis" => {
                 #[cfg(not(feature = "soapy"))]
                 {
@@ -1385,13 +1460,14 @@ fn run_pipeline(
     adsb: Arc<AdsbShared>,
     ais: Arc<AisShared>,
     apt: Arc<AptShared>,
+    sstv: Arc<SstvShared>,
     aprs: Arc<AprsShared>,
     analysis: Arc<AnalysisShared>,
     audio_rec: Arc<AudioRecorder>,
     audio_in: Arc<TxAudioSource>,
     voice: Arc<crate::voice::VoiceShared>,
 ) {
-    let _ = (&adsb, &ais, &apt, &aprs, &analysis, &audio_in, &voice);
+    let _ = (&adsb, &ais, &apt, &sstv, &aprs, &analysis, &audio_in, &voice);
     let fc = p.frames;
     let mut wav = dump.and_then(|path| match WavDump::create(&path, AUDIO_RATE, 1) {
         Ok(w) => {
@@ -1431,6 +1507,8 @@ fn run_pipeline(
         SourceKind::Ais(p) => run_ais(*p, ais, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
         SourceKind::Apt(p) => run_apt(*p, apt, &telemetry, &stop, cmd_rx),
+        #[cfg(feature = "soapy")]
+        SourceKind::Sstv(p) => run_sstv(*p, sstv, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
         SourceKind::Aprs(p) => run_aprs(*p, aprs, &telemetry, &stop, cmd_rx),
         #[cfg(feature = "soapy")]
@@ -2636,6 +2714,162 @@ fn run_apt(
             // against synthetic real-signal (~8) vs. noise (~3.2 ceiling)
             // steady-state values — see `apt::demod` module docs/tests.
             t.squelch_open = last_sync > 5.0;
+            t.overruns = overruns;
+        }
+    }
+
+    let _ = stream.deactivate(None);
+}
+
+/// SSTV pipeline: IQ → FM/SSB demod → audio subcarrier discriminator → VIS
+/// header → per-mode line decode (see `crate::sstv::demod`) into a growing
+/// RGB image the web client renders to canvas. Mirrors `run_apt`.
+#[cfg(feature = "soapy")]
+fn run_sstv(
+    p: SstvSdrParams,
+    shared: Arc<SstvShared>,
+    telemetry: &Arc<Mutex<Telemetry>>,
+    stop: &Arc<AtomicBool>,
+    cmd_rx: mpsc::Receiver<PipelineCmd>,
+) {
+    use crate::sstv::demod::SstvDemod;
+    use num_complex::Complex32;
+    use soapysdr::{Device, Direction, ErrorCode};
+
+    let dir = Direction::Rx;
+    let ch = p.channel;
+
+    shared.reset();
+
+    let dev = match Device::new(p.soapy_args.as_str()) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("sstv: cannot open device: {e}");
+            return;
+        }
+    };
+    let log_set = |what: &str, r: Result<(), soapysdr::Error>| {
+        if let Err(e) = r {
+            tracing::warn!("sstv: set {what}: {e}");
+        }
+    };
+    log_set("sample_rate", dev.set_sample_rate(dir, ch, p.device_rate));
+    let lo = p.freq_hz - p.sstv.lo_offset_hz;
+    log_set("frequency", dev.set_frequency(dir, ch, apply_ppm(lo, p.freq_correction_ppm), ""));
+    if let Some(ant) = &p.antenna {
+        log_set("antenna", dev.set_antenna(dir, ch, ant.as_str()));
+    }
+    if p.agc {
+        log_set("agc", dev.set_gain_mode(dir, ch, true));
+    } else {
+        log_set("gain_mode", dev.set_gain_mode(dir, ch, false));
+        if let Some(g) = p.gain_overall_db {
+            log_set("gain", dev.set_gain(dir, ch, g));
+        }
+        for (name, v) in &p.gain_elements_db {
+            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+        }
+    }
+    for (k, v) in &p.settings {
+        log_set("setting", dev.write_setting(k.as_str(), v.as_str()));
+    }
+
+    let mut stream = match dev.rx_stream::<Complex32>(&[ch]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("sstv: rx_stream: {e}");
+            return;
+        }
+    };
+    if let Err(e) = stream.activate(None) {
+        tracing::error!("sstv: stream activate: {e}");
+        return;
+    }
+
+    let mtu = stream.mtu().unwrap_or(65_536).clamp(1024, 1 << 20);
+    let mut iq = vec![Complex32::new(0.0, 0.0); mtu];
+    let mut demod = SstvDemod::new(p.device_rate, &p.sstv);
+
+    telemetry.lock().unwrap().source = "sstv";
+    tracing::info!(
+        "sstv: {} @ {:.4} MHz (LO {:.3} MHz), {:.3} Msps, channel rate {:.0} Hz, {:?}",
+        p.soapy_args,
+        p.freq_hz / 1e6,
+        lo / 1e6,
+        p.device_rate / 1e6,
+        demod.channel_rate(),
+        p.sstv.demod,
+    );
+
+    let mut overruns: u64 = 0;
+    let mut last_status = Instant::now();
+
+    while !stop.load(Ordering::SeqCst) {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                PipelineCmd::Retune(hz) => {
+                    let new_lo = hz - p.sstv.lo_offset_hz;
+                    log_set(
+                        "frequency",
+                        dev.set_frequency(dir, ch, apply_ppm(new_lo, p.freq_correction_ppm), ""),
+                    );
+                    tracing::info!("sstv: retuned to {:.4} MHz (live)", hz / 1e6);
+                }
+                PipelineCmd::Gain { agc, overall, elements } => {
+                    log_set("gain_mode", dev.set_gain_mode(dir, ch, agc));
+                    if !agc {
+                        if let Some(g) = overall {
+                            log_set("gain", dev.set_gain(dir, ch, g));
+                        }
+                        for (name, v) in &elements {
+                            log_set("gain_element", dev.set_gain_element(dir, ch, name.as_str(), *v));
+                        }
+                    }
+                }
+                PipelineCmd::Demod(_)
+                | PipelineCmd::Key(_)
+                | PipelineCmd::Unkey
+                | PipelineCmd::Scan(_)
+                | PipelineCmd::AprsTx(_) => {}
+            }
+        }
+
+        let n = match stream.read(&mut [iq.as_mut_slice()], 200_000) {
+            Ok(n) => n,
+            Err(e) => {
+                match e.code {
+                    ErrorCode::Timeout => {}
+                    ErrorCode::Overflow => overruns += 1,
+                    _ => {
+                        tracing::warn!("sstv: stream read: {e}");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                continue;
+            }
+        };
+        if n == 0 {
+            continue;
+        }
+
+        let rows = demod.feed(&iq[..n]);
+        if !rows.is_empty() {
+            let m = demod.metrics();
+            let mut img = shared.image.lock().unwrap();
+            for r in &rows {
+                img.push_row(r);
+            }
+            img.set_meta(m.snr_db, m.locked);
+        }
+
+        if last_status.elapsed() >= Duration::from_millis(500) {
+            last_status = Instant::now();
+            let m = demod.metrics();
+            let mut t = telemetry.lock().unwrap();
+            t.frames_sent = m.frames;
+            t.rssi_dbfs = Some(m.snr_db);
+            t.snr_db = Some(m.snr_db);
+            t.squelch_open = m.locked;
             t.overruns = overruns;
         }
     }

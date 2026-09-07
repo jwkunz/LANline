@@ -332,6 +332,38 @@ canvas.apt-canvas {
   background: #111;
   border: 1px solid var(--line);
   border-radius: 10px;
+  image-rendering: pixelated;
+}
+.sstv-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.sstv-tools label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.sstv-tools select {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+}
+.sstv-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.sstv-presets button {
+  font-size: 12px;
+  padding: 6px 10px;
 }
 .dial-select {
   padding: 9px 11px;

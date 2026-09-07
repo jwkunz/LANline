@@ -135,6 +135,20 @@ pub fn modes() -> Vec<ModeInfo> {
             ]),
         },
         ModeInfo {
+            id: "sstv",
+            name: "SSTV (slow-scan TV — HF SSB / 2 m FM / ISS 145.800)",
+            tx_capable: false,
+            // `mode` (auto|robot36|scottie1|scottie2|scottiedx|martin1|martin2
+            // |pd120|pd180) and `demod` (usb|lsb|fm) are string params the web
+            // client sets directly — the catalog only carries the numeric knobs.
+            params: BTreeMap::from([
+                ("deviation_hz", num(5000.0, 2000.0, 15000.0, "Hz")),
+                ("channel_bw_hz", num(16000.0, 6000.0, 40000.0, "Hz")),
+                ("bfo_offset_hz", num(0.0, -3000.0, 3000.0, "Hz")),
+                ("slant_ppm", num(0.0, -2000.0, 2000.0, "ppm")),
+            ]),
+        },
+        ModeInfo {
             id: "aprs",
             name: "APRS (144.390 MHz packet — position/status/message)",
             tx_capable: true,
@@ -243,7 +257,7 @@ pub fn presets() -> Vec<Preset> {
 /// by the caller when the selected device supports it.
 pub fn base_capabilities() -> Vec<String> {
     [
-        "rx", "webrtc", "nbfm", "wbfm", "am", "frs", "ham", "apt", "aprs", "adsb", "ais",
+        "rx", "webrtc", "nbfm", "wbfm", "am", "frs", "ham", "apt", "sstv", "aprs", "adsb", "ais",
         "analysis", "debug_tone",
     ]
         .iter()

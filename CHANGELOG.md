@@ -4,6 +4,18 @@ All notable changes, newest first. LANline is versioned `MAJOR.MINOR.PATCH`;
 the phase letters (`2a`, `2b`, …) in the [README roadmap](README.md#phase-roadmap)
 are the development log this summarizes.
 
+## v2.6.0 (2026-09)
+
+- **SSTV receive mode** (`sstv`) — pure-Rust decoder: FM (2 m FM SSTV,
+  ISS SSTV on 145.800 MHz) or SSB (HF nets) demod → 1900 Hz subcarrier
+  frequency discriminator → VIS header auto-detect (or a forced mode for
+  weak signals) → Robot 36 / Scottie 1·2·DX / Martin 1·2 / PD 120·180 line
+  decode with per-line sync tracking (slant correction). Renders to an RGBA
+  canvas via `GET /api/v1/sstv/image` + `/sstv/status`, the same pattern as
+  NOAA APT. Web panel: mode / demod pickers, HF/VHF band presets, a slant
+  trim, and Save PNG. (Analog composite-video TV is a separate planned
+  effort.)
+
 ## v2.5.0 — first public release (2026-09)
 
 Everything below, packaged for public use: MIT license, a consolidated

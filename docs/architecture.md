@@ -592,6 +592,43 @@ and read as "locked" against the then-current (much lower) threshold.
 Computing the noise floor from the words directly, rather than from the
 correlation curve, avoids that self-contamination.
 
+### SSTV (`sstv/`)
+
+A second raster mode alongside `apt`, but **audio-rate** and colour. The
+`sstv` pipeline (`radio::run_sstv`, mirroring `run_apt`) feeds IQ to
+`sstv::demod::SstvDemod`:
+
+1. **RF demod.** FM (2 m / ISS 145.800 MHz) uses the same polar-discriminator
+   front end as the voice modes; SSB (HF, `demod = usb|lsb`) shifts the
+   suppressed carrier to DC with an NCO (± `bfo_offset_hz`), low-passes, and
+   takes the real part. Output resampled to a 16 kHz audio working rate.
+2. **Subcarrier discriminator.** The audio is mixed against a 1900 Hz
+   reference, low-passed with a 31-tap FIR (kills the sum image so the phase
+   estimate is clean — a 1-pole leaked too much), and differentiated to an
+   instantaneous frequency per sample: 1500 Hz = black, 2300 Hz = white,
+   1200 Hz = sync, 1900 Hz = the VIS leader idle tone.
+3. **State machine.** A forward-scanning cursor classifies leader / start /
+   other. `auto`: a ≥ 100 ms 1900 Hz leader latches `saw_leader`, then a
+   ≥ 16 ms 1200 Hz start bit → read 8 VIS bits (30 ms each, 1100 = 1 /
+   1300 = 0) + even parity → `sstv::modes::by_vis` selects the mode.
+   `manual`: any solid 1200 Hz pulse starts a picture in the forced mode
+   (for weak signals with no readable VIS — the ISS).
+4. **Line decode.** Per transmit line: re-find the 1200 Hz sync leading edge
+   in a ±12 ms window (slant / drift correction — the measured line period
+   is an EMA that trims the pixel clock, plus a manual `slant_ppm`), then
+   sample each component at the mode's pixel clock and convert to RGB.
+   Scottie / Martin are sequential RGB (with Scottie's oddball
+   between-blue-and-red sync taken as the line boundary → R,G,B); Robot 36
+   and the PD family are YCrCb (`ycc_row`).
+
+Output is `sstv::Image` — an RGBA canvas that resizes on a mode change and
+clears on each frame's first row — encoded as `[u32 w][u32 h][RGBA]` at
+`GET /api/v1/sstv/image` (+ `/sstv/status`), rendered straight into a
+`<canvas>` `ImageData` in the web client. No FEC, no image crate. The
+decoder logic is unit-tested against a synthetic FM SSTV encoder
+(`sstv::demod::tests`). Analog **television** (composite video) is a
+separate, wideband effort (planned).
+
 ### FRS and the transmit question
 
 FRS (Family Radio Service) is 22 fixed UHF channels — 462.5625–462.7125 MHz

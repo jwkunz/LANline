@@ -96,6 +96,7 @@ Engineering LLC.
 | 2w | Vessel lookup — the same for AIS: tapping a ship fetches flag / tonnage / year built / dimensions / photo from vesselfinder.com via `GET /api/v1/ais/vessel/{mmsi}`; shares the `--flight-lookup` toggle | ✅ |
 | 2x | NOAA Weather Radio speech-to-text — a "Weather text" panel in the `nbfm` web UI fills live, with `GET /radio/transcript.txt` download + `POST /radio/transcript/clear`; Android WebView gains a `DownloadListener` | ✅ |
 | 2y | STT engine reworked for the continuous carriers — a 45 s rolling `AudioRing` fed a persistent 48→16 k resampler, the worker pulls overlapping ~26 s windows and `stitch`es the de-duplicated text, greedy decode gets a repetition-cycle guard + junk filter, empty windows retry once; fixes the mid-sentence chunk butchery (fragments / "$1.00" / 47 s loops) | ✅ |
+| 2z | **SSTV** receive mode — pure-Rust decoder (`sstv/`): FM (2 m / ISS 145.800) or SSB (HF) demod → 1900 Hz subcarrier discriminator → VIS header (or a forced mode) → Robot 36 / Scottie 1·2·DX / Martin 1·2 / PD 120·180 line decode with slant correction, into an RGBA canvas (`GET /api/v1/sstv/image`); web panel with mode/demod pickers, band presets, and Save PNG | ✅ |
 
 The first receive mode is **NBFM** for the NOAA Weather Radio (NWR) service;
 **wideband FM**, **AM**, an **ADS-B** aircraft tracker, an **AIS** vessel
@@ -576,6 +577,22 @@ switch to nbfm/wbfm/am to listen.
 device rate — the format GQRX / SDR# / SDRuno read) to the server's
 `--iq-dir` (default: its working directory), then offers a download link.
 ~8 MB/s at 2 Msps; 60-second cap by default.
+
+### Slow-scan TV (SSTV)
+
+Pick **SSTV** to receive a slow-scan picture. Set the frequency and pick a
+**demod** — **FM** for 2 m FM SSTV (144.500) and **ISS SSTV events**
+(145.800 MHz, several times a year), **USB / LSB** for the HF nets
+(14.230 / 14.233 / 7.171 / 3.845 MHz). The quick-tune buttons set both.
+Start the receiver; the canvas paints line by line as a transmission comes
+in.
+
+**Mode** defaults to **Auto**, which reads the VIS header to pick the format
+(Robot 36, Scottie 1/2/DX, Martin 1/2, PD 120/180). For a weak signal that
+arrives without a readable header — the usual case on the ISS — set the mode
+by hand and the decoder starts on the next sync pulse. A tilted image means
+the clocks don't quite agree: nudge the **Slant** (ppm) field. **Save PNG**
+exports the current canvas.
 
 ## Building the Android client
 

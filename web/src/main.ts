@@ -6,6 +6,7 @@ import { AudioSession, type AudioState } from "./audio";
 import { nativeDiscovery, serverHost } from "./discovery";
 import { haversineMi, parseLatLon, type Located } from "./geo";
 import { altLabel, offsetNm, type AdsbSnapshot, type FlightInfo } from "./adsb";
+import { type SstvImage, type SstvStatus, SSTV_MODES, SSTV_PRESETS } from "./sstv";
 import { type AisSnapshot, type VesselInfo } from "./ais";
 import { aprsSymbolGlyph, parseAprsMessages, type AprsSnapshot } from "./aprs";
 import { loadNwrStations, nearestNwr, NWR_CHANNELS, type NwrStation } from "./nwr";
@@ -145,6 +146,14 @@ const MODE_META: Record<string, ModeMeta> = {
     loOffsetHz: 25_000,
     wantSampleRateHz: 2_000_000,
   },
+  sstv: {
+    label: "SSTV",
+    icon: "🖼️",
+    band: "HF / 2 m",
+    defaultFreqHz: 14_230_000,
+    loOffsetHz: 12_000,
+    wantSampleRateHz: 1_000_000,
+  },
   frs: {
     label: "FRS",
     icon: "🎙️",
@@ -226,6 +235,7 @@ interface State {
   aprsPackets: string[];
   transcript: TranscriptEntry[];
   apt: AptStatus | null;
+  sstv: SstvStatus | null;
   scopeSel: string | null;
   /** Internet enrichment for ADS-B contacts, keyed by ICAO hex. `"loading"`
    *  while the request is in flight. Cleared on mode switch. */
@@ -275,6 +285,7 @@ const state: State = {
   aprsPackets: [],
   transcript: [],
   apt: null,
+  sstv: null,
   scopeSel: null,
   acInfo: {},
   vesselInfo: {},
@@ -292,6 +303,8 @@ let pollFails = 0;
  *  `refreshAptImage`/`drawAptImage`, mirroring `scopePlot` below). */
 let aptImg: AptImage | null = null;
 let aptImageFetchedAt = 0;
+let sstvImg: SstvImage | null = null;
+let sstvImgFetchedAt = 0;
 let analysisView: AnalysisView | null = null;
 
 function readSavedLoc(): Located | null {
@@ -826,10 +839,15 @@ async function switchMode(id: string): Promise<void> {
       trail_seconds: 1800,
       forget_seconds: 3600,
     };
+  } else if (id === "sstv") {
+    const saved = readSstvPrefs();
+    patch.mode_params = { mode: saved.mode, demod: saved.demod };
   }
 
   aptImg = null;
   aptImageFetchedAt = 0;
+  sstvImg = null;
+  sstvImgFetchedAt = 0;
   // Release any PTT mic from the mode being left — startAudio() only
   // re-acquires when the *new* mode actually needs one (frs), and a stale
   // stream here would otherwise carry into a mode that has no business
@@ -846,6 +864,7 @@ async function switchMode(id: string): Promise<void> {
       ais: null,
       aprs: null,
       apt: null,
+      sstv: null,
       scopeSel: null,
       acInfo: {},
       vesselInfo: {},
@@ -1307,6 +1326,14 @@ async function poll(): Promise<void> {
         void refreshAptImage();
       }
     }
+    let sstv = state.sstv;
+    if (radio.mode === "sstv") {
+      sstv = await state.client.sstvStatus().catch(() => state.sstv);
+      if (Date.now() - sstvImgFetchedAt > 2_500) {
+        sstvImgFetchedAt = Date.now();
+        void refreshSstvImage();
+      }
+    }
     let transcript = state.transcript;
     if (
       server.capabilities.includes("stt") &&
@@ -1317,7 +1344,7 @@ async function poll(): Promise<void> {
         .then((r) => r.segments)
         .catch(() => state.transcript);
     }
-    setState({ server, radio, status, audioStats, adsb, ais, aprs, aprsPackets, transcript, apt });
+    setState({ server, radio, status, audioStats, adsb, ais, aprs, aprsPackets, transcript, apt, sstv });
   } catch (e) {
     pollFails += 1;
     if (pollFails >= 3) loopFailed(e as ApiError, "poll");
@@ -1484,6 +1511,9 @@ function patchLive(): void {
     setHTML("#apt-status", aptStatusInner());
     setHTML("#apt-sat-rows", aptSatRowsInner());
     drawAptImage();
+  } else if (state.radio.mode === "sstv") {
+    setHTML("#sstv-status", sstvStatusInner());
+    drawSstvImage();
   }
 
   const freq = state.radio.frequency_hz;
@@ -1591,6 +1621,7 @@ function installDelegates(): void {
   panels.addEventListener("change", (e) => {
     const t = e.target as HTMLElement;
     if (t.id === "device-pick") void switchDevice((t as HTMLSelectElement).value);
+    if (t.id === "sstv-mode" || t.id === "sstv-demod" || t.id === "sstv-slant") void onSstvSelect();
   });
 
   panels.addEventListener("click", (e) => {
@@ -1631,6 +1662,9 @@ function installDelegates(): void {
     if (hit("#am-up")) return void tuneFrequency(stepAm(state.radio!.frequency_hz, 1));
     if (hit("#am-go")) return amManualGo();
     if (hit("#apt-go")) return aptManualGo();
+    if (hit("#sstv-go")) return sstvManualGo();
+    if (hit("#sstv-save")) return saveSstvPng();
+    { const p = t.closest<HTMLElement>("[data-sstv-preset]"); if (p) return applySstvPreset(Number(p.dataset.sstvPreset)); }
     if (hit("#ham-down")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, -1));
     if (hit("#ham-up")) return void tuneFrequency(hamStep(state.radio!.frequency_hz, 1));
     if (hit("#ham-go")) return hamManualGo();
@@ -1713,6 +1747,7 @@ function installDelegates(): void {
     else if (id === "fm-freq") fmManualGo();
     else if (id === "am-freq") amManualGo();
     else if (id === "apt-freq") aptManualGo();
+    else if (id === "sstv-freq") sstvManualGo();
     else if (id === "ham-freq") hamManualGo();
     else if (id === "rp-paste") fillRepeaterFromShorthand();
     else if (id === "aprs-msg") void sendAprsMsg();
@@ -2091,6 +2126,8 @@ function wizardHtml(): string {
       return amWizardHtml();
     case "apt":
       return aptWizardHtml();
+    case "sstv":
+      return sstvWizardHtml();
     case "frs":
       return frsWizardHtml() + voiceTextCard();
     case "ham":
@@ -2730,6 +2767,161 @@ function drawAptImage(): void {
     img.data[o + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
+}
+
+// --- SSTV (slow-scan TV) ---------------------------------------------
+
+interface SstvPrefs {
+  mode: string;
+  demod: "usb" | "lsb" | "fm";
+}
+function readSstvPrefs(): SstvPrefs {
+  try {
+    const raw = JSON.parse(localStorage.getItem("lanline.sstv") ?? "{}");
+    const mode = SSTV_MODES.includes(raw.mode) ? raw.mode : "auto";
+    const demod = ["usb", "lsb", "fm"].includes(raw.demod) ? raw.demod : "usb";
+    return { mode, demod };
+  } catch {
+    return { mode: "auto", demod: "usb" };
+  }
+}
+function writeSstvPrefs(p: SstvPrefs): void {
+  try {
+    localStorage.setItem("lanline.sstv", JSON.stringify(p));
+  } catch {
+    /* private mode */
+  }
+}
+
+function sstvWizardHtml(): string {
+  const r = state.radio!;
+  const mhz = (r.frequency_hz / 1e6).toFixed(4);
+  const mp = r.mode_params ?? {};
+  const curMode = String(mp.mode ?? "auto");
+  const curDemod = String(mp.demod ?? "usb");
+  const modeOpts = SSTV_MODES.map(
+    (m) => `<option value="${m}"${m === curMode ? " selected" : ""}>${m === "auto" ? "Auto (VIS)" : m}</option>`,
+  ).join("");
+  const demodOpts = (["usb", "lsb", "fm"] as const)
+    .map((d) => `<option value="${d}"${d === curDemod ? " selected" : ""}>${d.toUpperCase()}</option>`)
+    .join("");
+  const presets = SSTV_PRESETS.map(
+    ([label, , ], i) => `<button class="secondary" data-sstv-preset="${i}">${esc(label)}</button>`,
+  ).join(" ");
+  return `
+    <section class="card">
+      <h2>SSTV — slow-scan TV image</h2>
+      <p class="note" style="margin:0 0 10px">Analog picture over an audio
+      channel. Auto reads the VIS header; pick a mode by hand for a weak
+      signal that arrives without one (common on the ISS). HF is USB/LSB
+      (14.230 / 14.233 / 7.171 MHz …), 2 m and the ISS (145.800) are FM.</p>
+      <div class="dial">
+        <input id="sstv-freq" type="text" inputmode="decimal" value="${mhz}" />
+        <span class="dial-unit">MHz</span>
+        <button id="sstv-go">Tune</button>
+      </div>
+      <div class="sstv-tools">
+        <label>Mode <select id="sstv-mode">${modeOpts}</select></label>
+        <label>Demod <select id="sstv-demod">${demodOpts}</select></label>
+        <label>Slant <input id="sstv-slant" type="number" step="20" value="${Number(mp.slant_ppm ?? 0)}" /> ppm</label>
+        <button id="sstv-save" class="secondary">Save PNG</button>
+      </div>
+      <div class="sstv-presets">${presets}</div>
+      <div class="apt-wrap" style="margin-top:12px">
+        <canvas id="sstv-canvas" class="apt-canvas"></canvas>
+      </div>
+      <p class="note" id="sstv-status" style="margin:8px 0 0">${sstvStatusInner()}</p>
+    </section>`;
+}
+
+function sstvStatusInner(): string {
+  const s = state.sstv;
+  if (!s) {
+    return state.radio?.running ? "Listening — no picture yet." : "Start the receiver.";
+  }
+  const lock = s.locked ? ` · line ${s.line}/${s.height}` : "";
+  const done = s.frames > 0 ? ` · ${s.frames} frame${s.frames === 1 ? "" : "s"} done` : "";
+  return `${s.locked ? s.mode : "searching"}${lock}${done} · ${s.snr_db.toFixed(0)} dB`;
+}
+
+async function refreshSstvImage(): Promise<void> {
+  if (!state.client) return;
+  try {
+    sstvImg = await state.client.sstvImage(undefined, 8_000);
+    drawSstvImage();
+  } catch {
+    /* keep the last frame */
+  }
+}
+
+function drawSstvImage(): void {
+  const canvas = panels.querySelector<HTMLCanvasElement>("#sstv-canvas");
+  if (!canvas || !sstvImg || sstvImg.width === 0 || sstvImg.height === 0) return;
+  const { width, height, rgba } = sstvImg;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const img = ctx.createImageData(width, height);
+  img.data.set(rgba.subarray(0, Math.min(rgba.length, img.data.length)));
+  ctx.putImageData(img, 0, 0);
+}
+
+function sstvManualGo(): void {
+  const raw = panels.querySelector<HTMLInputElement>("#sstv-freq")?.value ?? "";
+  const mhz = parseFloat(raw);
+  if (Number.isFinite(mhz) && mhz > 0) void tuneFrequency(Math.round(mhz * 1e6));
+}
+
+async function onSstvSelect(): Promise<void> {
+  if (!state.client) return;
+  const mode = panels.querySelector<HTMLSelectElement>("#sstv-mode")?.value ?? "auto";
+  const demod = (panels.querySelector<HTMLSelectElement>("#sstv-demod")?.value ?? "usb") as SstvPrefs["demod"];
+  const slant = Number(panels.querySelector<HTMLInputElement>("#sstv-slant")?.value ?? 0) || 0;
+  writeSstvPrefs({ mode, demod });
+  try {
+    const radio = await state.client.patchRadio({ mode_params: { mode, demod, slant_ppm: slant } });
+    setState({ radio });
+    logLine(`sstv → ${mode} / ${demod.toUpperCase()}${slant ? ` / slant ${slant}` : ""}`);
+  } catch (e) {
+    logLine(`sstv set failed: ${e instanceof ApiError ? e.message : String(e)}`);
+  }
+}
+
+function applySstvPreset(i: number): void {
+  const p = SSTV_PRESETS[i];
+  if (!p || !state.client) return;
+  const [, hz, demod] = p;
+  writeSstvPrefs({ mode: readSstvPrefs().mode, demod });
+  void state.client
+    .patchRadio({ frequency_hz: hz, mode_params: { demod } })
+    .then((radio) => {
+      setState({ radio });
+      logLine(`sstv preset → ${p[0]}`);
+    })
+    .catch((e) => logLine(`sstv preset failed: ${e instanceof ApiError ? e.message : String(e)}`));
+}
+
+function saveSstvPng(): void {
+  const canvas = panels.querySelector<HTMLCanvasElement>("#sstv-canvas");
+  if (!canvas || canvas.width === 0) {
+    logLine("no SSTV picture to save yet");
+    return;
+  }
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const m = state.sstv?.mode?.replace(/\s+/g, "") ?? "sstv";
+    a.download = `sstv-${m}-${new Date().toISOString().replace(/[:.]/g, "").slice(0, 15)}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }, "image/png");
 }
 
 // --- radar scope (shared by ADS-B + AIS) -------------------------------

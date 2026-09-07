@@ -28,6 +28,7 @@ pub mod net;
 pub mod radio;
 pub mod registry;
 pub mod sessions;
+pub mod sstv;
 pub mod state;
 pub mod tls;
 pub mod util;

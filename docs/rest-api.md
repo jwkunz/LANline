@@ -374,6 +374,17 @@ the client uses to render controls and the server uses to validate
     }
   },
   {
+    "id": "sstv",
+    "name": "SSTV (slow-scan TV — HF SSB / 2 m FM / ISS 145.800)",
+    "tx_capable": false,
+    "params": {
+      "deviation_hz":  { "type": "number", "default": 5000,  "min": 2000,  "max": 15000, "unit": "Hz" },
+      "channel_bw_hz": { "type": "number", "default": 16000, "min": 6000,  "max": 40000, "unit": "Hz" },
+      "bfo_offset_hz": { "type": "number", "default": 0,     "min": -3000, "max": 3000,  "unit": "Hz" },
+      "slant_ppm":     { "type": "number", "default": 0,     "min": -2000, "max": 2000,  "unit": "ppm" }
+    }
+  },
+  {
     "id": "adsb",
     "name": "ADS-B (1090 MHz aircraft)",
     "tx_capable": false,
@@ -885,6 +896,44 @@ station directories).
 Channel A (visible/IR depending on the satellite and time of day) occupies
 columns `0..909`, channel B `909..1818`. No PNG/image crate involved on
 either end — the web client reads this straight into a canvas `ImageData`.
+
+---
+
+## SSTV image export
+
+Populated only while the `sstv` mode pipeline runs; `Stop radio` +
+`Start radio` starts a fresh capture. Unauthenticated, read-only.
+
+The `sstv` mode's numeric params are in the `/modes` catalog above; it also
+takes two **string** `mode_params` the web client sets directly:
+
+- `demod` — `"usb"` (default), `"lsb"`, or `"fm"`. FM for 2 m / ISS
+  (145.800 MHz); USB/LSB for HF.
+- `mode` — `"auto"` (default; decode the VIS header) or a forced decoder
+  mode: `robot36`, `scottie1`, `scottie2`, `scottiedx`, `martin1`,
+  `martin2`, `pd120`, `pd180`. Forcing a mode starts a picture on the next
+  sync when no readable VIS arrives (common on the ISS).
+
+### `GET /api/v1/sstv/status`
+
+```json
+{ "width": 320, "height": 256, "mode": "Scottie 1", "line": 148,
+  "frames": 1, "snr_db": -18.3, "locked": true }
+```
+
+`locked` is true while a picture is being painted; `line` is the current
+row of `height`; `frames` counts completed pictures.
+
+### `GET /api/v1/sstv/image`
+
+Binary (`content-type: application/octet-stream`):
+
+```text
+[u32 width LE][u32 height LE][row-major RGBA bytes, width*height*4]
+```
+
+Unfilled rows are transparent. The client reads it straight into a canvas
+`ImageData`; a "Save PNG" button exports the canvas.
 
 ---
 
